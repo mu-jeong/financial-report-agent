@@ -1,0 +1,19 @@
+# Virtual Environment (venv) 종속성 패키지 목록
+# 1. python -m pip install --upgrade pip
+# 2. pip install -r requirements.txt
+
+requests
+beautifulsoup4
+PyMuPDF
+langchain
+langchain-google-genai
+langchain-community
+faiss-cpu
+python-dotenv
+flashrank
+onnxruntime==1.15.1
+numpy<2
+langgraph
+pytest
+pytest-cov
+sqlglot
