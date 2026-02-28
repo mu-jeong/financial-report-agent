@@ -6,6 +6,7 @@ from src.nodes.query_rewrite import query_rewrite_node
 from src.nodes.router import router_node
 from src.nodes.rdb import rdb_sql_gen_node, rdb_execute_node
 from src.nodes.vectordb import vectordb_node
+from src.nodes.stock_price import stock_price_node
 
 def build_graph():
     workflow = StateGraph(State)
@@ -15,6 +16,7 @@ def build_graph():
     workflow.add_node("rdb_sql_gen_node", rdb_sql_gen_node)
     workflow.add_node("rdb_execute_node", rdb_execute_node)
     workflow.add_node("vectordb_node", vectordb_node)
+    workflow.add_node("stock_price_node", stock_price_node)
 
     workflow.add_edge(START, "query_rewrite")
     workflow.add_edge("query_rewrite", "router")
@@ -23,10 +25,13 @@ def build_graph():
         target = state["route"]
         if target == "rdb":
             return "rdb_sql_gen_node"
+        elif target == "stock_price":
+            return "stock_price_node"
         return "vectordb_node"
 
     workflow.add_conditional_edges("router", decide_next, {
         "rdb_sql_gen_node": "rdb_sql_gen_node",
+        "stock_price_node": "stock_price_node",
         "vectordb_node": "vectordb_node"
     })
 
@@ -34,6 +39,7 @@ def build_graph():
 
     workflow.add_edge("vectordb_node", END)
     workflow.add_edge("rdb_execute_node", END)
+    workflow.add_edge("stock_price_node", END)
 
     memory = MemorySaver()
     app = workflow.compile(checkpointer=memory)

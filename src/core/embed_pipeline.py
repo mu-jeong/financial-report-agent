@@ -35,6 +35,10 @@ import sys
 import time
 import fitz          # PyMuPDF — BBox 기반 표 제외 텍스트 추출
 
+# 프로젝트 루트 경로를 참조할 수 있도록 설정
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+
 # stdout 라인 버퍼링 해제
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
@@ -207,8 +211,10 @@ def node_embed_and_store(state: dict, embeddings_fn: GoogleGenerativeAIEmbedding
     logger.info(f"  [3/3] 임베딩 중... ({len(docs)}개 청크)")
     vectors = [[float(x) for x in v] for v in embeddings_fn.embed_documents(texts)]
     # ② FAISS 로드 또는 새로 생성
+    # 폴더가 아니라 실제 index.faiss 파일이 있는지 확인 (폴더만 있고 파일이 없는 경우 방어)
     text_embeddings = list(zip(texts, vectors))   # List[(text, vector)]
-    if os.path.exists(config.FAISS_DIR):
+    faiss_index_file = os.path.join(config.FAISS_DIR, "index.faiss")
+    if os.path.exists(faiss_index_file):
         logger.info(f"  [3/3] 기존 FAISS 인덱스 로드 중...")
         faiss_store = FAISS.load_local(
             config.FAISS_DIR, embeddings_fn,
@@ -217,6 +223,7 @@ def node_embed_and_store(state: dict, embeddings_fn: GoogleGenerativeAIEmbedding
         faiss_store.add_embeddings(text_embeddings, metadatas=metadatas)
     else:
         logger.info(f"  [3/3] FAISS 인덱스 신규 생성 중...")
+        os.makedirs(config.FAISS_DIR, exist_ok=True)
         faiss_store = FAISS.from_embeddings(
             text_embeddings, embeddings_fn, metadatas=metadatas
         )

@@ -11,18 +11,16 @@ ROUTER_PROMPT = """
 [데이터베이스 스키마]
 테이블 이름: reports
 컬럼:
-- id (리포트 고유 ID)
 - report_type (리포트 종류: company, industry, economy)
 - report_date (발행일, YYYY-MM-DD 형식)
 - target_name (대상명, 예: 삼성전자, 자동차, null 등)
 - title (리포트 제목)
 - broker (증권사)
-- file_name (PDF 파일명)
-- is_embedded (벡터화 여부, 0 또는 1)
 
 [판단 기준]
 - 특정 종목의 리포트 목록, 개수, 가장 최근 리포트 발간일, 리포트 제목 등 "메타데이터"만으로 답변 가능한 경우: 'rdb'
 - 특정 종목의 실적 전망, 본문 내용, 목표 주가, 업황 분석 등 "문서 내용 분석"이 필요한 경우: 'vectordb'
+- 특정 회사의 현재 주가 여부, 주가 동향, 상승/하락 등 "주식 가격(주가)" 조회가 필요한 경우: 'stock_price'
 
 [질문]
 {question}
@@ -31,7 +29,7 @@ ROUTER_PROMPT = """
 RDB_SQL_GEN_PROMPT = """
 다음 SQLite 데이터베이스 스키마를 참고하여 사용자의 질문에 답하기 위한 SQL SELECT 쿼리를 작성하세요.
 테이블 이름: reports
-컬럼: id, report_type, report_date, target_name, title, broker, file_name, is_embedded
+컬럼: report_type, report_date, target_name, title, broker
 
 오직 SQL 쿼리만 출력하세요. 마크다운(` ```sql `) 기호나 다른 설명은 절대 포함하지 마세요.
 오늘 날짜는 DATE('now')로 사용할 수 있습니다.
@@ -69,6 +67,17 @@ VECTORDB_PROMPT = """당신은 증권사 리포트를 기반으로 질문에 답
 FALLBACK_PROMPT = """주어진 리포트 데이터베이스에서는 사용자의 질문에 대한 관련 문서를 찾을 수 없습니다.
 절대로 훈련된 일반적인 지식이나 추측으로 답변하지 마세요. 
 오직 '제공된 데이터베이스에서 관련된 문서를 찾을 수 없습니다.'라는 취지로 정중하게 안내하는 답변만 1~2문장으로 출력하세요.
+
+[질문]
+{question}
+
+[답변]"""
+
+STOCK_PRICE_PROMPT = """당신은 주식 시장 가격 데이터를 바탕으로 사용자의 질문에 답변하는 금융 전문 AI 어시스턴트입니다.
+아래 제공된 [주가 정보 데이터]를 바탕으로 사용자의 [질문]에 상세하고 명확하게 답변해 주세요.
+
+[주가 정보 데이터]
+{stock_price_data}
 
 [질문]
 {question}

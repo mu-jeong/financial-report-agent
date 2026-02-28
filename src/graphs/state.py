@@ -9,5 +9,6 @@ class State(TypedDict):
     sql_query: Optional[str]        # RDB에서 사용된 SQL
     rdb_result: Optional[str]       # RDB 조회 결과
     faiss_context: Optional[str]    # VectorDB에서 검색된 컨텍스트
+    stock_price_result: Optional[str]   # 주가 데이터 조회 결과
     rerank_info: Optional[list]     # 재정렬된 문서/검색된 문서 정보 로깅용
     generation: Optional[str]       # 최종 답변

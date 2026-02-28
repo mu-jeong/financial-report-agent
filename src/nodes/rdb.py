@@ -34,18 +34,20 @@ def sql_guardrail(func):
             parsed = sqlglot.parse_one(query, dialect='sqlite')
             allowed_tables = {"reports"}
             
+            # 1. 대상 테이블 검사 (reports 테이블만 허용)
             for table in parsed.find_all(sqlglot.exp.Table):
                 if table.name.lower() not in allowed_tables:
                     logger.warning(f"[Guardrail] 🚨 허가되지 않은 테이블 접근 시도: {table.name}")
                     return f"Error: 가드레일 정책에 의해 허가되지 않은 테이블({table.name}) 접근이 차단되었습니다."
             
+            # 2. SELECT 구문 유무 구조 검사 (CUD 스크립트 실행 방지)
             if not isinstance(parsed, sqlglot.exp.Select):
                 logger.warning(f"[Guardrail] 🚨 SELECT 외의 쿼리 실행 시도 차단")
                 return "Error: 가드레일 정책에 의해 데이터 조작(CUD) 명령은 차단되었습니다."
                 
         except Exception as e:
             logger.warning(f"[Guardrail] 🚨 쿼리 형태 파싱 실패 (잠재적 공격 차단): {e}")
-            return f"Error: 쿼리 구문 분석 실패로 인해 보안상 실행이 차단되었습니다."
+            return f"Error: 쿼리 구문 분석 실패로 인해 보안상 실행이 차단되었습니다. ({str(e)})"
             
         return func(query, *args, **kwargs)
     return wrapper
