@@ -18,22 +18,26 @@
 
 ```
 finance_llm/
-├── cli/                 # 터미널 기반 사용자 인터페이스 (app.py)
-├── configs/             # 설정, 필터링 규칙 및 프롬프트 (config.py, filter_configs.py, prompts.py 등)
-├── graphs/              # LangGraph 흐름 조립 및 상태 정의 (main_graph.py, state.py)
-├── nodes/               # LangGraph의 개별 비즈니스 로직(라우팅, 검색, SQL 생성 등) 모듈
-├── utils/               # 공통 유틸리티 (text_filters.py, ranker.py 등)
-├── docs/                # 시스템 설계 철학 및 연동 가이드문서
-├── tools/               # 개발 및 디버깅 도구
-├── report_crawler.py    # (Optional) 네이버 금융 리포트 수집 도구
-├── db_manager.py        # SQLite RDB 관리 (메타데이터 및 임베딩 상태 추적)
-├── embed_pipeline.py    # PDF 파싱 → 텍스트 정제 → 임베딩 → FAISS 저장
-├── search.py            # 벡터 DB 검색 엔트리포인트 (CLI 실행 진입점)
-├── downloaded/          # 분석 대상 PDF 저장 폴더
-├── faiss_db/            # FAISS 인덱스 저장 폴더 (자동 생성)
-├── reports.db           # SQLite DB (자동 생성)
-├── requirements.txt     # 필요 패키지 목록
-└── .env.example         # 환경 변수 템플릿
+├── data/                 # 데이터 저장소 (다운로드 리포트, DB, 벡터 인덱스)
+│   ├── downloaded/       # 분석 대상 PDF 저장 폴더
+│   ├── vector_db/        # FAISS 인덱스 저장 폴더 (자동 생성)
+│   └── reports.db        # SQLite DB (자동 생성)
+├── src/                  # 메인 비즈니스 로직
+│   ├── configs/          # 설정, 필터링 규칙 및 프롬프트
+│   ├── core/             # 핵심 파이프라인 (db_manager.py, embed_pipeline.py 등)
+│   ├── graphs/           # LangGraph 흐름 조립 및 상태 정의
+│   ├── nodes/            # LangGraph의 개별 비즈니스 로직 모듈
+│   ├── utils/            # 공통 유틸리티 (text_filters.py, ranker.py 등)
+│   └── search.py         # 검색 로직 처리
+├── apps/                 # 사용자 인터페이스 엔트리포인트
+│   ├── cli/              # 터미널 기반 CLI (app.py)
+│   └── gui/              # Streamlit 기반 웹 앱 (app.py)
+├── scripts/              # 유틸리티 및 디버깅 스크립트
+├── docs/                 # 시스템 설계 철학 및 연동 가이드 문서
+├── logs/                 # 애플리케이션 로그
+├── tests/                # 테스트 코드
+├── requirements.txt      # 필요 패키지 목록
+└── .env.example          # 환경 변수 템플릿
 ```
 
 ---
@@ -89,18 +93,18 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 ### Step 1. 리포트 파일 준비 (⚠️ 파일명 규칙 엄수)
 
-분석하고자 하는 PDF 파일을 `downloaded/` 폴더에 넣습니다. 본 파이프라인은 파일명을 기준으로 메타데이터를 파싱하므로 아래 **규칙을 반드시 지켜야 합니다.**
+분석하고자 하는 PDF 파일을 `data/downloaded/` 폴더에 넣습니다. 본 파이프라인은 파일명을 기준으로 메타데이터를 파싱하므로 아래 **규칙을 반드시 지켜야 합니다.**
 
 - **파일명 규칙:** `[유형]_[YYYY-MM-DD]_[대상]_[증권사]_[제목].pdf`
 - **예시:** `company_2024-02-21_삼성전자_미래에셋증권_HBM 공급 확대 전망.pdf`
 - **유형:** `company` (종목), `industry` (산업), `economy` (경제)
 - 경제 리포트처럼 특정 대상이 없는 경우 대상 부분에 `null` 등을 기재합니다.
 
-> **Note:** `report_crawler.py`를 사용하여 네이버 금융에서 자동으로 수집할 수도 있으나 이는 선택 사항(Optional)입니다. 다른 경로로 수집한 파일이라도 위 규칙대로 이름만 지정되어 있으면 정상적으로 처리됩니다.
+> **Note:** `src/core/report_crawler.py`를 사용하여 네이버 금융에서 자동으로 수집할 수도 있으나 이는 선택 사항(Optional)입니다. 다른 경로로 수집한 파일이라도 위 규칙대로 이름만 지정되어 있으면 정상적으로 처리됩니다.
 > 
 > 💡 **(현재 설정) 크롤러 수집 제한 알림:**
-> `report_crawler.py` 실행 시 빠르고 가벼운 테스트 환경을 위해 **"가장 최근 평일 단 하루치 리포트"**만 다운로드하도록 기본 설정되어 있습니다.
-> 더 많은 기간의 데이터를 수집하고 싶다면 `report_crawler.py` 최하단 실행부의 주석을 참고하여 `target_date_str = "YYYY-MM-DD"` 형태의 특정 과거 날짜를 지정하거나 로직을 수정하세요.
+> `src/core/report_crawler.py` 실행 시 빠르고 가벼운 테스트 환경을 위해 **"가장 최근 평일 단 하루치 리포트"**만 다운로드하도록 기본 설정되어 있습니다.
+> 더 많은 기간의 데이터를 수집하고 싶다면 `src/core/report_crawler.py` 최하단 실행부의 주석을 참고하여 `target_date_str = "YYYY-MM-DD"` 형태의 특정 과거 날짜를 지정하거나 로직을 수정하세요.
 
 ---
 
@@ -109,15 +113,15 @@ GEMINI_API_KEY=your_gemini_api_key_here
 준비된 PDF들을 텍스트로 변환하고 벡터 DB에 저장합니다.
 
 ```bash
-python embed_pipeline.py
+python -m src.core.embed_pipeline
 ```
 
-- 파이프라인은 `downloaded/` 폴더를 스캔하여 새로운 파일을 발견하면 DB에 등록하고 처리를 시작합니다.
+- 파이프라인은 `data/downloaded/` 폴더를 스캔하여 새로운 파일을 발견하면 DB에 등록하고 처리를 시작합니다.
 - 표 영역 제외, 재무 레이블 제거 등 금융 리포트에 특화된 전처리가 자동으로 수행됩니다.
 
 > 💡 **(현재 설정) 임베딩 10건 제한 (테스트 모드) 안내:**
-> 다운로드된 PDF가 수십 건 이상일 경우 단기간 내 API 허용량(Rate Limit)을 초과할 수 있어, 현재 `configs/config.py` 파일 내에 `TEST_LIMIT = 10` (최대 10개만 임베딩)으로 안전 설정이 걸려있습니다.
-> **제한 해제 방법:** 토큰을 사용하는데 금전적인 제약이 적다면, `configs/config.py`에서 `TEST_LIMIT = 0`으로 변경하면 폴더 내의 **모든 리포트**를 개수 제한 없이 한 번에 임베딩할 수 있습니다.
+> ডাউন로드된 PDF가 수십 건 이상일 경우 단기간 내 API 허용량(Rate Limit)을 초과할 수 있어, 현재 `src/configs/config.py` 파일 내에 `TEST_LIMIT = 10` (최대 10개만 임베딩)으로 안전 설정이 걸려있습니다.
+> **제한 해제 방법:** 토큰을 사용하는데 금전적인 제약이 적다면, `src/configs/config.py`에서 `TEST_LIMIT = 0`으로 변경하면 폴더 내의 **모든 리포트**를 개수 제한 없이 한 번에 임베딩할 수 있습니다.
 
 ---
 
@@ -130,7 +134,7 @@ python embed_pipeline.py
 
 ```bash
 # 가상환경이 켜진 상태에서 아래 명령어 실행
-python -m streamlit run gui/app.py
+python -m streamlit run apps/gui/app.py
 ```
 
 > **💡 처음 실행 빈 화면 이메일 입력 관련 안내:**
@@ -143,7 +147,7 @@ python -m streamlit run gui/app.py
 명령어 환경에 익숙하거나 시스템 리소스를 최소화하여 파이프라인을 테스트하고 싶을 때 사용합니다.
 
 ```bash
-python search.py
+python apps/cli/app.py
 ```
 
 - 스크립트를 실행하면 터미널에 대화형 프롬프트가 나타납니다.
@@ -157,7 +161,7 @@ python search.py
 - **이중 보안 가드레일 (Guardrail):** 데코레이터(`@sql_guardrail`)와 `sqlglot` 라이브러리를 통해 LLM이 생성한 위험한 SQL 명령어를 추상 구문 트리(AST) 레벨에서 사전 차단하고, DB 연결을 읽기 전용(`?mode=ro`)으로 강제하는 다중 보안을 적용하며, Pydantic Validator로 라우팅 응답 포맷을 검증합니다.
 
 > **💡 Reranking (문서 재평가) 기능 활성화 방법**
-> 기본적으로 빠른 응답 속도를 위해 Reranker 모델이 비활성화 되어 있습니다. 더 정확하고 문맥에 맞는 문서를 찾고 싶다면 `search.py` 파일 상단의 `USE_RERANKER = False` 를 `True` 로 변경하세요. (최초 1회 실행 시 모델 다운로드로 인해 1~2분 정도 소요될 수 있습니다.)
+> 기본적으로 빠른 응답 속도를 위해 Reranker 모델이 비활성화 되어 있습니다. 더 정확하고 문맥에 맞는 문서를 찾고 싶다면 `src/configs/config.py` 파일 상단의 `USE_RERANKER = False` 를 `True` 로 변경하세요. (최초 1회 실행 시 모델 다운로드로 인해 1~2분 정도 소요될 수 있습니다.)
 
 ---
 
@@ -169,11 +173,11 @@ python search.py
    - 가장 근본적인 방어를 위해 LLM이 RDB를 조회할 때 사용하는 SQLite 연결 정보를 읽기 전용(`?mode=ro`)으로 강제하여 물리적인 데이터 변조(UPDATE, DELETE, DROP 등)를 원천 차단합니다.
    - 이에 더해, `sqlglot` 모듈을 통한 애플리케이션 계층의 가드레일을 적용해 LLM이 작성한 쿼리를 **추상 구문 트리(AST)로 완벽 파싱**하여 검증합니다. 허락되지 않은 내부 테이블(`sqlite_master` 등) 접근을 차단하고 오직 `SELECT` 명령만 통과시키므로 난독화(Obfuscation)된 악의적 SQL 공격도 사전에 막아냅니다.
 2. **배치(Batch) 처리를 통한 디스크 I/O 병목 제거**
-   - 수백 개의 리포트를 DB에 동기화할 때 반복되는 `sqlite3.connect()` 열고 닫기로 인한 병목을 해소했습니다. (`db_manager.py`)
+   - 수백 개의 리포트를 DB에 동기화할 때 반복되는 `sqlite3.connect()` 열고 닫기로 인한 병목을 해소했습니다. (`src/core/db_manager.py`)
    - 파일을 순회하며 메모리(List)에서 메타데이터만 미리 파싱한 후, **단일 트랜잭션의 `.executemany()`**를 활용해 DB 쓰기(Write) 작업을 한 번에 처리합니다.
 3. **중앙 집중형 로깅 시스템 (Centralized Logging)**
-   - 단순한 `print()` 출력을 배제하고, `configs/config.py`에 파이썬 내장 `logging` 모듈을 전역으로 설정했습니다.
-   - 터미널(Stream) 진행 상황과 함께, 모든 동작과 구체적인 에러 이력이 `finance_llm.log` 파일에 영구 기록되어 백그라운드 서버 모드로 구동할 때의 관찰성(Observability)을 확보했습니다.
+   - 단순한 `print()` 출력을 배제하고, `src/configs/config.py`에 파이썬 내장 `logging` 모듈을 전역으로 설정했습니다.
+   - 터미널(Stream) 진행 상황과 함께, 모든 동작과 구체적인 에러 이력이 `logs/finance_llm.log` 파일에 영구 기록되어 백그라운드 서버 모드로 구동할 때의 관찰성(Observability)을 확보했습니다.
 
 ---
 
@@ -183,10 +187,10 @@ python search.py
 
 ```bash
 # 1. FAISS 인덱스 삭제 (PowerShell 기준)
-Remove-Item -Recurse -Force faiss_db
+Remove-Item -Recurse -Force data/vector_db
 
 # 2. SQLite 임베딩 상태 초기화
-python -c "import sqlite3; con=sqlite3.connect('reports.db'); con.execute('UPDATE reports SET is_embedded=0'); con.commit(); print('완료')"
+python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('UPDATE reports SET is_embedded=0'); con.commit(); print('완료')"
 ```
 
 ---
@@ -213,6 +217,6 @@ python -c "import sqlite3; con=sqlite3.connect('reports.db'); con.execute('UPDAT
 - [x] **GUI 환경 지원:** 현재의 CLI(터미널) 방식을 넘어, 나중에는 Streamlit 등을 활용해 누구나 쉽게 접근할 수 있는 사용자 인터페이스(UI) 개발
 - [ ] **Agent 및 툴 콜링 (Tool Calling):** AI가 스스로 판단하여 리포트 외의 최신·정량적 데이터를 수집하는 외부 API 호출 도입
   - **실시간 주가 조회 API 연결:** 리포트 발행일과 현재 시점 간의 가격 괴리를 보완하기 위한 주가 연동
-- [ ] **동시성 처리 (Concurrency):** `report_crawler.py`와 `embed_pipeline.py`에 대해 `asyncio`/`aiohttp` 또는 Celery/RQ 등을 이용한 비동기 백그라운드 워커 큐 도입을 통한 대규모 파일 파싱 속도 향상
+- [ ] **동시성 처리 (Concurrency):** `src/core/report_crawler.py`와 `src/core/embed_pipeline.py`에 대해 `asyncio`/`aiohttp` 또는 Celery/RQ 등을 이용한 비동기 백그라운드 워커 큐 도입을 통한 대규모 파일 파싱 속도 향상
 
 ---

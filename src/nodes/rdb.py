@@ -6,9 +6,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from configs.config import GEMINI_API_KEY, GENERATION_MODEL, DB_PATH, get_logger
-from configs.prompts import RDB_SQL_GEN_PROMPT, RDB_ANSWER_PROMPT
-from graphs.state import State
+from src.configs.config import GEMINI_API_KEY, GENERATION_MODEL, DB_PATH, get_logger
+from src.configs.prompts import RDB_SQL_GEN_PROMPT, RDB_ANSWER_PROMPT
+from src.graphs.state import State
 
 logger = get_logger(__name__)
 

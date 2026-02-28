@@ -2,9 +2,9 @@ from pydantic import BaseModel, Field, field_validator
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 
-from configs.config import GEMINI_API_KEY, GENERATION_MODEL, get_logger
-from configs.prompts import ROUTER_PROMPT
-from graphs.state import State
+from src.configs.config import GEMINI_API_KEY, GENERATION_MODEL, get_logger
+from src.configs.prompts import ROUTER_PROMPT
+from src.graphs.state import State
 
 logger = get_logger(__name__)
 

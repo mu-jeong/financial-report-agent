@@ -29,9 +29,9 @@
 
 본 프로젝트는 크게 "데이터 적재 파이프라인(Ingestion)"과 "데이터 검색 파이프라인(Retrieval & Search)" 두 축으로 분리되어 있습니다.
 
-### A. 데이터 적재 파이프라인 (`embed_pipeline.py`)
+### A. 데이터 적재 파이프라인 (`src/core/embed_pipeline.py`)
 
-1. **파일 스캔 & 메타 파싱:** `downloaded/` 폴더 내 새로운 PDF 파일을 확인하고 파일명 규약에 따라 타겟, 발행일, 증권사를 파싱합니다.
+1. **파일 스캔 & 메타 파싱:** `data/downloaded/` 폴더 내 새로운 PDF 파일을 확인하고 파일명 규약에 따라 타겟, 발행일, 증권사를 파싱합니다.
 2. **배치 Insert (병목 제거):** 수많은 파일의 메타데이터를 메모리상에서 모두 파싱한 후, 단일 DB Connection을 통해 `.executemany()` 배치 연산으로 SQLite RDB에 동기화하여 I/O 병목을 제거합니다.
 3. **PDF 파싱 & 필터링 (텍스트 정제):**
    - BBox(경계 상자) 좌표 기반으로 **표(Table)** 영역을 물리적으로 절단합니다.
@@ -41,16 +41,16 @@
 5. **벡터 임베딩:** Gemini 임베딩 모델을 호출하여 텍스트를 고차원 숫자(Vector)로 바꿉니다.
 6. **저장 & 동기화:** FAISS DB에 인덱스로 저장하고, SQLite `is_embedded=1` 로 상태를 업데이트하여 중복 처리를 방지합니다.
 
-### B. 검색 및 대화 파이프라인 (모듈화 구조: `graphs/`, `nodes/`, `cli/`)
+### B. 검색 및 대화 파이프라인 (모듈화 구조: `src/graphs/`, `src/nodes/`, `apps/cli/`, `apps/gui/`)
 
 LangGraph의 상태 전환(State Machine)을 사용하여, 무분별하게 Vector DB를 뒤지지 않고 사용자의 **질문 의도에 따라 똑똑하게 라우팅(Routing)**하는 아키텍처를 가집니다. 단일 파일의 비중을 낮추고 관심사의 분리(SoC)를 위해 역할을 컴포넌트 단위로 분리했습니다.
 
-1. **사용자 쿼리(질문) 입력 (`cli/app.py`):** 터미널 루프를 통해 입력값을 받습니다.
-2. **Router Node (`nodes/router.py`):** 사용자의 질의가 "메타데이터(개수, 가장 최근 리포트 등)"만 필요한 질문인지 "문서 본문 내용(목표 주가, 업황 분석)"을 묻는지 판단합니다. (Pydantic 구조체 변환을 통해 LLM의 변덕스러운 출력을 엄격히 통제합니다)
-4. **멀티 턴 대화 - Query Rewrite (`nodes/query_rewrite.py`):** 이전 질문/답변의 맥락(Chat History)을 메모리에 담아두고, 후속 질문이 들어오면 `query_rewrite_node`를 거쳐 검색에 적합한 완전한 문장으로 쿼리를 재작성합니다.
-5. **분기 진행 (Conditional Edges - `graphs/main_graph.py`):**
-   *   👉 **경로 1 (`nodes/rdb.py`):** 단순 구조적 정보 요약 시. LLM이 자연어를 **SQL로 변환**합니다. 이때 쿼리는 `sqlglot`을 사용한 AST 파싱 가드레일을 거쳐 제한된 테이블 접근과 `SELECT` 문법 검증을 완수하고, SQLite 커넥션을 읽기 전용(`?mode=ro`)으로 강제하는 이중 보안망을 통과해야만 실행됩니다.
-   *   👉 **경로 2 (`nodes/vectordb.py`):** 기업 분석 본문 파악 시. FAISS 에서 코사인 유사도로 Top-K 문서 조각을 불러오고, 선택적으로 FlashRank (Cross-Encoder, `utils/ranker.py` 싱글톤 패턴) 모델로 재정렬(Rerank)하여 가장 관련 높은 단락 3개만 LLM에게 컨텍스트(Context)로 던져준 뒤 분석 답변을 생성합니다.
+1. **사용자 쿼리(질문) 입력 (`apps/cli/app.py` 또는 `apps/gui/app.py`):** 터미널 루프나 UI를 통해 입력값을 받습니다.
+2. **Router Node (`src/nodes/router.py`):** 사용자의 질의가 "메타데이터(개수, 가장 최근 리포트 등)"만 필요한 질문인지 "문서 본문 내용(목표 주가, 업황 분석)"을 묻는지 판단합니다. (Pydantic 구조체 변환을 통해 LLM의 변덕스러운 출력을 엄격히 통제합니다)
+4. **멀티 턴 대화 - Query Rewrite (`src/nodes/query_rewrite.py`):** 이전 질문/답변의 맥락(Chat History)을 메모리에 담아두고, 후속 질문이 들어오면 `query_rewrite_node`를 거쳐 검색에 적합한 완전한 문장으로 쿼리를 재작성합니다.
+5. **분기 진행 (Conditional Edges - `src/graphs/main_graph.py`):**
+   *   👉 **경로 1 (`src/nodes/rdb.py`):** 단순 구조적 정보 요약 시. LLM이 자연어를 **SQL로 변환**합니다. 이때 쿼리는 `sqlglot`을 사용한 AST 파싱 가드레일을 거쳐 제한된 테이블 접근과 `SELECT` 문법 검증을 완수하고, SQLite 커넥션을 읽기 전용(`?mode=ro`)으로 강제하는 이중 보안망을 통과해야만 실행됩니다.
+   *   👉 **경로 2 (`src/nodes/vectordb.py`):** 기업 분석 본문 파악 시. FAISS 에서 코사인 유사도로 Top-K 문서 조각을 불러오고, 선택적으로 FlashRank (Cross-Encoder, `src/utils/ranker.py` 싱글톤 패턴) 모델로 재정렬(Rerank)하여 가장 관련 높은 단락 3개만 LLM에게 컨텍스트(Context)로 던져준 뒤 분석 답변을 생성합니다.
 6. **스트리밍 출력:** LLM이 생각하는 즉시 터미널 창(또는 GUI)에 타자기처럼 실시간 텍스트 출력을 수행합니다.
 
 ---
@@ -58,7 +58,7 @@ LangGraph의 상태 전환(State Machine)을 사용하여, 무분별하게 Vecto
 ## 🛡️ 3. 주요 개발 철학과 차별점
 
 *   **RAG 정확도의 핵심은 전처리(Pre-processing):**
-    대규모 LLM보다 더 중요한 것은 "깨끗한 컨텍스트(Context)를 제공하는 것"이라는 철학 아래, PyMuPDF의 필터링 모듈(`filter_configs.py`)을 정교하게 고도화했습니다. 로컬 디바이스에서는 표(Table) 이해 알고리즘보단 표를 과감히 버리는 것이 할루시네이션(환각) 예방에 타당하다고 판단했습니다.
+    대규모 LLM보다 더 중요한 것은 "깨끗한 컨텍스트(Context)를 제공하는 것"이라는 철학 아래, PyMuPDF의 필터링 모듈(`src/configs/filter_configs.py`)을 정교하게 고도화했습니다. 로컬 디바이스에서는 표(Table) 이해 알고리즘보단 표를 과감히 버리는 것이 할루시네이션(환각) 예방에 타당하다고 판단했습니다.
 *   **Dual-Storage (이중 저장소 교차 검증 구조):**
     RAG가 가진 "파일에 대해 질문하면 Vector DB에만 의존하는 현상"을 해결하기 위해 RDB를 도입하여 구조적 메타데이터(증권사, 기간)를 하드 라우팅 시켰습니다.
 *   **1인 로컬 시스템의 한계를 극복하는 엔지니어링:**

@@ -27,7 +27,7 @@ Vector DB 연동 흐름:
 import os
 import sqlite3
 from datetime import datetime
-from configs.config import DB_PATH, SAVE_DIR, get_logger
+from src.configs.config import DB_PATH, SAVE_DIR, get_logger
 
 logger = get_logger(__name__)
 

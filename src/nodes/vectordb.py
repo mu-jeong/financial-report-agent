@@ -5,10 +5,10 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 
-from configs.config import GEMINI_API_KEY, EMBEDDING_MODEL, GENERATION_MODEL, FAISS_DIR, SEARCH_TOP_K, USE_RERANKER, get_logger
-from configs.prompts import VECTORDB_PROMPT
-from graphs.state import State
-from utils.ranker import get_ranker
+from src.configs.config import GEMINI_API_KEY, EMBEDDING_MODEL, GENERATION_MODEL, FAISS_DIR, SEARCH_TOP_K, USE_RERANKER, get_logger
+from src.configs.prompts import VECTORDB_PROMPT
+from src.graphs.state import State
+from src.utils.ranker import get_ranker
 
 logger = get_logger(__name__)
 

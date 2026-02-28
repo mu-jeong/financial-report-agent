@@ -4,10 +4,10 @@ import uuid
 import streamlit as st
 
 # 모듈 경로 추가 (finance_llm 패키지 접근)
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from graphs.main_graph import graph_app
-from configs.config import SEARCH_TOP_K
+from src.graphs.main_graph import graph_app
+from src.configs.config import SEARCH_TOP_K
 
 # 1. 페이지 초기 설정
 st.set_page_config(
@@ -74,7 +74,7 @@ for msg in current_thread["messages"]:
         st.markdown(msg["content"])
 
 # 5. 사용자 채팅 입력부
-if user_query := st.chat_input("질문을 입력해주세요... (ex: 최근 발행된 테슬라 리포트 요약해줘)"):
+if user_query := st.chat_input("질문을 입력해주세요... (ex: 최근 발행된 현대차 리포트 요약해줘)"):
     
     # "새로운 대화"라는 이름이라면, 사용자의 첫 질문 내용으로 방 제목 자동 변경
     if current_thread["name"] in ["새로운 대화"] or current_thread["name"].startswith("대화 "):

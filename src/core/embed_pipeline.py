@@ -45,9 +45,9 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from db_manager import init_db, sync_from_directory, fetch_unembedded, mark_embedded
-from configs import config
-from utils.text_filters import is_sidebar_block, is_noise_line, strip_compliance
+from src.core.db_manager import init_db, sync_from_directory, fetch_unembedded, mark_embedded
+from src.configs import config
+from src.utils.text_filters import is_sidebar_block, is_noise_line, strip_compliance
 
 logger = config.get_logger(__name__)
 

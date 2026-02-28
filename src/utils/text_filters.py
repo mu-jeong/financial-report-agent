@@ -1,5 +1,5 @@
 import re
-from configs.filter_configs import (
+from src.configs.filter_configs import (
     _NUMERIC_TOKEN, _SIDEBAR_MARKERS, _SIDEBAR_SECTION_TERMS, 
     _STOCK_DATA_LABELS, _DISCLAIMER_PATTERNS, _CAPTION_RE, 
     _FIN_LABEL_RE, _COMPLIANCE_MARKERS

@@ -29,7 +29,7 @@ def download_naver_reports(target_date_str=None):
     }
 
     # 다운로드한 PDF를 저장할 폴더 생성
-    from configs.config import SAVE_DIR
+    from src.configs.config import SAVE_DIR
     save_dir = SAVE_DIR
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)

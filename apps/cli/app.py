@@ -1,6 +1,12 @@
+import sys
+import os
 import uuid
-from graphs.main_graph import graph_app
-from configs.config import SEARCH_TOP_K
+
+# 모듈 경로 추가 (finance_llm 패키지 접근)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from src.graphs.main_graph import graph_app
+from src.configs.config import SEARCH_TOP_K
 
 def run_search(query: str, thread_id: str = "default_thread") -> dict:
     """

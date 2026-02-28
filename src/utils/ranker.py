@@ -1,4 +1,4 @@
-from configs.config import FAISS_DIR, get_logger
+from src.configs.config import FAISS_DIR, get_logger
 
 logger = get_logger(__name__)
 

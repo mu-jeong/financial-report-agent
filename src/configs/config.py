@@ -7,11 +7,11 @@ load_dotenv()
 # ==============================================================================
 # 1. 파일 경로 설정
 # ==============================================================================
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-SAVE_DIR = os.path.join(BASE_DIR, "downloaded")
-DB_PATH = os.path.join(BASE_DIR, "reports.db")
-FAISS_DIR = os.path.join(BASE_DIR, "faiss_db")
+SAVE_DIR = os.path.join(BASE_DIR, "data", "downloaded")
+DB_PATH = os.path.join(BASE_DIR, "data", "reports.db")
+FAISS_DIR = os.path.join(BASE_DIR, "data", "vector_db")
 
 # ==============================================================================
 # 2. API 키 및 인증
@@ -35,7 +35,7 @@ USE_RERANKER = False   # FlashRank를 이용한 문서 재정렬 기능 활성�
 # ==============================================================================
 import logging
 
-LOG_FILE = os.path.join(BASE_DIR, "finance_llm.log")
+LOG_FILE = os.path.join(BASE_DIR, "logs", "finance_llm.log")
 
 logging.basicConfig(
     level=logging.INFO,

@@ -1,7 +1,7 @@
 """embed_pipeline.py 패치: FIN_LABEL_RE 앵커 제거 + Disclaimer/Compliance 패턴 추가"""
 import re
 
-path = "embed_pipeline.py"
+path = "src/core/embed_pipeline.py"
 content = open(path, encoding="utf-8").read()
 
 # ── 1. _FIN_LABEL_RE 교체 ───────────────────────────────────────────────────
@@ -92,7 +92,7 @@ print("파일 저장 완료")
 # 검증
 import subprocess
 result = subprocess.run(
-    ["python", "-c", "import embed_pipeline; print('import 성공')"],
+    ["python", "-c", "from src.core import embed_pipeline; print('import 성공')"],
     capture_output=True, text=True, encoding="utf-8"
 )
 print(result.stdout.strip() or result.stderr.strip())
