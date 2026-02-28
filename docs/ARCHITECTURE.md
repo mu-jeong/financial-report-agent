@@ -47,17 +47,16 @@ LangGraph의 상태 전환(State Machine)을 사용하여, 무분별하게 Vecto
 
 1. **사용자 쿼리(질문) 입력 (`apps/cli/app.py` 또는 `apps/gui/app.py`):** 터미널 루프나 UI를 통해 입력값을 받습니다.
 2. **Router Node (`src/nodes/router.py`):** 사용자의 질의가 "메타데이터(개수, 가장 최근 리포트 등)"만 필요한 질문인지 "문서 본문 내용(목표 주가, 업황 분석)"을 묻는지 판단합니다. (Pydantic 구조체 변환을 통해 LLM의 변덕스러운 출력을 엄격히 통제합니다)
-4. **멀티 턴 대화 - Query Rewrite (`src/nodes/query_rewrite.py`):** 이전 질문/답변의 맥락(Chat History)을 메모리에 담아두고, 후속 질문이 들어오면 `query_rewrite_node`를 거쳐 검색에 적합한 완전한 문장으로 쿼리를 재작성합니다.
-5. **분기 진행 (Conditional Edges - `src/graphs/main_graph.py`):**
+3. **멀티 턴 대화 - Query Rewrite (`src/nodes/query_rewrite.py`):** 이전 질문/답변의 맥락(Chat History)을 메모리에 담아두고, 후속 질문이 들어오면 `query_rewrite_node`를 거쳐 검색에 적합한 완전한 문장으로 쿼리를 재작성합니다.
+4. **분기 진행 (Conditional Edges - `src/graphs/main_graph.py`):**
    *   👉 **경로 1 (`src/nodes/rdb.py`):** 단순 구조적 정보 요약 시. LLM이 자연어를 **SQL로 변환**합니다. 
-       *   **[핵심 보안 - Schema Obfuscation & Guardrail]** 스키마 유출(Schema Leakage)과 SQL DoS 공격을 막기 위해 가상 뷰(View)와 유사한 전략을 사용합니다.
-           1. **스키마 난독화:** 프롬프트(`prompts.py`)에서 `file_name`, `is_embedded` 등 민감한 시스템 속성을 감추고 사용자에게 필요한 컬럼만 노출합니다.
-           2. **구문 트리(AST) 수준의 철통 방어(`sql_guardrail`):** 문자열 필터링이 아닌 `sqlglot` 패키지를 통해 쿼리의 형태를 완전히 해부(AST Parsing)합니다.
-              - CUD(데이터 조작) 명령, `SELECT *` 블라인드 조회, 그리고 허가되지 않은 시스템 컬럼 조회를 원천 차단(Error)합니다.
-              - 쿼리에 제한(LIMIT)이 없거나 과도할 경우, AST 노드를 조작하여 `LIMIT 5`를 **강제로 주입(Rewrite)**하여 서버 리소스(SQL DoS)를 방어합니다.
-           3. **읽기 전용 모드:** 최후의 방어선으로 SQLite 커넥션을 생성할 때 `?mode=ro` 플래그를 더티-마운트하여 DB 엔진 자체에서 조작을 금지합니다.
-   *   👉 **경로 2 (`src/nodes/vectordb.py`):** 기업 분석 본문 파악 시. FAISS 에서 코사인 유사도로 Top-K 문서 조각을 불러오고, 선택적으로 FlashRank (Cross-Encoder, `src/utils/ranker.py` 싱글톤 패턴) 모델로 재정렬(Rerank)하여 가장 관련 높은 단락 3개만 LLM에게 컨텍스트(Context)로 던져준 뒤 분석 답변을 생성합니다.
-6. **스트리밍 출력:** LLM이 생각하는 즉시 터미널 창(또는 GUI)에 타자기처럼 실시간 텍스트 출력을 수행합니다.
+       *   **[SQL 보안 가드레일]** 스키마 유출(Schema Leakage)과 SQL Injection을 막기 위해 다중 방어망을 적용합니다.
+           1. **스키마 난독화:** 프롬프트(`prompts.py`)에서 `file_name`, `is_embedded` 등 민감한 시스템 속성을 감추고 사용자에게 필요한 콜럼만 노출합니다.
+           2. **구문 트리(AST) 수준 방어(`sql_guardrail`):** `sqlglot`을 통해 LLM이 생성한 쿼리를 AST 수준으로 파싱하여 CUD(데이터 조작) 명령과 허가되지 않은 테이블 접근을 원체 차단합니다.
+           3. **읽기 전용 모드:** SQLite 커넥션을 `?mode=ro` 플래그로 강제하여 DB 엔진 자체에서 조작을 금지합니다.
+   *   👉 **경로 2 (`src/nodes/vectordb.py`):** 기업 분석 본문 파악 시. FAISS에서 Top-K 문서 조각을 불러오고, 선택적으로 FlashRank (Cross-Encoder, `src/utils/ranker.py` 싱글톤 패턴) 모델로 재정렬(Rerank)하여 가장 관련 높은 단락을 LLM에게 컨텍스트(Context)로 던져준 뒤 분석 답변을 생성합니다.
+   *   👉 **경로 3 (`src/nodes/stock_price.py`):** 주가 조회 질의 시. LLM이 자연어에서 종목명(최대 5개)을 추출하고 `FinanceDataReader`를 통해 KRX 상장 종목의 최근 30일 주가 흐름을 Markdown 표 형태로 제공합니다.
+5. **스트리밍 출력:** LLM이 생각하는 즉시 터미널 창(또는 GUI)에 타자기처럼 실시간 텍스트 출력을 수행합니다.
 
 ---
 

@@ -25,8 +25,13 @@ Vector DB 연동 흐름:
 """
 
 import os
+import sys
 import sqlite3
 from datetime import datetime
+
+# 프로젝트 루트 경로를 참조할 수 있도록 설정
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 from src.configs.config import DB_PATH, SAVE_DIR, get_logger
 
 logger = get_logger(__name__)

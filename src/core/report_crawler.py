@@ -4,6 +4,11 @@ from bs4 import BeautifulSoup
 import requests
 from datetime import datetime, date
 from urllib.parse import urljoin
+import sys
+
+# 프로젝트 루트 경로를 참조할 수 있도록 설정
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 
 def download_naver_reports(target_date_str=None):
     total_processed = 0
