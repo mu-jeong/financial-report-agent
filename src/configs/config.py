@@ -56,5 +56,15 @@ noisy_loggers = [
 for logger_name in noisy_loggers:
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 
+# ==============================================================================
+# 5. 크롤러 설정 (Crawler Settings)
+# ==============================================================================
+# 'LATEST' (최신 날짜 기준) 또는 'SPECIFIC_DATE' (특정 날짜 지정)
+CRAWLER_MODE = 'LATEST'
+
+# 'SPECIFIC_DATE' 모드일 때 다운로드할 날짜 (YYYY-MM-DD)
+# 'LATEST' 모드일 때도 특정 시작 기준일로 사용할 수 있습니다.
+CRAWLER_TARGET_DATE = "2024-03-02" 
+
 def get_logger(name: str):
     return logging.getLogger(name)

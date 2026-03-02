@@ -176,28 +176,32 @@ def download_naver_reports(target_date_str=None):
 # ==========================================
 
 if __name__ == "__main__":
-    ## 원하는 날짜 지정, YYYY-MM-DD 형식
-    # download_naver_reports(target_date_str="2026-02-01")
-    
-    # #테스트를 위한 최신 데이터 추출
+    from src.configs.config import CRAWLER_MODE, CRAWLER_TARGET_DATE
     from datetime import timedelta, timezone, datetime
 
-    # 한국 시간(KST) 기준 현재 날짜
-    KST = timezone(timedelta(hours=9))
-    current_date = datetime.now(KST).date()
-
-    print(f"[System] KST 기준 오늘 날짜: {current_date}")
-    
-    # 오늘 날짜부터 시작해서 데이터가 발견될 때까지 하루씩 뒤로 감
-    while True:
-        target_date_str = current_date.strftime("%Y-%m-%d")
-        print(f"\n[System] 🔍 {target_date_str} 기준 리포트 탐색 중...")
-        
-        processed_count = download_naver_reports(target_date_str)
-        
+    if CRAWLER_MODE == 'SPECIFIC_DATE':
+        print(f"\n[System] 🔍 지정된 날짜({CRAWLER_TARGET_DATE}) 기준 리포트 탐색 중...")
+        processed_count = download_naver_reports(CRAWLER_TARGET_DATE)
         if processed_count > 0:
-            print(f"\n[System] 🎉 {target_date_str} 일자의 데이터 {processed_count}건을 성공적으로 받아왔습니다! 크롤링을 종료합니다.")
-            break
+            print(f"\n[System] 🎉 {CRAWLER_TARGET_DATE} 일자의 데이터 {processed_count}건을 성공적으로 받아왔습니다!")
         else:
-            print(f"\n[System] ⚠️ {target_date_str} 일자에는 데이터가 없습니다. 전날로 넘어가서 다시 시도합니다.")
-            current_date -= timedelta(days=1)
+            print(f"\n[System] ⚠️ {CRAWLER_TARGET_DATE} 일자에는 데이터가 없습니다.")
+    else:
+        # LATEST 모드: 오늘 날짜부터 시작해서 데이터가 발견될 때까지 하루씩 뒤로 감
+        KST = timezone(timedelta(hours=9))
+        current_date = datetime.now(KST).date()
+
+        print(f"[System] KST 기준 오늘 날짜: {current_date}")
+        
+        while True:
+            target_date_str = current_date.strftime("%Y-%m-%d")
+            print(f"\n[System] 🔍 {target_date_str} 기준 리포트 탐색 중...")
+            
+            processed_count = download_naver_reports(target_date_str)
+            
+            if processed_count > 0:
+                print(f"\n[System] 🎉 {target_date_str} 일자의 데이터 {processed_count}건을 성공적으로 받아왔습니다! 크롤링을 종료합니다.")
+                break
+            else:
+                print(f"\n[System] ⚠️ {target_date_str} 일자에는 데이터가 없습니다. 전날로 넘어가서 다시 시도합니다.")
+                current_date -= timedelta(days=1)
