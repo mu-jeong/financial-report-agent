@@ -1,6 +1,12 @@
-# 📈 Finance LLM — 증권사 리포트 RAG 파이프라인
+# 📊 Finance Report Agent: 증권사 리포트 분석용 LangChain, LangGraph AI Agent
 
 폴더에 저장된 증권사 종목/산업/경제 분석 리포트(PDF)를 정제하여 FAISS 벡터 DB에 저장하고, 자연어 질의로 금융 데이터를 검색하는 RAG(Retrieval-Augmented Generation) 파이프라인입니다.
+
+## 📸 실행 예시 (Screenshots)
+
+| ![GUI](examples/example4.png) | ![CLI](examples/example1.png) |
+|:---:|:---:|
+| **GUI 실행 예시 (Streamlit)** | **CLI 실행 예시 (Terminal)** |
 
 ## 🎯 프로젝트 목적
 
@@ -102,9 +108,10 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 > **Note:** `src/core/report_crawler.py`를 사용하여 네이버 금융에서 자동으로 수집할 수도 있으나 이는 선택 사항(Optional)입니다. 다른 경로로 수집한 파일이라도 위 규칙대로 이름만 지정되어 있으면 정상적으로 처리됩니다.
 > 
-> 💡 **(현재 설정) 크롤러 수집 제한 알림:**
-> `src/core/report_crawler.py` 실행 시 빠르고 가벼운 테스트 환경을 위해 **"가장 최근 평일 단 하루치 리포트"**만 다운로드하도록 기본 설정되어 있습니다.
-> 더 많은 기간의 데이터를 수집하고 싶다면 `src/core/report_crawler.py` 최하단 실행부의 주석을 참고하여 `target_date_str = "YYYY-MM-DD"` 형태의 특정 과거 날짜를 지정하거나 로직을 수정하세요.
+> 💡 **(현재 설정) 크롤러 수집 설정:**
+> `src/core/report_crawler.py` 실행 시 수집되는 데이터는 `src/configs/config.py`의 설정을 따릅니다.
+> - **LATEST 모드:** 오늘부터 역순으로 탐색하여 리포트가 발견되는 가장 최근 날짜의 데이터를 자동으로 수집합니다.
+> - **SPECIFIC_DATE 모드:** `CRAWLER_TARGET_DATE`에 지정된 날짜의 리포트만 정밀 수집합니다.
 
 ---
 
