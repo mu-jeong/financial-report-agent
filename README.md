@@ -4,7 +4,7 @@
 
 ## 📸 실행 예시 (Screenshots)
 
-| ![GUI](examples/example4.png) | ![CLI](examples/example1.png) |
+| ![GUI](examples/example3.png) | ![CLI](examples/example1.png) |
 |:---:|:---:|
 | **GUI 실행 예시 (Streamlit)** | **CLI 실행 예시 (Terminal)** |
 
