@@ -4,11 +4,13 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import AIMessage
 
 from src.configs.config import GEMINI_API_KEY, EMBEDDING_MODEL, GENERATION_MODEL, FAISS_DIR, SEARCH_TOP_K, USE_RERANKER, get_logger
 from src.configs.prompts import VECTORDB_PROMPT
 from src.graphs.state import State
 from src.utils.ranker import get_ranker
+from src.nodes.stock_price import stock_price_tools
 
 logger = get_logger(__name__)
 
@@ -54,7 +56,6 @@ def vectordb_node(state: State) -> dict:
         rerank_request = req_cls(query=query, passages=passages)
         rerank_results = ranker.rerank(rerank_request)
         
-        # 상위 3개만 선별
         top_passages = rerank_results[:3]
     else:
         for rank, (doc, score) in enumerate(docs_with_scores[:SEARCH_TOP_K]):
@@ -73,31 +74,22 @@ def vectordb_node(state: State) -> dict:
         source_info = f"[{rank}] {meta.get('target_name', '알수없음')} ({meta.get('report_date', '날짜없음')}) - {meta.get('title', '제목없음')}"
         context_text += f"\n--- 문서 {rank} ---\n[출처: {source_info}]\n{result['text']}\n"
 
+    # stock_price tool을 bind하여 LLM이 필요 시 주가 조회를 호출할 수 있도록 함
     llm = ChatGoogleGenerativeAI(
         model=GENERATION_MODEL,
         google_api_key=GEMINI_API_KEY,
         temperature=0.2,
-    )
+    ).bind_tools(stock_price_tools)
 
     prompt = PromptTemplate.from_template(VECTORDB_PROMPT)
+    formatted_prompt = prompt.format(context=context_text, question=query)
 
-    chain = (
-        {"context": lambda x: context_text, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+    ai_msg: AIMessage = llm.invoke(formatted_prompt)
 
-    answer = ""
-    for chunk in chain.stream(query):
-        answer += chunk
-        print(chunk, end="", flush=True) 
-    print()
-    
     rerank_info = []
     for rank, result in enumerate(top_passages, 1):
         meta = result['meta']
-        score = float(result.get('score', 0.0))  # float32 -> float (JSON 직렬화 오류 방지)
+        score = float(result.get('score', 0.0))
         rerank_info.append({
             "rank": rank,
             "target_name": meta.get('target_name', '-'),
@@ -106,7 +98,17 @@ def vectordb_node(state: State) -> dict:
             "file_name": meta.get('file_name', '-'),
             "score": score
         })
-        
+
+    # LLM이 tool 호출을 요청했는지 확인
+    if ai_msg.tool_calls:
+        logger.info(f"[VectordbNode] LLM이 주가 조회 tool 호출 요청: {ai_msg.tool_calls}")
+        return {
+            "faiss_context": context_text,
+            "rerank_info": rerank_info,
+            "messages": [ai_msg],  # ToolNode가 읽을 수 있도록 messages에 저장
+        }
+
+    answer = ai_msg.content
     return {
         "generation": answer, 
         "faiss_context": context_text, 

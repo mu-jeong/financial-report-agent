@@ -1,14 +1,17 @@
 import os
+import json
 import sqlite3
 import functools
 import sqlglot
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import AIMessage
 
 from src.configs.config import GEMINI_API_KEY, GENERATION_MODEL, DB_PATH, get_logger
 from src.configs.prompts import RDB_SQL_GEN_PROMPT, RDB_ANSWER_PROMPT
 from src.graphs.state import State
+from src.nodes.stock_price import stock_price_tools
 
 logger = get_logger(__name__)
 
@@ -81,20 +84,36 @@ def rdb_execute_node(state: State) -> dict:
         }
     
     query = state.get("rewritten_query", state["question"])
+
+    # stock_price tool을 bind하여 LLM이 필요 시 주가 조회를 호출할 수 있도록 함
     llm = ChatGoogleGenerativeAI(
         model=GENERATION_MODEL, 
         google_api_key=GEMINI_API_KEY, 
         temperature=0.0
-    )
+    ).bind_tools(stock_price_tools)
+
     answer_prompt = PromptTemplate.from_template(RDB_ANSWER_PROMPT)
-    ans_chain = answer_prompt | llm | StrOutputParser()
-    
-    answer = ""
-    for chunk in ans_chain.stream({"question": query, "db_result": str(db_result)}):
-        answer += chunk
-        print(chunk, end="", flush=True) 
-    print()
-    
+    chain = answer_prompt | llm | StrOutputParser()
+
+    # tool_calls 여부 확인을 위해 먼저 AIMessage를 직접 받음
+    raw_llm = ChatGoogleGenerativeAI(
+        model=GENERATION_MODEL,
+        google_api_key=GEMINI_API_KEY,
+        temperature=0.0
+    ).bind_tools(stock_price_tools)
+
+    formatted_prompt = answer_prompt.format(question=query, db_result=str(db_result))
+    ai_msg: AIMessage = raw_llm.invoke(formatted_prompt)
+
+    # LLM이 tool 호출을 요청했는지 확인
+    if ai_msg.tool_calls:
+        logger.info(f"[RdbExecuteNode] LLM이 주가 조회 tool 호출 요청: {ai_msg.tool_calls}")
+        return {
+            "rdb_result": str(db_result),
+            "messages": [ai_msg],  # ToolNode가 읽을 수 있도록 messages에 저장
+        }
+
+    answer = ai_msg.content
     return {
         "rdb_result": str(db_result), 
         "generation": answer,
