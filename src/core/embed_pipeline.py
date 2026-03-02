@@ -184,9 +184,12 @@ def node_split_documents(state: dict) -> dict:
         metadatas=[metadata],
     )
 
-    # chunk_index 수동 추가 (나중에 원본 순서 복원 시 활용)
+    # chunk_index 수동 추가 및 메타데이터 텍스트 주입
     for i, doc in enumerate(docs):
         doc.metadata["chunk_index"] = i
+        # FAISS 벡터 검색 시 의미론적 관련성을 높이기 위해 청크 본문 맨 앞에 메타데이터 주입
+        header = f"[기업: {state['target_name']}, 제목: {state['title']}]\n"
+        doc.page_content = header + doc.page_content
 
     logger.info(f"  [2/3] 완료 — {len(docs)}개 청크 생성")
     return {**state, "documents": docs}
