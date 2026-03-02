@@ -11,7 +11,7 @@ from src.configs.config import SEARCH_TOP_K
 
 # 1. 페이지 초기 설정
 st.set_page_config(
-    page_title="Finance LLM RAG",
+    page_title="Finance Report Agent",
     page_icon="📈",
     layout="wide"
 )
@@ -30,7 +30,7 @@ current_thread = st.session_state.threads[current_id]
 
 # 3. 사이드바 (Sidebar) - 다중 대화(Thread) 목록 관리 UI
 with st.sidebar:
-    st.title("📈 Finance LLM")
+    st.title("📊 Finance Report Agent")
     st.markdown("증권사 분석 리포트 AI 어시스턴트")
     st.divider()
     
