@@ -113,7 +113,10 @@ def rdb_execute_node(state: State) -> dict:
             "messages": [ai_msg],  # ToolNode가 읽을 수 있도록 messages에 저장
         }
 
+    # ai_msg.content가 리스트(Gemini 멀티파트 등)인 경우 대비하여 문자열로 변환
     answer = ai_msg.content
+    if isinstance(answer, list):
+        answer = "".join([part.get("text", "") if isinstance(part, dict) else str(part) for part in answer])
     return {
         "rdb_result": str(db_result), 
         "generation": answer,
