@@ -82,6 +82,8 @@ pip install -r requirements.txt
 
 프로젝트 루트의 `.env.example` 파일을 복사하여 `.env` 파일을 생성하고, 본인의 Gemini API 키를 입력합니다.
 
+> 💡 **상세 연동 가이드:** API 키 발급 및 설정에 대한 구체적인 방법은 [🔑 API 연동 가이드(API_SETUP.md)](docs/API_SETUP.md) 문서를 확인해 주세요.
+
 ```bash
 cp .env.example .env  # Linux/macOS
 copy .env.example .env # Windows (cmd)
@@ -92,6 +94,7 @@ copy .env.example .env # Windows (cmd)
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
+
 
 ---
 
@@ -232,8 +235,7 @@ python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('
   - **종목명 추출 정확도 향상:** `get_stock_price` tool 호출 시 약칭·영문 표기(예: "현대차" → "현대자동차") 처리 실패 케이스 식별 및 tool description 또는 system 프롬프트 내 정규화 지침 추가
 - [ ] **데이터 수집·적재 자동화 파이프라인 (Automated Ingestion Pipeline):**
   현재 리포트 다운로드(`report_crawler.py`)와 벡터 임베딩(`embed_pipeline.py`)은 수작업으로 실행해야 하는 구조입니다. 이를 **매일 새벽 자동으로 실행**되도록 스케줄링하여, 항상 최신 리포트가 DB에 반영되는 상태를 유지합니다.
-  - **워크플로우 오케스트레이션 — `Apache Airflow`:**
-    - 크롤링 → DB 적재 → 임베딩의 3단계 처리를 하나의 **DAG(Directed Acyclic Graph)**로 정의합니다.
-    - `PythonOperator`로 각 파이프라인 함수를 래핑하고, `@daily` 또는 `0 3 * * 1-5` (평일 오전 3시)와 같은 Cron 표현식으로 스케줄을 지정합니다.
-    - 이전 단계가 실패하면 다음 단계는 자동으로 중단되는 태스크 의존성(Dependency)을 활용해 파이프라인 안정성을 확보합니다.
+  - **크론잡 스케줄링 — `Python 패키지 활용 (schedule 또는 APScheduler 등)`:**
+    - 별도의 무거운 프레임워크 도입 없이, 가벼운 파이썬 스케줄링 라이브러리를 사용해 매일 정해진 시간(예: 평일 새벽 3시)에 백그라운드에서 동작하도록 구성합니다.
+    - 크롤링 → DB 적재 → 임베딩의 3단계 처리 로직을 하나로 묶어 순차적으로 실행하고, 에러 발생 시 재시도 및 로깅이 이루어지도록 파이프라인을 구축합니다.
 ---
