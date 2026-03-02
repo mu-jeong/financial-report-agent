@@ -7,14 +7,16 @@
 이 개인용 로컬 RAG 파이프라인의 설계 철학은 **가벼움, 무료 API 활용, 의존성 최소화**에 있습니다.
 
 *   **언어 및 환경:** Python 3.10+ (가상환경 분리 권장)
-*   **LLM 엔진 (생성 & 임베딩):** `Google Gemini API` (Flash/Embedding 모델) 
+*   **LLM 엔진 (생성 & 임베딩):** `Google Gemini API` (Flash/Embedding 모델)
     *   *이유:* 개인용 수준에서 가장 관대한 무료 티어를 제공하며 처리 속도가 매우 빠릅니다.
 *   **Vector DB (임베딩 검색):** `FAISS (Facebook AI Similarity Search - Local)`
     *   *이유:* 별도의 클라우드 DB 연동 없이 디렉토리 기반 인덱스를 사용하여 로컬 환경에서 가볍고 빠르게 검색할 수 있습니다.
 *   **Relational DB (메타데이터):** `SQLite3`
-    *   *이유:* Python 기본 내장 DB로서, 파일 메타데이터(파일명, 증권사, 발간일, 타겟)를 추적하고 RAG 파이프라인의 VectorDB와 교차 조회하기에 최적의 복잡도를 지닙니다.
+    *   *이유:* Python 기본 내장 DB로서, 파일 메타데이터(파일명, 증권사, 발간일, 타겟)를 추적하고 RAG 파이프라인의 VectorDB와 교차 조회하기에 최적입니다. 특히 "전체 리포트 개수"나 "특정 기간의 리포트 목록" 같은 통계적 질문에 대해, 수천 개의 문서 청크를 벡터 검색하고 LLM 컨텍스트로 태우는 비효율적인 방식 대신 SQL 쿼리 한 번으로 처리함으로써 **토큰 사용량과 비용을 획기적으로 절감**합니다.
 *   **LLM 파이프라인 제어:** `LangChain`, `LangGraph`, `Pydantic`
-    *   *이유:* 체이닝(Chaining), 프롬프트 템플릿 분리, 텍스트 분할, 상태 기반(Stateful) 라우팅 통제, 멀티 턴 대화 메모리(MemorySaver), 그리고 Structured Output 파싱을 통해 LLM 작업들을 구조화하고 안정성(Reliability)을 보장하기 위해 도입되었습니다.
+    *   *이유:* 체이닝(Chaining), 프롬프트 템플릿 분리, 텍스트 분할, 상태 기반(Stateful) 라우팅 통제, 멀티 턴 대화 메모리(MemorySaver), Structured Output 파싱, 그리고 **Tool Calling(ToolNode)** 을 통해 LLM 작업들을 구조화하고 안정성(Reliability)을 보장하기 위해 도입되었습니다.
+*   **실시간 주가 조회:** `FinanceDataReader`
+    *   *이유:* KRX 상장 전 종목의 가격 데이터를 무료로 조회할 수 있으며, `@tool` 데코레이터로 감싸 LangGraph `ToolNode`에 바인딩하여 LLM이 필요 시 자동으로 호출하도록 설계했습니다.
 *   **PDF 파싱(디지털 문서 추출):** `PyMuPDF (fitz)`
     *   *이유:* 증권사 리포트는 구조가 복잡하고 텍스트 레이아웃 정보가 중요한데, PyMuPDF는 빠르면서도 블록 단위(BBox) 조형을 정교하게 제어할 수 있습니다.
 *   **보안 파싱 (SQL Injection 방어):** `sqlglot`
@@ -29,6 +31,8 @@
 
 본 프로젝트는 크게 "데이터 적재 파이프라인(Ingestion)"과 "데이터 검색 파이프라인(Retrieval & Search)" 두 축으로 분리되어 있습니다.
 
+![LangGraph Diagram](./langgraph_diagram.png)
+
 ### A. 데이터 적재 파이프라인 (`src/core/embed_pipeline.py`)
 
 1. **파일 스캔 & 메타 파싱:** `data/downloaded/` 폴더 내 새로운 PDF 파일을 확인하고 파일명 규약에 따라 타겟, 발행일, 증권사를 파싱합니다.
@@ -41,22 +45,9 @@
 5. **벡터 임베딩:** Gemini 임베딩 모델을 호출하여 텍스트를 고차원 숫자(Vector)로 바꿉니다.
 6. **저장 & 동기화:** FAISS DB에 인덱스로 저장하고, SQLite `is_embedded=1` 로 상태를 업데이트하여 중복 처리를 방지합니다.
 
-### B. 검색 및 대화 파이프라인 (모듈화 구조: `src/graphs/`, `src/nodes/`, `apps/cli/`, `apps/gui/`)
+### B. 검색 및 대화 파이프라인
 
-LangGraph의 상태 전환(State Machine)을 사용하여, 무분별하게 Vector DB를 뒤지지 않고 사용자의 **질문 의도에 따라 똑똑하게 라우팅(Routing)**하는 아키텍처를 가집니다. 단일 파일의 비중을 낮추고 관심사의 분리(SoC)를 위해 역할을 컴포넌트 단위로 분리했습니다.
-
-1. **사용자 쿼리(질문) 입력 (`apps/cli/app.py` 또는 `apps/gui/app.py`):** 터미널 루프나 UI를 통해 입력값을 받습니다.
-2. **Router Node (`src/nodes/router.py`):** 사용자의 질의가 "메타데이터(개수, 가장 최근 리포트 등)"만 필요한 질문인지 "문서 본문 내용(목표 주가, 업황 분석)"을 묻는지 판단합니다. (Pydantic 구조체 변환을 통해 LLM의 변덕스러운 출력을 엄격히 통제합니다)
-3. **멀티 턴 대화 - Query Rewrite (`src/nodes/query_rewrite.py`):** 이전 질문/답변의 맥락(Chat History)을 메모리에 담아두고, 후속 질문이 들어오면 `query_rewrite_node`를 거쳐 검색에 적합한 완전한 문장으로 쿼리를 재작성합니다.
-4. **분기 진행 (Conditional Edges - `src/graphs/main_graph.py`):**
-   *   👉 **경로 1 (`src/nodes/rdb.py`):** 단순 구조적 정보 요약 시. LLM이 자연어를 **SQL로 변환**합니다. 
-       *   **[SQL 보안 가드레일]** 스키마 유출(Schema Leakage)과 SQL Injection을 막기 위해 다중 방어망을 적용합니다.
-           1. **스키마 난독화:** 프롬프트(`prompts.py`)에서 `file_name`, `is_embedded` 등 민감한 시스템 속성을 감추고 사용자에게 필요한 콜럼만 노출합니다.
-           2. **구문 트리(AST) 수준 방어(`sql_guardrail`):** `sqlglot`을 통해 LLM이 생성한 쿼리를 AST 수준으로 파싱하여 CUD(데이터 조작) 명령과 허가되지 않은 테이블 접근을 원체 차단합니다.
-           3. **읽기 전용 모드:** SQLite 커넥션을 `?mode=ro` 플래그로 강제하여 DB 엔진 자체에서 조작을 금지합니다.
-   *   👉 **경로 2 (`src/nodes/vectordb.py`):** 기업 분석 본문 파악 시. FAISS에서 Top-K 문서 조각을 불러오고, 선택적으로 FlashRank (Cross-Encoder, `src/utils/ranker.py` 싱글톤 패턴) 모델로 재정렬(Rerank)하여 가장 관련 높은 단락을 LLM에게 컨텍스트(Context)로 던져준 뒤 분석 답변을 생성합니다.
-   *   👉 **경로 3 (`src/nodes/stock_price.py`):** 주가 조회 질의 시. LLM이 자연어에서 종목명(최대 5개)을 추출하고 `FinanceDataReader`를 통해 KRX 상장 종목의 최근 30일 주가 흐름을 Markdown 표 형태로 제공합니다.
-5. **스트리밍 출력:** LLM이 생각하는 즉시 터미널 창(또는 GUI)에 타자기처럼 실시간 텍스트 출력을 수행합니다.
+LangGraph의 상태 전환(State Machine)을 사용하여, 무분별하게 Vector DB를 뒤지지 않고 사용자의 **질문 의도에 따라 똑똑하게 라우팅(Routing)**하는 아키텍처입니다.
 
 ---
 
@@ -65,6 +56,8 @@ LangGraph의 상태 전환(State Machine)을 사용하여, 무분별하게 Vecto
 *   **RAG 정확도의 핵심은 전처리(Pre-processing):**
     대규모 LLM보다 더 중요한 것은 "깨끗한 컨텍스트(Context)를 제공하는 것"이라는 철학 아래, PyMuPDF의 필터링 모듈(`src/configs/filter_configs.py`)을 정교하게 고도화했습니다. 로컬 디바이스에서는 표(Table) 이해 알고리즘보단 표를 과감히 버리는 것이 할루시네이션(환각) 예방에 타당하다고 판단했습니다.
 *   **Dual-Storage (이중 저장소 교차 검증 구조):**
-    RAG가 가진 "파일에 대해 질문하면 Vector DB에만 의존하는 현상"을 해결하기 위해 RDB를 도입하여 구조적 메타데이터(증권사, 기간)를 하드 라우팅 시켰습니다.
+    RAG가 가진 "파일에 대해 질문하면 Vector DB에만 의존하는 현상"을 해결하기 위해 RDB를 도입하여 구조적 메타데이터(증권사, 기간)를 하드 라우팅 시켰습니다. 이는 단순히 정확도를 높이는 것을 넘어, 통계성 질문이나 메타데이터 필터링 시 수백 개의 문서 조각을 LLM 프롬프트에 구겨 넣는 **토큰 낭비를 원천적으로 차단**하여 경제적인 파이프라인을 구축하게 해줍니다.
+*   **Tool Calling 기반 주가 조회 통합:**
+    주가 조회를 별도 노드로 분리하지 않고 `@tool` + `ToolNode` 패턴을 도입하여, RDB와 VectorDB 모든 경로에서 LLM이 **필요 시 자율적으로 주가 데이터를 호출**할 수 있도록 설계했습니다. 이는 "리포트 분석 + 현재 주가"를 동시에 요구하는 복합 질의를 자연스럽게 처리할 수 있게 합니다.
 *   **1인 로컬 시스템의 한계를 극복하는 엔지니어링:**
     단순 파이썬 스크립트 데모 수준을 벗어나기 위해, **DB 배치(Batch) 처리**를 통한 I/O 최적화, **AST 파싱을 통한 강력한 SQL 프롬프트 가드레일**, 그리고 전역 **Logging 아키텍처**를 구축하여 프로덕션 백엔드 레벨의 코어 단단함을 확보했습니다.
