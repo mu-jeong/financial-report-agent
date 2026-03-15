@@ -6,9 +6,9 @@
 
 ### 🚀 Latest Update: [v0.2.0] (2026-03-15)
 - **Parent-Child Chunking**: 검색 정교화와 맥락 이해도 향상을 위한 Small-to-Big Retrieval 적용
-- **Marker-PDF Engine**: 복잡한 표/수식 추출을 위한 GPU 가속 엔진 고도화 및 폴백 시스템 구축
+- **Marker-PDF Engine**: 복잡한 표/수식 추출을 위한 Marker-PDF 사용 옵션 제공
+- **Architecture**: SQLite-FAISS 계층 구조(parent-child chunking)를 통한 데이터 정규화 및 저장 효율성 극대화
 - **Context Optimization**: 중복된 부모 맥락 병합 로직을 통한 LLM 응답 품질 및 속도 개선
-- **Architecture**: SQLite-FAISS 계층 구조를 통한 데이터 정규화 및 저장 효율성 극대화
 
 👉 **[상세 내용 확인하기 (Changelog)](./CHANGELOG.md)**
 

@@ -5,7 +5,7 @@
 ## [v0.2] - 2026-03-15
 ### 추가된 기능 (Added)
 - **Parent-Child Chunking (부모-자식 청킹)**: 맥락 이해도 향상을 위한 Small-to-Big Retrieval(작은 조각 검색 후 큰 맥락 확장) 패턴 구현.
-- **Marker-PDF 통합**: PDF 내 복잡한 표와 수식의 고품질 추출 지원.
+- **Marker-PDF 통합**: Marker-PDF 옵션 제공.
 - **부모 맥락 병합 (Parent Context Merging)**: 중복된 부모 섹션 제거를 통한 LLM 토큰 사용 최적화.
 
 ### 변경 및 개선 사항 (Changed)
