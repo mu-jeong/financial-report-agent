@@ -47,7 +47,8 @@ from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+import pymupdf4llm
 
 from src.core.db_manager import init_db, sync_from_directory, fetch_unembedded, mark_embedded
 from src.configs import config
@@ -76,15 +77,8 @@ if not config.GEMINI_API_KEY or config.GEMINI_API_KEY == "your_api_key_here":
 def node_extract_pdf(state: dict) -> dict:
     """
     [LangGraph 노드: extract]
-    PyMuPDF(fitz) BBox 방식으로 표 영역을 물리적으로 제외한 뒤 순수 텍스트만 추출합니다.
-
-    처리 흐름:
-      1. page.find_tables()로 표 BBox 목록 수집 (PyMuPDF 1.23+)
-      2. get_text("blocks")로 텍스트 블록 추출
-      3. 표 BBox와 50% 이상 겹치는 블록 제거
-      4. is_noise_line / strip_compliance 필터 추가 적용
-
-    벤치마크(2 PDF 기준): 표 노이즈 0.0%, 가장 빠른 처리 속도
+    PyMuPDF4LLM을 사용하여 PDF를 구조화된 Markdown으로 추출한 뒤 
+    기존 필터(사이드바, 라인 노이즈, 준법고지)를 적용합니다.
 
     입력 state 키: file_name, report_date, target_name, title
     출력 state 키: + raw_text
@@ -92,106 +86,120 @@ def node_extract_pdf(state: dict) -> dict:
     file_name = state["file_name"]
     pdf_path  = os.path.join(config.SAVE_DIR, file_name)
 
-    logger.info(f"  [1/3] PDF 텍스트 추출 중 (BBox 표 제외)...")
+    logger.info(f"  [1/3] PDF 텍스트 추출 중 (Markdown 방식)...")
 
-    pages = []
-    doc   = fitz.open(pdf_path)
-
-    for page in doc:
-        # ① 표 영역 BBox 수집 (PyMuPDF 1.23+; 구버전은 빈 리스트로 fallback)
-        table_bboxes: list[fitz.Rect] = []
+    # ① PyMuPDF4LLM 기반 마크다운 추출
+    try:
+        md_text = pymupdf4llm.to_markdown(pdf_path, write_images=False)
+    except Exception as e:
+        logger.warning(f"  ⚠️ PyMuPDF4LLM 추출 실패: {e}")
+        logger.warning(f"  🔄 일반 텍스트 추출 방식(fitz)으로 폴백합니다.")
+        
         try:
-            tabs = page.find_tables()
-            for tab in tabs.tables:
-                table_bboxes.append(fitz.Rect(tab.bbox))
-        except AttributeError:
-            pass  # 구버전 PyMuPDF — 표 감지 skip, 라인 필터만 적용
+            doc = fitz.open(pdf_path)
+            md_text = ""
+            for page in doc:
+                # 일반 텍스트 추출 후 페이지 구분자 추가
+                md_text += page.get_text("text") + "\n\n"
+            doc.close()
+            
+            if not md_text.strip():
+                raise ValueError("일반 추출로도 텍스트를 가져올 수 없습니다.")
+                
+        except Exception as fallback_e:
+            logger.error(f"  ❌ 폴백 추출도 실패: {fallback_e}")
+            raise ValueError(f"PDF에서 텍스트를 추출할 수 없습니다: {file_name}")
 
-        # ② 텍스트 블록 추출 후 표 BBox와 겹치는 블록 제거
-        blocks = page.get_text("blocks")  # (x0,y0,x1,y1, text, block_no, block_type)
-        lines_kept = []
-        for blk in blocks:
-            if blk[6] != 0:               # 0=텍스트, 1=이미지 → 이미지 블록 skip
-                continue
-            blk_rect = fitz.Rect(blk[:4])
-            blk_area = blk_rect.get_area()
-            if blk_area <= 0:
-                continue
-            # 표 BBox와 50% 이상 겹치면 제거
-            if any(
-                blk_rect.intersect(tb).get_area() / blk_area > 0.5
-                for tb in table_bboxes
-            ):
-                continue
-            text = blk[4].strip()
-            if not text:
-                continue
-            # ③ 블록 단위 사이드바/재무제표 섹션 감지 — 블록 전체 제거
-            if is_sidebar_block(text):
-                continue
-            # ④ 라인 단위 노이즈 필터 적용
-            filtered = [
-                line for line in text.split("\n")
-                if not is_noise_line(line)
-            ]
-            clean = "\n".join(filtered).strip()
-            if clean:
-                lines_kept.append(clean)
+    if not md_text.strip():
+        raise ValueError(f"PDF에서 텍스트가 비어있습니다: {file_name}")
 
-        page_text = "\n".join(lines_kept).strip()
-        if page_text:
-            pages.append(page_text)
+    # ② 준법 고지(Compliance) 섹션 이후 제거
+    md_text = strip_compliance(md_text)
 
-    doc.close()
+    # ③ 블록 및 라인 단위 필터링 적용
+    # 마크다운 블록(\n\n) 단위로 사이드바 여부 확인 및 라인 단위 노이즈 제거
+    blocks = md_text.split("\n\n")
+    clean_blocks = []
+    
+    for blk in blocks:
+        # 블록 단위 필터 (STOCK DATA 등)
+        if is_sidebar_block(blk):
+            continue
+            
+        # 라인 단위 필터
+        lines = blk.split("\n")
+        filtered_lines = [
+            line for line in lines 
+            if not is_noise_line(line)
+        ]
+        clean_blk = "\n".join(filtered_lines).strip()
+        if clean_blk:
+            clean_blocks.append(clean_blk)
 
-    raw_text = "\n\n".join(pages)
-    raw_text = strip_compliance(raw_text)
+    raw_text = "\n\n".join(clean_blocks)
 
     if not raw_text.strip():
-        raise ValueError(f"PDF에서 텍스트를 추출할 수 없습니다: {file_name}")
+        raise ValueError(f"정제 후 남은 내용이 없습니다: {file_name}")
 
-    logger.info(f"  [1/3] 완료 — {len(raw_text):,}자 / {len(pages)}페이지 추출 (표·compliance 제외)")
+    logger.info(f"  [1/3] 완료 — {len(raw_text):,}자 추출 (Markdown 정제 완료)")
     return {**state, "raw_text": raw_text}
 
 
 def node_split_documents(state: dict) -> dict:
     """
     [LangGraph 노드: split]
-    추출된 텍스트를 LangChain RecursiveCharacterTextSplitter로 청킹합니다.
-    문장·문단 경계를 우선 분할점으로 활용합니다.
+    추출된 마크다운 텍스트를 MarkdownHeaderTextSplitter로 1차 분할한 뒤, 
+    RecursiveCharacterTextSplitter로 2차 청킹합니다.
+    
+    이 방식은 단순히 균등 사이즈로 나누는 것이 아니라, 
+    문서의 헤더(#, ## 등) 구조를 보존하여 논리적 일관성을 유지합니다.
 
     입력 state 키: raw_text + 메타데이터
     출력 state 키: + documents (List[Document])
     """
-    splitter = RecursiveCharacterTextSplitter(
+    # 1. 마크다운 헤더 기반 분할
+    headers_to_split_on = [
+        ("#", "Header 1"),
+        ("##", "Header 2"),
+        ("###", "Header 3"),
+    ]
+    
+    # strip_headers=False를 통해 본문 내 헤더를 텍스트로 보존 (검색 풍부도 향상)
+    markdown_splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=headers_to_split_on,
+        strip_headers=False
+    )
+    
+    header_splits = markdown_splitter.split_text(state["raw_text"])
+
+    # 2. 너무 큰 섹션 청킹 (RecursiveCharacterTextSplitter)
+    # 헤더 구조 내에서 최대 CHUNK_SIZE를 넘지 않도록 보조적으로 작동
+    # 청크 오버랩을 사이즈의 약 10%로 동적 설정
+    chunk_overlap = int(config.CHUNK_SIZE * 0.1)
+    text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=config.CHUNK_SIZE,
-        chunk_overlap=config.CHUNK_OVERLAP,
-        separators=["\n\n", "\n", ". ", " ", ""],  # 문단 → 문장 → 단어 순으로 분할
-        length_function=len,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
+    
+    docs = text_splitter.split_documents(header_splits)
 
-    metadata = {
-        "file_name":   state["file_name"],
-        "target_name": state["target_name"],
-        "title":       state["title"],
-        "report_date": state["report_date"],
-        "broker":      state.get("broker", "알수없음"),
-    }
-
-    # create_documents: 텍스트 리스트 → Document 리스트 (chunk_index 자동 미지원)
-    docs = splitter.create_documents(
-        texts=[state["raw_text"]],
-        metadatas=[metadata],
-    )
-
-    # chunk_index 수동 추가 및 메타데이터 텍스트 주입
+    # 3. 메타데이터 후처리 및 헤더 텍스트 주입
     for i, doc in enumerate(docs):
-        doc.metadata["chunk_index"] = i
-        # FAISS 벡터 검색 시 의미론적 관련성을 높이기 위해 청크 본문 맨 앞에 메타데이터 주입
-        header = f"[기업: {state['target_name']}, 제목: {state['title']}]\n"
-        doc.page_content = header + doc.page_content
+        # 문서별 메타데이터 업데이트
+        doc.metadata.update({
+            "file_name":   state["file_name"],
+            "target_name": state["target_name"],
+            "title":       state["title"],
+            "report_date": state["report_date"],
+            "broker":      state.get("broker", "알수없음"),
+            "chunk_index": i
+        })
+        # FAISS 벡터 검색 시 의미론적 맥락을 위해 본문 시작부에 기업명/제목 주입
+        header_context = f"[기업: {state['target_name']}, 제목: {state['title']}]\n"
+        doc.page_content = header_context + doc.page_content
 
-    logger.info(f"  [2/3] 완료 — {len(docs)}개 청크 생성")
+    logger.info(f"  [2/3] 완료 — {len(docs)}개 청크 생성 (Markdown Header 기반)")
     return {**state, "documents": docs}
 
 

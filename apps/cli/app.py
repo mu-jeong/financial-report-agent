@@ -36,15 +36,34 @@ def run_cli():
                 print("\n🔄 대화 메모리가 초기화되었습니다.")
                 continue
             
-            print(f"\n{'='*60}")
-            print("\n" + "=" * 60)
-            print("  ✨ AI 답변")
-            print("=" * 60)
-            
-            # 스트리밍 출력은 node 함수 내부에서 처리되므로 여기선 결과 반환만 대기
+            # 1. 그래프 실행 (진행 상태 표시)
+            print("\n🤖 답변을 생성하고 있습니다...", end="", flush=True)
             final_state = run_search(user_query, thread_id=current_thread_id)
+            print("\r" + " " * 30 + "\r", end="", flush=True) # 진행 상태 메시지 지우기
             
-            # VectorDB 라우팅이었을 경우 참고 문서 출력
+            # 2. 검색 쿼리 재작성 결과 출력 (디버깅/사용자 확인용)
+            rewritten = final_state.get("rewritten_query")
+            if rewritten and rewritten != user_query:
+                print(f"🔍 검색어 재구성: {rewritten}\n")
+
+            # 3. 최종 답변 출력
+            print("=" * 60)
+            answer = final_state.get("generation")
+            if answer:
+                print(answer)
+            else:
+                # 만약 Tool 호출 등으로 인해 generation이 직접 반환되지 않고 messages에 있을 경우
+                messages = final_state.get("messages", [])
+                if messages:
+                    last_msg = messages[-1]
+                    if hasattr(last_msg, "content") and last_msg.content:
+                        print(last_msg.content)
+                    else:
+                        print("\n(답변을 생성하는 중에 도구가 호출되었거나 응답이 비어있습니다.)")
+                else:
+                    print("\n(답변이 생성되지 않았습니다. 시스템 로그를 확인해주세요.)")
+
+            # 4. VectorDB 라우팅이었을 경우 참고 문서 출력
             if final_state.get("route") == "vectordb" and final_state.get("rerank_info"):
                 print("\n" + "-" * 60)
                 print("  📚 참고한 문서들 (Top " + str(SEARCH_TOP_K) + ")")
@@ -52,7 +71,6 @@ def run_cli():
                 for info in final_state["rerank_info"]:
                     print(f"  [{info['rank']}] {info['target_name']} ({info['report_date']})")
                     print(f"       파일명: {info['file_name']}")
-                    # print(f"       Rerank Score: {info['score']:.4f}")
                     
             print("=" * 60)
             

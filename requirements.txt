@@ -11,8 +11,8 @@ langchain-community
 faiss-cpu
 python-dotenv
 flashrank
-onnxruntime==1.15.1
-numpy<2
+onnxruntime>=1.17.0
+numpy>=1.24.0,<2.0.0
 langgraph
 pytest
 pytest-cov
@@ -21,3 +21,4 @@ streamlit
 pandas
 finance-datareader
 tabulate
+pymupdf4llm>=0.0.17
