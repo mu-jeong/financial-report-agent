@@ -126,8 +126,12 @@ GEMINI_API_KEY=your_gemini_api_key_here
 python -m src.core.embed_pipeline
 ```
 
+> [!WARNING]
+> **Marker 엔진 하드웨어 요구 사항:** 
+> 만약 텍스트 추출 엔진으로 `marker` (`config.py`의 `EXTRACTION_ENGINE = "marker"`)를 사용할 경우, **최소 16GB 이상의 시스템 메모리(RAM)**가 권장됩니다. 또한 **GPU(CUDA 등)가 없을 경우** CPU로만 연산이 수행되어 추출 시간이 리포트당 수 분 이상으로 매우 길어질 수 있으니 참고하시기 바랍니다. 저사양 환경에서는 메모리 부족으로 인해 프로그램이 강제 종료될 수 있습니다.
+
 - **마크다운(Markdown) 기반 지능형 파이프라인:** 단순히 텍스트를 뽑아내는 것이 아니라, **`PDF → Markdown 변환 → Markdown 기반 Split`**의 3단계 공정을 거칩니다.
-    - **Step 1 (추출):** `PyMuPDF4LLM`으로 PDF 시각적 구조를 분석해 `# 제목`, `## 소제목`이 포함된 마크다운을 생성합니다.
+    - **Step 1 (추출):** `EXTRACTION_ENGINE` 설정에 따라 `PyMuPDF4LLM` 또는 `marker-pdf`를 사용하여 PDF 시각적 구조를 분석해 `# 제목`, `## 소제목`이 포함된 마크다운을 생성합니다.
     - **Step 2 (정제):** 금융 리포트 특화 필터로 표 영역, 재무 레이블, 준법고지 등을 정밀하게 제거합니다.
     - **Step 3 (분할):** `MarkdownHeaderTextSplitter`를 사용해 문서의 논리적 섹션 단위를 보존하며 청킹합니다.
 - **정교한 예외 처리 및 폴백(Fallback):** Windows 환경의 ONNX 런타임 이슈 등으로 인해 마크다운 추출이 실패할 경우, 시스템이 중단되지 않고 자동으로 **표준 텍스트 추출 방식(fitz)**으로 전환하여 안정적인 처리를 보장합니다.

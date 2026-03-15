@@ -58,6 +58,22 @@ logger = config.get_logger(__name__)
 
 # ── 환경설정 ─────────────────────────────────────────────────────────────────────
 
+MARKER_MODELS = None
+
+def get_marker_models():
+    """Marker 모델을 싱글톤으로 로드 (메모리 절약 및 속도 향상)."""
+    global MARKER_MODELS
+    if MARKER_MODELS is None:
+        try:
+            from marker.models import create_model_dict
+            logger.info("  [Extraction] Marker 모델 로딩 중 (최초 1회, 수 GB 다운로드될 수 있음)...")
+            MARKER_MODELS = create_model_dict()
+        except Exception as e:
+            logger.error(f"  ❌ Marker 모델 로드 실패: {e}")
+            raise e
+    return MARKER_MODELS
+
+
 if not config.GEMINI_API_KEY or config.GEMINI_API_KEY == "your_api_key_here":
     logger.error("[오류] .env 파일에 GEMINI_API_KEY를 설정해주세요.")
     sys.exit(1)
@@ -86,29 +102,62 @@ def node_extract_pdf(state: dict) -> dict:
     file_name = state["file_name"]
     pdf_path  = os.path.join(config.SAVE_DIR, file_name)
 
-    logger.info(f"  [1/3] PDF 텍스트 추출 중 (Markdown 방식)...")
+    logger.info(f"  [1/3] PDF 텍스트 추출 중 ({config.EXTRACTION_ENGINE} 방식)...")
 
-    # ① PyMuPDF4LLM 기반 마크다운 추출
+    md_text = ""
+    # ① PDF 마크다운 추출 (Marker 또는 PyMuPDF4LLM)
     try:
-        md_text = pymupdf4llm.to_markdown(pdf_path, write_images=False)
-    except Exception as e:
-        logger.warning(f"  ⚠️ PyMuPDF4LLM 추출 실패: {e}")
-        logger.warning(f"  🔄 일반 텍스트 추출 방식(fitz)으로 폴백합니다.")
-        
-        try:
-            doc = fitz.open(pdf_path)
-            md_text = ""
-            for page in doc:
-                # 일반 텍스트 추출 후 페이지 구분자 추가
-                md_text += page.get_text("text") + "\n\n"
-            doc.close()
+        if config.EXTRACTION_ENGINE == "marker":
+            from marker.config.parser import ConfigParser
+            from marker.converters.pdf import PdfConverter
             
-            if not md_text.strip():
-                raise ValueError("일반 추출로도 텍스트를 가져올 수 없습니다.")
-                
-        except Exception as fallback_e:
-            logger.error(f"  ❌ 폴백 추출도 실패: {fallback_e}")
-            raise ValueError(f"PDF에서 텍스트를 추출할 수 없습니다: {file_name}")
+            model_dict = get_marker_models()
+            # v1.0+ 버전에서는 최소한의 기본값을 명시하는 것이 좋습니다.
+            config_dict = {
+                "output_format": "markdown",
+                "use_llm": False, 
+                "force_ocr": False
+            }
+            config_parser = ConfigParser(config_dict)
+            
+            converter = PdfConverter(
+                config=config_parser.generate_config_dict(),
+                artifact_dict=model_dict,
+                processor_list=config_parser.get_processors(),
+                renderer=config_parser.get_renderer(),
+                llm_service=config_parser.get_llm_service()
+            )
+            
+            rendered = converter(pdf_path)
+            md_text = rendered.markdown
+        else:
+            # 기본 방식: PyMuPDF4LLM (pymupdf)
+            md_text = pymupdf4llm.to_markdown(pdf_path, write_images=False)
+            
+    except Exception as e:
+        engine_name = "Marker" if config.EXTRACTION_ENGINE == "marker" else "PyMuPDF4LLM"
+        logger.warning(f"  ⚠️ {engine_name} 추출 실패: {e}")
+        
+        # 엔진이 marker였을 경우 pymupdf4llm으로 먼저 폴백 시도
+        if config.EXTRACTION_ENGINE == "marker":
+            logger.warning(f"  🔄 PyMuPDF4LLM 방식으로 폴백합니다.")
+            try:
+                md_text = pymupdf4llm.to_markdown(pdf_path, write_images=False)
+            except Exception as e2:
+                logger.warning(f"  ⚠️ PyMuPDF4LLM 폴백도 실패: {e2}")
+
+        # 모든 마크다운 방식 실패 시 일반 텍스트 추출(fitz)로 최종 폴백
+        if not md_text.strip():
+            logger.warning(f"  🔄 일반 텍스트 추출 방식(fitz)으로 최종 폴백합니다.")
+            try:
+                doc = fitz.open(pdf_path)
+                md_text = ""
+                for page in doc:
+                    md_text += page.get_text("text") + "\n\n"
+                doc.close()
+            except Exception as e3:
+                logger.error(f"  ❌ 최종 폴백 추출도 실패: {e3}")
+                raise ValueError(f"PDF에서 텍스트를 추출할 수 없습니다: {file_name}")
 
     if not md_text.strip():
         raise ValueError(f"PDF에서 텍스트가 비어있습니다: {file_name}")

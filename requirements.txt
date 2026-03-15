@@ -22,3 +22,4 @@ pandas
 finance-datareader
 tabulate
 pymupdf4llm>=0.0.17
+marker-pdf>=1.10.2
