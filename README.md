@@ -2,6 +2,18 @@
 
 폴더에 저장된 증권사 종목/산업/경제 분석 리포트(PDF)를 정제하여 FAISS 벡터 DB에 저장하고, 자연어 질의로 금융 데이터를 검색하는 LangChain, LangGraph 기반 AI Agent 입니다.
 
+---
+
+### 🚀 Latest Update: [v0.2.0] (2026-03-15)
+- **Parent-Child Chunking**: 검색 정교화와 맥락 이해도 향상을 위한 Small-to-Big Retrieval 적용
+- **Marker-PDF Engine**: 복잡한 표/수식 추출을 위한 GPU 가속 엔진 고도화 및 폴백 시스템 구축
+- **Context Optimization**: 중복된 부모 맥락 병합 로직을 통한 LLM 응답 품질 및 속도 개선
+- **Architecture**: SQLite-FAISS 계층 구조를 통한 데이터 정규화 및 저장 효율성 극대화
+
+👉 **[상세 내용 확인하기 (Changelog)](./CHANGELOG.md)**
+
+---
+
 ## 📸 실행 예시 (Screenshots)
 
 | ![GUI](examples/example3.png) | ![CLI](examples/example1.png) |
@@ -131,10 +143,10 @@ python -m src.core.embed_pipeline
 > 만약 텍스트 추출 엔진으로 `marker` (`config.py`의 `EXTRACTION_ENGINE = "marker"`)를 사용할 경우, **최소 16GB 이상의 시스템 메모리(RAM)**가 권장됩니다. 또한 **GPU(CUDA 등)가 없을 경우** CPU로만 연산이 수행되어 추출 시간이 리포트당 수 분 이상으로 매우 길어질 수 있으니 참고하시기 바랍니다. 저사양 환경에서는 메모리 부족으로 인해 프로그램이 강제 종료될 수 있습니다.
 
 - **마크다운(Markdown) 기반 지능형 파이프라인:** 단순히 텍스트를 뽑아내는 것이 아니라, **`PDF → Markdown 변환 → Markdown 기반 Split`**의 3단계 공정을 거칩니다.
-    - **Step 1 (추출):** `EXTRACTION_ENGINE` 설정에 따라 `PyMuPDF4LLM` 또는 `marker-pdf`를 사용하여 PDF 시각적 구조를 분석해 `# 제목`, `## 소제목`이 포함된 마크다운을 생성합니다.
+    - **Step 1 (추출):** `EXTRACTION_ENGINE` 설정에 따라 `PyMuPDF (fitz)` 또는 `marker-pdf`를 사용하여 PDF 데이터를 추출합니다. `marker` 엔진 사용 시 시각적 구조를 분석해 마크다운 형식을 생성하며, `fitz` 엔진은 가장 빠른 텍스트 추출 속도를 제공합니다.
     - **Step 2 (정제):** 금융 리포트 특화 필터로 표 영역, 재무 레이블, 준법고지 등을 정밀하게 제거합니다.
     - **Step 3 (분할):** `MarkdownHeaderTextSplitter`를 사용해 문서의 논리적 섹션 단위를 보존하며 청킹합니다.
-- **정교한 예외 처리 및 폴백(Fallback):** Windows 환경의 ONNX 런타임 이슈 등으로 인해 마크다운 추출이 실패할 경우, 시스템이 중단되지 않고 자동으로 **표준 텍스트 추출 방식(fitz)**으로 전환하여 안정적인 처리를 보장합니다.
+- **정교한 예외 처리 및 폴백(Fallback):** 엔진 설정과 관계없이 추출 과정에서 오류가 발생할 경우, 시스템이 중단되지 않고 자동으로 **표준 텍스트 추출 방식(fitz)**으로 전환하여 안정적인 처리를 보장합니다.
 
 > 💡 **(현재 설정) 임베딩 10건 제한 (테스트 모드) 안내:**
 > ডাউন로드된 PDF가 수십 건 이상일 경우 단기간 내 API 허용량(Rate Limit)을 초과할 수 있어, 현재 `src/configs/config.py` 파일 내에 `TEST_LIMIT = 10` (최대 10개만 임베딩)으로 안전 설정이 걸려있습니다.
@@ -196,7 +208,7 @@ python apps/cli/app.py
    - 파일을 순회하며 메모리(List)에서 메타데이터만 미리 파싱한 후, **단일 트랜잭션의 `.executemany()`**를 활용해 DB 쓰기(Write) 작업을 한 번에 처리합니다.
 *   **RAG 정확도의 핵심은 구조적 전처리(Structural Pre-processing):**
     단순한 텍스트 추출을 넘어, **`PDF → Markdown → Split`**으로 이어지는 마크다운 중심의 파이프라인을 구축했습니다. 이는 문서의 헤더(제목) 구조를 청크에 녹여내어, 검색 시 질문과 관련된 문단의 맥락을 완벽하게 보존하도록 돕습니다.
-*   **안정적인 하이브리드 추출:** 딥러닝 기반의 마크다운 추출(`PyMuPDF4LLM`)과 전통적인 규칙 기반 추출(`PyMuPDF`)을 결합한 폴백 시스템을 통해, 환경에 구애받지 않는 단단한 데이터 적재 환경을 제공합니다.
+*   **안정적인 하이브리드 추출:** 딥러닝 기반의 정밀 추출(`marker`)과 전통적인 규칙 기반 고속 추출(`PyMuPDF`)을 결합한 폴백 시스템을 통해, 환경에 구애받지 않는 단단한 데이터 적재 환경을 제공합니다.
 3. **중앙 집중형 로깅 시스템 (Centralized Logging)**
    - 단순한 `print()` 출력을 배제하고, `src/configs/config.py`에 파이썬 내장 `logging` 모듈을 전역으로 설정했습니다.
    - 터미널(Stream) 진행 상황과 함께, 모든 동작과 구체적인 에러 이력이 `logs/finance_llm.log` 파일에 영구 기록되어 백그라운드 서버 모드로 구동할 때의 관찰성(Observability)을 확보했습니다.
@@ -221,7 +233,7 @@ python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('
 
 증권사 리포트의 노이즈를 제거하기 위해 아래와 같은 규칙 기반 필터가 적용됩니다.
 
-- **마크다운 구조 추출:** `PyMuPDF4LLM`을 사용하여 제목(#), 리스트 등의 문서 구조를 인식한 채로 텍스트를 추출
+- **마크다운 구조 활용:** `marker` 엔진 사용 시 제목(#), 리스트 등의 문서 구조를 인식한 채로 추출하며, `fitz` 엔진 사용 시에도 마크다운 헤더 기반 스플리터를 통해 논리 구조를 보존
 - **계층적 청킹:** `MarkdownHeaderTextSplitter`로 논리적 섹션 분할 후, 10% 가변 오버랩을 적용한 상세 청킹 수행
 - **BBox 기반 표 제거:** PyMuPDF의 표 감지 기능을 사용해 표 영역과 겹치는 텍스트 블록 물리적 배제
 - **재무 레이블 제거:** 손익계산서/재무상태표의 행 레이블(예: 지분법이익, 매출채권 등) 감지 및 제거

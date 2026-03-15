@@ -8,6 +8,7 @@ class State(TypedDict):
     messages: Annotated[list[BaseMessage], operator.add]  # ToolNode I/O용 메시지 목록
     rewritten_query: str  # 재작성된 검색용 쿼리 (항상 실행되는 노드)
     route: str            # 'rdb' or 'vectordb' (항상 실행되는 노드)
+    search_filters: Optional[dict]  # VectorDB 검색 시 적용할 메타데이터 필터 {'target_name': '...', 'broker': '...'}
     
     # --- 아래 필드들은 라우팅 경로(분기)에 따라 값이 없을 수도 있으므로 Optional 처리 ---
     sql_query: Optional[str]        # RDB에서 사용된 SQL (RDB 경로)

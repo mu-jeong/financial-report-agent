@@ -24,12 +24,15 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 EMBEDDING_MODEL = "models/gemini-embedding-001"  # 임베딩용
 GENERATION_MODEL = "gemini-2.5-flash"            # 텍스트 생성용 (RAG)
 
-CHUNK_SIZE = 1500      # 텍스트 스플리터 청크 최대 글자 수
+PARENT_CHUNK_SIZE = 2000 # Parent-Child에서 부모 청크 크기
+CHILD_CHUNK_SIZE = 500   # Parent-Child에서 자식 청크 크기 (검색용)
+CHUNK_SIZE = 1500      # 기본 텍스트 스플리터 청크 최대 글자 수 (일반 모드)
 CHUNK_OVERLAP = 150    # 텍스트 스플리터 청크 간 겹치는(Overlap) 글자 수
 TEST_LIMIT = 10         # 처리할 파일 수 제한 (0이면 제한 없음)
 SEARCH_TOP_K = 5       # FAISS 검색 시 반환할 결과 개수
 USE_RERANKER = False   # FlashRank를 이용한 문서 재정렬 기능 활성화 여부
 EXTRACTION_ENGINE = "pymupdf" # [marker, pymupdf] - PDF 텍스트 추출 엔진 선택
+USE_PARENT_CHILD = True  # Parent-Child Chunking 활성화 여부
 
 # ==============================================================================
 # 4. 로깅 설정 (Logging)

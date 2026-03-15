@@ -2,14 +2,14 @@ import os
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import AIMessage
 
 from src.configs.config import GEMINI_API_KEY, EMBEDDING_MODEL, GENERATION_MODEL, FAISS_DIR, SEARCH_TOP_K, USE_RERANKER, get_logger
 from src.configs.prompts import VECTORDB_PROMPT
 from src.graphs.state import State
 from src.utils.ranker import get_ranker
+from src.core.db_manager import fetch_parent_content
 from src.nodes.stock_price import stock_price_tools
 
 logger = get_logger(__name__)
@@ -34,6 +34,7 @@ def vectordb_node(state: State) -> dict:
         allow_dangerous_deserialization=True
     )
 
+    # 검색 수행
     docs_with_scores = faiss_store.similarity_search_with_score(query, k=SEARCH_TOP_K)
 
     if not docs_with_scores:
@@ -41,32 +42,42 @@ def vectordb_node(state: State) -> dict:
         logger.info(msg)
         return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
 
+    filtered_results = docs_with_scores
+
     passages = []
+    seen_parent_ids = set() # 중복 부모 체크용
     
-    if USE_RERANKER:
-        for rank, (doc, score) in enumerate(docs_with_scores):
-            meta = doc.metadata
-            passages.append({
-                "id": rank,
-                "text": doc.page_content,
-                "meta": meta
-            })
+    # --- [개선 2] Parent Context Merging (중복 제거) ---
+    for rank, (doc, score) in enumerate(filtered_results):
+        meta = doc.metadata
+        page_content = doc.page_content
+        parent_id = meta.get("parent_id")
+
+        # Parent-Child 매핑 및 중복 제거
+        if parent_id:
+            if parent_id in seen_parent_ids:
+                continue # 이미 포함된 부모 섹션은 건너뜀
+            seen_parent_ids.add(parent_id)
             
+            parent_content = fetch_parent_content(parent_id)
+            if parent_content:
+                page_content = parent_content
+
+        passages.append({
+            "id": rank,
+            "text": page_content,
+            "score": score,
+            "meta": meta
+        })
+    
+    # Reranker 적용 (선택 사항)
+    if USE_RERANKER:
         ranker, req_cls = get_ranker()
         rerank_request = req_cls(query=query, passages=passages)
         rerank_results = ranker.rerank(rerank_request)
-        
-        top_passages = rerank_results[:3]
+        top_passages = rerank_results[:3] # Reranker 결과 중 상위 3개
     else:
-        for rank, (doc, score) in enumerate(docs_with_scores[:SEARCH_TOP_K]):
-            meta = doc.metadata
-            passages.append({
-                "id": rank,
-                "text": doc.page_content,
-                "score": score,
-                "meta": meta
-            })
-        top_passages = passages
+        top_passages = passages[:3] # 최종적으로는 상위 3개 부모 섹션만 사용
         
     context_text = ""
     for rank, result in enumerate(top_passages, 1):

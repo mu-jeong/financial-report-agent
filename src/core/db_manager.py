@@ -59,8 +59,41 @@ def init_db() -> None:
                 is_embedded INTEGER  NOT NULL DEFAULT 0
             )
         """)
+        # Parent-Child Chunking을 위한 부모 청크 저장 테이블
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS parent_chunks (
+                id          TEXT PRIMARY KEY,
+                content     TEXT NOT NULL,
+                file_name   TEXT NOT NULL,
+                metadata    TEXT
+            )
+        """)
         conn.commit()
     logger.info(f"[DB] 초기화 완료 → {DB_PATH}")
+
+
+# ── Parent-Child Chunking 관리 ──────────────────────────────────────────────────
+
+def insert_parent_chunks(chunks: list[dict]) -> None:
+    """Parent 청크들을 DB에 배치 저장. chunks는 {'id', 'content', 'file_name', 'metadata'} 리스트."""
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO parent_chunks (id, content, file_name, metadata)
+            VALUES (:id, :content, :file_name, :metadata)
+            """,
+            chunks
+        )
+        conn.commit()
+
+def fetch_parent_content(parent_id: str) -> str | None:
+    """parent_id로 부모 청크의 원본 텍스트를 조회."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT content FROM parent_chunks WHERE id = ?",
+            (parent_id,)
+        ).fetchone()
+        return row["content"] if row else None
 
 
 # ── 파일명 파싱 ───────────────────────────────────────────────────────────────

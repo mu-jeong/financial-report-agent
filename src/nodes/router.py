@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
@@ -11,7 +12,7 @@ logger = get_logger(__name__)
 class RouteDecision(BaseModel):
     """Router 판단 결과 구조체"""
     route: str = Field(
-        description="판단 결과 플래그: 메타데이터 기반이면 'rdb', 본문 문서 내용 분석이 필요하다면 'vectordb', 주식 가격(주가) 조회가 필요하다면 'stock_price'를 반환합니다."
+        description="판단 결과 플래그: 'rdb', 'vectordb', 'stock_price'"
     )
 
     @field_validator("route", mode="after")
@@ -42,4 +43,4 @@ def router_node(state: State) -> dict:
         logger.warning(f"[Router] 구조화된 응답 파싱에 실패하여 기본값으로 대체합니다. ({e})")
         route = "vectordb"
         
-    return {"route": route}
+    return {"route": route, "search_filters": {}}

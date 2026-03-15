@@ -34,6 +34,8 @@ import re
 import sys
 import time
 import fitz          # PyMuPDF — BBox 기반 표 제외 텍스트 추출
+import uuid
+import json
 
 # 프로젝트 루트 경로를 참조할 수 있도록 설정
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -48,9 +50,10 @@ from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
-import pymupdf4llm
-
-from src.core.db_manager import init_db, sync_from_directory, fetch_unembedded, mark_embedded
+from src.core.db_manager import (
+    init_db, sync_from_directory, fetch_unembedded, mark_embedded, 
+    insert_parent_chunks
+)
 from src.configs import config
 from src.utils.text_filters import is_sidebar_block, is_noise_line, strip_compliance
 
@@ -93,7 +96,7 @@ if not config.GEMINI_API_KEY or config.GEMINI_API_KEY == "your_api_key_here":
 def node_extract_pdf(state: dict) -> dict:
     """
     [LangGraph 노드: extract]
-    PyMuPDF4LLM을 사용하여 PDF를 구조화된 Markdown으로 추출한 뒤 
+    PyMuPDF을 사용하여 PDF를 텍스트로 추출한 뒤 
     기존 필터(사이드바, 라인 노이즈, 준법고지)를 적용합니다.
 
     입력 state 키: file_name, report_date, target_name, title
@@ -105,7 +108,7 @@ def node_extract_pdf(state: dict) -> dict:
     logger.info(f"  [1/3] PDF 텍스트 추출 중 ({config.EXTRACTION_ENGINE} 방식)...")
 
     md_text = ""
-    # ① PDF 마크다운 추출 (Marker 또는 PyMuPDF4LLM)
+    # ① PDF 텍스트 추출 (Marker 또는 PyMuPDF fitz)
     try:
         if config.EXTRACTION_ENGINE == "marker":
             from marker.config.parser import ConfigParser
@@ -131,22 +134,19 @@ def node_extract_pdf(state: dict) -> dict:
             rendered = converter(pdf_path)
             md_text = rendered.markdown
         else:
-            # 기본 방식: PyMuPDF4LLM (pymupdf)
-            md_text = pymupdf4llm.to_markdown(pdf_path, write_images=False)
+            # 기본 방식: PyMuPDF (fitz) 일반 텍스트 추출 -> 마크다운처럼 처리하기 위해 blocks 활용
+            logger.info(f"  🔄 일반 텍스트 추출 방식(fitz)을 사용합니다.")
+            doc = fitz.open(pdf_path)
+            md_text = ""
+            for page in doc:
+                md_text += page.get_text("text") + "\n\n"
+            doc.close()
             
     except Exception as e:
-        engine_name = "Marker" if config.EXTRACTION_ENGINE == "marker" else "PyMuPDF4LLM"
+        engine_name = "Marker" if config.EXTRACTION_ENGINE == "marker" else "PyMuPDF"
         logger.warning(f"  ⚠️ {engine_name} 추출 실패: {e}")
         
-        # 엔진이 marker였을 경우 pymupdf4llm으로 먼저 폴백 시도
-        if config.EXTRACTION_ENGINE == "marker":
-            logger.warning(f"  🔄 PyMuPDF4LLM 방식으로 폴백합니다.")
-            try:
-                md_text = pymupdf4llm.to_markdown(pdf_path, write_images=False)
-            except Exception as e2:
-                logger.warning(f"  ⚠️ PyMuPDF4LLM 폴백도 실패: {e2}")
-
-        # 모든 마크다운 방식 실패 시 일반 텍스트 추출(fitz)로 최종 폴백
+        # 모든 방식 실패 시 일반 텍스트 추출(fitz)로 최종 폴백
         if not md_text.strip():
             logger.warning(f"  🔄 일반 텍스트 추출 방식(fitz)으로 최종 폴백합니다.")
             try:
@@ -199,12 +199,10 @@ def node_split_documents(state: dict) -> dict:
     [LangGraph 노드: split]
     추출된 마크다운 텍스트를 MarkdownHeaderTextSplitter로 1차 분할한 뒤, 
     RecursiveCharacterTextSplitter로 2차 청킹합니다.
+    USE_PARENT_CHILD가 활성화된 경우 Parent(큰 맥락)-Child(작은 검색단위) 구조로 분할합니다.
     
-    이 방식은 단순히 균등 사이즈로 나누는 것이 아니라, 
-    문서의 헤더(#, ## 등) 구조를 보존하여 논리적 일관성을 유지합니다.
-
     입력 state 키: raw_text + 메타데이터
-    출력 state 키: + documents (List[Document])
+    출력 state 키: + documents (Child 또는 일반 청크), + parent_documents (Parent-Child 모드 시)
     """
     # 1. 마크다운 헤더 기반 분할
     headers_to_split_on = [
@@ -213,43 +211,91 @@ def node_split_documents(state: dict) -> dict:
         ("###", "Header 3"),
     ]
     
-    # strip_headers=False를 통해 본문 내 헤더를 텍스트로 보존 (검색 풍부도 향상)
     markdown_splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=headers_to_split_on,
         strip_headers=False
     )
-    
     header_splits = markdown_splitter.split_text(state["raw_text"])
 
-    # 2. 너무 큰 섹션 청킹 (RecursiveCharacterTextSplitter)
-    # 헤더 구조 내에서 최대 CHUNK_SIZE를 넘지 않도록 보조적으로 작동
-    # 청크 오버랩을 사이즈의 약 10%로 동적 설정
-    chunk_overlap = int(config.CHUNK_SIZE * 0.1)
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=config.CHUNK_SIZE,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""]
-    )
-    
-    docs = text_splitter.split_documents(header_splits)
+    parent_docs = []
+    child_docs = []
 
-    # 3. 메타데이터 후처리 및 헤더 텍스트 주입
-    for i, doc in enumerate(docs):
-        # 문서별 메타데이터 업데이트
-        doc.metadata.update({
-            "file_name":   state["file_name"],
-            "target_name": state["target_name"],
-            "title":       state["title"],
-            "report_date": state["report_date"],
-            "broker":      state.get("broker", "알수없음"),
-            "chunk_index": i
-        })
-        # FAISS 벡터 검색 시 의미론적 맥락을 위해 본문 시작부에 기업명/제목 주입
-        header_context = f"[기업: {state['target_name']}, 제목: {state['title']}]\n"
-        doc.page_content = header_context + doc.page_content
+    if config.USE_PARENT_CHILD:
+        # --- Parent-Child Chunking 모드 ---
+        logger.info(f"  [2/3] Parent-Child 모드로 분할 중...")
+        
+        # Parent Splitter (큰 덩어리)
+        parent_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.PARENT_CHUNK_SIZE,
+            chunk_overlap=int(config.PARENT_CHUNK_SIZE * 0.1),
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+        # Child Splitter (검색용 작은 덩어리)
+        child_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.CHILD_CHUNK_SIZE,
+            chunk_overlap=int(config.CHILD_CHUNK_SIZE * 0.1),
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
 
-    logger.info(f"  [2/3] 완료 — {len(docs)}개 청크 생성 (Markdown Header 기반)")
-    return {**state, "documents": docs}
+        parents = parent_splitter.split_documents(header_splits)
+        
+        for p_idx, p_doc in enumerate(parents):
+            p_id = str(uuid.uuid4())
+            p_doc.metadata.update({
+                "parent_id": p_id,
+                "file_name": state["file_name"],
+                "target_name": state["target_name"],
+                "title": state["title"],
+                "report_date": state["report_date"],
+                "broker": state.get("broker", "알수없음")
+            })
+            parent_docs.append(p_doc)
+
+            # 해당 Parent를 Child 조각으로 나눔
+            children = child_splitter.split_documents([p_doc])
+            for c_idx, c_doc in enumerate(children):
+                c_doc.metadata.update({
+                    "parent_id": p_id, # 부모 추적용 ID만 저장 (중복 제거)
+                    "child_index": c_idx,
+                    "file_name": state["file_name"],
+                    "target_name": state["target_name"],
+                    "title": state["title"],
+                    "report_date": state["report_date"],
+                    "broker": state.get("broker", "알수없음")
+                })
+                # 검색 성능 향상을 위해 Child 청크에도 핵심 맥락(기업명/제목) 주입
+                header_context = f"[기업: {state['target_name']}, 제목: {state['title']}]\n"
+                c_doc.page_content = header_context + c_doc.page_content
+                child_docs.append(c_doc)
+
+        logger.info(f"  [2/3] 완료 — Parent {len(parent_docs)}개 / Child {len(child_docs)}개 생성 (ID 참조 방식)")
+        return {**state, "documents": child_docs, "parent_documents": parent_docs}
+
+    else:
+        # --- 일반 모드 (기존 방식) ---
+        chunk_overlap = int(config.CHUNK_SIZE * 0.1)
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.CHUNK_SIZE,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+        
+        docs = text_splitter.split_documents(header_splits)
+
+        for i, doc in enumerate(docs):
+            doc.metadata.update({
+                "file_name":   state["file_name"],
+                "target_name": state["target_name"],
+                "title":       state["title"],
+                "report_date": state["report_date"],
+                "broker":      state.get("broker", "알수없음"),
+                "chunk_index": i
+            })
+            header_context = f"[기업: {state['target_name']}, 제목: {state['title']}]\n"
+            doc.page_content = header_context + doc.page_content
+
+        logger.info(f"  [2/3] 완료 — {len(docs)}개 청크 생성 (일반 Markdown Header 기반)")
+        return {**state, "documents": docs}
 
 
 def node_embed_and_store(state: dict, embeddings_fn: GoogleGenerativeAIEmbeddings) -> dict:
@@ -267,11 +313,23 @@ def node_embed_and_store(state: dict, embeddings_fn: GoogleGenerativeAIEmbedding
     texts     = [doc.page_content for doc in docs]
     metadatas = [doc.metadata for doc in docs]
 
-    # ① 임베딩 호출 (GoogleGenerativeAIEmbeddings)
+    # ① Parent-Child 모드인 경우 부모 청크를 SQLite에 저장
+    if config.USE_PARENT_CHILD and "parent_documents" in state:
+        logger.info(f"  [3/3] 부모 청크 {len(state['parent_documents'])}개 DB 저장 중...")
+        parent_data = []
+        for p_doc in state["parent_documents"]:
+            parent_data.append({
+                "id": p_doc.metadata["parent_id"],
+                "content": p_doc.page_content,
+                "file_name": p_doc.metadata["file_name"],
+                "metadata": json.dumps(p_doc.metadata, ensure_ascii=False)
+            })
+        insert_parent_chunks(parent_data)
+
+    # ② 임베딩 호출 (GoogleGenerativeAIEmbeddings)
     logger.info(f"  [3/3] 임베딩 중... ({len(docs)}개 청크)")
     vectors = [[float(x) for x in v] for v in embeddings_fn.embed_documents(texts)]
     # ② FAISS 로드 또는 새로 생성
-    # 폴더가 아니라 실제 index.faiss 파일이 있는지 확인 (폴더만 있고 파일이 없는 경우 방어)
     text_embeddings = list(zip(texts, vectors))   # List[(text, vector)]
     faiss_index_file = os.path.join(config.FAISS_DIR, "index.faiss")
     if os.path.exists(faiss_index_file):

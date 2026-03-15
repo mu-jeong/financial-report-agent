@@ -22,6 +22,10 @@ ROUTER_PROMPT = """
 - 특정 종목의 실적 전망, 본문 내용, 목표 주가, 업황 분석 등 "문서 내용 분석"이 필요한 경우: 'vectordb'
 - 주가는 RDB 혹은 VectorDB 노드에서 필요 시 자동으로 조회 도구(tool)가 호출됩니다. 별도로 분기할 필요가 없습니다.
 
+[출력 형식]
+반드시 JSON 형식의 구조화된 데이터로 응답하세요.
+- route: 판단 결과 플래그 ('rdb', 'vectordb', 'stock_price')
+
 [질문]
 {question}
 """
