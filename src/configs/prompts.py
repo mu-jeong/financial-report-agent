@@ -24,7 +24,7 @@ ROUTER_PROMPT = """
 
 [출력 형식]
 반드시 JSON 형식의 구조화된 데이터로 응답하세요.
-- route: 판단 결과 플래그 ('rdb', 'vectordb', 'stock_price')
+- route: 판단 결과 플래그 ('rdb', 'vectordb')
 
 [질문]
 {question}

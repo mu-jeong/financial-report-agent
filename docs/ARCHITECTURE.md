@@ -59,6 +59,16 @@
 
 LangGraph의 상태 전환(State Machine)을 사용하여, 무분별하게 Vector DB를 뒤지지 않고 사용자의 **질문 의도에 따라 똑똑하게 라우팅(Routing)**하는 아키텍처입니다.
 
+현재 구현 기준 실제 그래프 흐름은 다음과 같습니다.
+
+1. `START -> query_rewrite -> router`
+2. 라우터가 메타데이터성 질의로 판단하면 `rdb_sql_gen_node -> rdb_execute_node`로 이동합니다.
+3. 라우터가 문서 본문 질의로 판단하면 `vectordb_node`로 이동합니다.
+4. `rdb_execute_node`와 `vectordb_node`는 각각 `rdb_result`, `faiss_context`, `rerank_info` 같은 조회 결과를 state에 저장합니다.
+5. 두 노드 모두 기본적으로 `final_response_node`로 이동하며, 여기서 route에 따라 저장된 state 값을 사용해 최종 자연어 응답을 생성합니다.
+6. 다만 두 노드 모두 LLM이 `tool_calls`를 반환한 경우에만 `stock_price_tools`로 이동합니다.
+7. `stock_price_tools` 실행 뒤에도 같은 `final_response_node`가 호출되며, 이 경우 tool 호출 전 전달된 질문/문맥 메시지와 `ToolMessage`를 함께 사용해 최종 응답을 생성한 후 `END`로 종료합니다.
+
 ---
 
 ## 🛡️ 3. 주요 개발 철학과 차별점
@@ -69,5 +79,6 @@ LangGraph의 상태 전환(State Machine)을 사용하여, 무분별하게 Vecto
     RAG가 가진 "파일에 대해 질문하면 Vector DB에만 의존하는 현상"을 해결하기 위해 RDB를 도입하여 구조적 메타데이터(증권사, 기간)를 하드 라우팅 시켰습니다. 이는 단순히 정확도를 높이는 것을 넘어, 통계성 질문이나 메타데이터 필터링 시 수백 개의 문서 조각을 LLM 프롬프트에 구겨 넣는 **토큰 낭비를 원천적으로 차단**하여 경제적인 파이프라인을 구축하게 해줍니다.
 *   **Tool Calling 기반 주가 조회 통합:**
     주가 조회를 별도 노드로 분리하지 않고 `@tool` + `ToolNode` 패턴을 도입하여, RDB와 VectorDB 모든 경로에서 LLM이 **필요 시 자율적으로 주가 데이터를 호출**할 수 있도록 설계했습니다. 이는 "리포트 분석 + 현재 주가"를 동시에 요구하는 복합 질의를 자연스럽게 처리할 수 있게 합니다.
+    또한 현재 그래프에서는 기본 질의와 tool 호출 질의 모두 `final_response_node`에서 최종 응답을 생성합니다. tool 호출이 발생한 경우에는 `stock_price_tools`를 거친 뒤 같은 노드에서 원질문과 검색 문맥, tool 결과를 합쳐 최종 응답을 구성합니다.
 *   **1인 로컬 시스템의 한계를 극복하는 엔지니어링:**
     단순 파이썬 스크립트 데모 수준을 벗어나기 위해, **DB 배치(Batch) 처리**를 통한 I/O 최적화, **AST 파싱을 통한 강력한 SQL 프롬프트 가드레일**, 그리고 전역 **Logging 아키텍처**를 구축하여 프로덕션 백엔드 레벨의 코어 단단함을 확보했습니다.

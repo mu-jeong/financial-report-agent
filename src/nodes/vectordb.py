@@ -1,9 +1,9 @@
 import os
+
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
-from langchain_core.prompts import PromptTemplate
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.configs.config import GEMINI_API_KEY, EMBEDDING_MODEL, GENERATION_MODEL, FAISS_DIR, SEARCH_TOP_K, USE_RERANKER, get_logger
 from src.configs.prompts import VECTORDB_PROMPT
@@ -14,6 +14,7 @@ from src.nodes.stock_price import stock_price_tools
 
 logger = get_logger(__name__)
 
+
 def build_embeddings_fn() -> GoogleGenerativeAIEmbeddings:
     return GoogleGenerativeAIEmbeddings(
         model=EMBEDDING_MODEL,
@@ -21,71 +22,68 @@ def build_embeddings_fn() -> GoogleGenerativeAIEmbeddings:
         task_type="retrieval_query",
     )
 
+
 def vectordb_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
     if not os.path.exists(FAISS_DIR):
-        msg = "죄송합니다. faiss_db/ 폴더가 없습니다. 먼저 embed_pipeline.py를 실행하여 리포트를 학습시켜주세요."
+        msg = "죄송합니다. faiss_db/ 폴더가 없습니다. 먼저 embed_pipeline.py를 실행하여 리포트를 임베딩해주세요."
         logger.warning(msg)
         return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
 
     embeddings_fn = build_embeddings_fn()
     faiss_store = FAISS.load_local(
-        FAISS_DIR, embeddings_fn,
-        allow_dangerous_deserialization=True
+        FAISS_DIR,
+        embeddings_fn,
+        allow_dangerous_deserialization=True,
     )
 
-    # 검색 수행
     docs_with_scores = faiss_store.similarity_search_with_score(query, k=SEARCH_TOP_K)
 
     if not docs_with_scores:
-        msg = "죄송합니다. 제공된 리포트에서는 관련 문서를 찾을 수 없습니다."
+        msg = "죄송합니다. 수집된 리포트에서는 관련 문서를 찾을 수 없습니다."
         logger.info(msg)
         return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
 
-    filtered_results = docs_with_scores
-
     passages = []
-    seen_parent_ids = set() # 중복 부모 체크용
-    
-    # --- [개선 2] Parent Context Merging (중복 제거) ---
-    for rank, (doc, score) in enumerate(filtered_results):
+    seen_parent_ids = set()
+
+    for rank, (doc, score) in enumerate(docs_with_scores):
         meta = doc.metadata
         page_content = doc.page_content
         parent_id = meta.get("parent_id")
 
-        # Parent-Child 매핑 및 중복 제거
         if parent_id:
             if parent_id in seen_parent_ids:
-                continue # 이미 포함된 부모 섹션은 건너뜀
+                continue
             seen_parent_ids.add(parent_id)
-            
+
             parent_content = fetch_parent_content(parent_id)
             if parent_content:
                 page_content = parent_content
 
-        passages.append({
-            "id": rank,
-            "text": page_content,
-            "score": score,
-            "meta": meta
-        })
-    
-    # Reranker 적용 (선택 사항)
+        passages.append(
+            {
+                "id": rank,
+                "text": page_content,
+                "score": score,
+                "meta": meta,
+            }
+        )
+
     if USE_RERANKER:
         ranker, req_cls = get_ranker()
         rerank_request = req_cls(query=query, passages=passages)
         rerank_results = ranker.rerank(rerank_request)
-        top_passages = rerank_results[:3] # Reranker 결과 중 상위 3개
+        top_passages = rerank_results[:3]
     else:
-        top_passages = passages[:3] # 최종적으로는 상위 3개 부모 섹션만 사용
-        
+        top_passages = passages[:3]
+
     context_text = ""
     for rank, result in enumerate(top_passages, 1):
-        meta = result['meta']
+        meta = result["meta"]
         source_info = f"[{rank}] {meta.get('target_name', '알수없음')} ({meta.get('report_date', '날짜없음')}) - {meta.get('title', '제목없음')}"
         context_text += f"\n--- 문서 {rank} ---\n[출처: {source_info}]\n{result['text']}\n"
 
-    # stock_price tool을 bind하여 LLM이 필요 시 주가 조회를 호출할 수 있도록 함
     llm = ChatGoogleGenerativeAI(
         model=GENERATION_MODEL,
         google_api_key=GEMINI_API_KEY,
@@ -94,38 +92,40 @@ def vectordb_node(state: State) -> dict:
 
     prompt = PromptTemplate.from_template(VECTORDB_PROMPT)
     formatted_prompt = prompt.format(context=context_text, question=query)
-
     ai_msg: AIMessage = llm.invoke(formatted_prompt)
 
     rerank_info = []
     for rank, result in enumerate(top_passages, 1):
-        meta = result['meta']
-        score = float(result.get('score', 0.0))
-        rerank_info.append({
-            "rank": rank,
-            "target_name": meta.get('target_name', '-'),
-            "report_date": meta.get('report_date', '-'),
-            "broker": meta.get('broker', '-'),
-            "file_name": meta.get('file_name', '-'),
-            "score": score
-        })
+        meta = result["meta"]
+        score = float(result.get("score", 0.0))
+        rerank_info.append(
+            {
+                "rank": rank,
+                "target_name": meta.get("target_name", "-"),
+                "report_date": meta.get("report_date", "-"),
+                "broker": meta.get("broker", "-"),
+                "file_name": meta.get("file_name", "-"),
+                "score": score,
+            }
+        )
 
-    # LLM이 tool 호출을 요청했는지 확인
     if ai_msg.tool_calls:
         logger.info(f"[VectordbNode] LLM이 주가 조회 tool 호출 요청: {ai_msg.tool_calls}")
+        tool_context_message = HumanMessage(
+            content=(
+                f"사용자 질문: {state['question']}\n\n"
+                f"재작성된 질문: {query}\n\n"
+                f"검색 컨텍스트:\n{context_text}\n\n"
+                "도구 호출 결과를 반영해 최종 답변을 완성하세요."
+            )
+        )
         return {
             "faiss_context": context_text,
             "rerank_info": rerank_info,
-            "messages": [ai_msg],  # ToolNode가 읽을 수 있도록 messages에 저장
+            "messages": [tool_context_message, ai_msg],
         }
 
-    # ai_msg.content가 리스트(Gemini 멀티파트 등)인 경우 대비하여 문자열로 변환
-    answer = ai_msg.content
-    if isinstance(answer, list):
-        answer = "".join([part.get("text", "") if isinstance(part, dict) else str(part) for part in answer])
     return {
-        "generation": answer, 
-        "faiss_context": context_text, 
+        "faiss_context": context_text,
         "rerank_info": rerank_info,
-        "chat_history": [("사용자", state["question"]), ("AI", answer)]
     }

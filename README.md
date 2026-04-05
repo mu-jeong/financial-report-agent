@@ -185,6 +185,7 @@ python apps/cli/app.py
 - 현재 대화 메모리를 초기화하려면 `c` 또는 `clear`를 입력하세요.
 
 #### 💡 공통 파이프라인 기능 설명
+- **현재 LangGraph 실행 흐름:** 기본 경로는 `query_rewrite -> router -> (rdb_sql_gen_node -> rdb_execute_node | vectordb_node) -> final_response_node -> END` 입니다. 두 검색 경로 모두 LLM이 `tool_calls`를 반환한 경우에만 `stock_price_tools`를 먼저 거친 뒤 같은 `final_response_node`로 들어갑니다.
 - **⏳ 초기 실행 대기시간:** 애플리케이션 실행 후 LangGraph 상태 객체 컴파일 및 메모리 로딩 과정으로 인해 **약 10~20초 정도의 최초 대기 시간**이 발생할 수 있습니다.
 - **메타데이터 질문 (RDB 처리):** *"저장된 산업 리포트는 모두 몇 개야?"*, *"미래에셋증권에서 나온 가장 최근 리포트는 언제 발간됐어?"* 와 같은 질문은 벡터 DB를 거치지 않고 직접 SQLite DB에 SQL 변환하여 빠르게 답변합니다. 모든 문서를 벡터 검색하고 LLM에 컨텍스트로 집어넣는 방식에 비해 토큰 사용량을 획기적으로 줄여 비용과 속도 측면에서 훨씬 효율적입니다.
 - **문서 본문 질문 (Vector DB 처리):** *"삼성전자의 반도체 실적 전망 알려줘"* 와 같은 질문은 FAISS 벡터 DB를 검색하고 FlashRank를 통해 문서를 재평가(Reranking) 한 뒤, 참조 문서 출처 목록을 결과에 깔끔하게 첨부합니다.
@@ -253,6 +254,7 @@ python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('
 - [x] **GUI 환경 지원:** 현재의 CLI(터미널) 방식을 넘어, 나중에는 Streamlit 등을 활용해 누구나 쉽게 접근할 수 있는 사용자 인터페이스(UI) 개발
 - [x] **Agent 및 툴 콜링 (Tool Calling):** AI가 스스로 판단하여 리포트 외의 최신·정량적 데이터를 수집하는 외부 API 호출 도입
   - [x] **실시간 주가 조회 Tool 통합:** `FinanceDataReader` 기반 `get_stock_price` 함수를 `@tool`로 등록하고 LangGraph `ToolNode`에 연결. `rdb_execute_node`와 `vectordb_node`의 LLM에 `bind_tools`로 바인딩하여 **LLM이 주가 조회가 필요하다고 판단하면 어느 경로에서든 자동으로 tool을 호출**하도록 구현 완료
+  - [x] **응답 생성 경로 일원화:** `rdb_execute_node`와 `vectordb_node`는 조회 결과를 state에 저장하고, 최종 자연어 응답은 `final_response_node`에서 생성하도록 정리. tool 호출이 발생한 경우에는 `stock_price_tools`를 거친 뒤 같은 `final_response_node`에서 문맥과 tool 결과를 함께 반영
 - [ ] **프롬프트 엔지니어링 개선 (Prompt Engineering):**
   서비스 사용 과정에서 관찰된 오류 중 상당수가 LLM의 프롬프트 해석 방식에서 기인합니다. 아래 항목들을 중심으로 프롬프트를 체계적으로 점검하고 개선할 예정입니다.
   - **라우터 오분류 개선:** 질의 의도가 모호하거나 복합적인 경우(예: "가장 최근 리포트 개수와 거기서 언급된 목표 주가") `router_node`가 `rdb`와 `vectordb` 중 의도와 다른 경로로 라우팅하는 케이스 분석 및 Few-shot 예시 보강
