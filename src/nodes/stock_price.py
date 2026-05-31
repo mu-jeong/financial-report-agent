@@ -1,5 +1,3 @@
-from pydantic import BaseModel, Field
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from langgraph.prebuilt import ToolNode
 import FinanceDataReader as fdr
@@ -7,7 +5,7 @@ import pandas as pd
 from typing import Optional
 from datetime import datetime, timedelta
 
-from src.configs.config import GEMINI_API_KEY, GENERATION_MODEL, get_logger
+from src.configs.config import get_logger
 
 logger = get_logger(__name__)
 

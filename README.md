@@ -4,10 +4,11 @@
 
 ---
 
-### Latest Update: [v0.5] (2026-05-31)
-- **OpenRouter provider support**: generation now defaults to `deepseek/deepseek-v4-flash` via a shared chat model factory.
-- **Lower-cost embeddings**: embeddings now default to OpenRouter `baai/bge-m3` via a shared embeddings factory.
-- **FAISS rebuild guidance**: changing `EMBEDDING_PROVIDER` or `EMBEDDING_MODEL` requires rebuilding `data/vector_db` and resetting embedding state.
+### 🚀 Latest Update: [v0.5] (2026-05-31)
+- **OpenRouter 전환**: 생성 LLM 기본값을 `deepseek/deepseek-v4-flash`로 변경하고, 공통 LLM factory를 통해 provider를 교체할 수 있게 했습니다.
+- **임베딩 비용 최적화**: 임베딩 기본값을 OpenRouter `baai/bge-m3`로 변경했습니다.
+- **FAISS 재빌드 절차 명확화**: 임베딩 모델 변경 시 `data/vector_db`, `reports.is_embedded`, `parent_chunks`를 함께 초기화하도록 문서화했습니다.
+- **테스트 보강**: OpenRouter embedding payload 테스트를 추가했습니다.
 
 👉 **[상세 내용 확인하기 (Changelog)](./CHANGELOG.md)**
 
@@ -41,19 +42,18 @@ finance_llm/
 │   └── reports.db        # SQLite DB (자동 생성)
 ├── src/                  # 메인 비즈니스 로직
 │   ├── configs/          # 설정, 필터링 규칙 및 프롬프트
-│   ├── core/             # 핵심 파이프라인 (db_manager.py, embed_pipeline.py 등)
+│   ├── core/             # 핵심 파이프라인 및 상태 유틸 (db_manager.py, embed_pipeline.py, status.py 등)
 │   ├── graphs/           # LangGraph 흐름 조립 및 상태 정의
 │   ├── nodes/            # LangGraph의 개별 비즈니스 로직 모듈
-│   ├── utils/            # 공통 유틸리티 (text_filters.py, ranker.py 등)
-│   └── search.py         # 검색 로직 처리
+│   └── utils/            # 공통 유틸리티 (text_filters.py, ranker.py 등)
 ├── apps/                 # 사용자 인터페이스 엔트리포인트
 │   ├── cli/              # 터미널 기반 CLI (app.py)
 │   └── gui/              # Streamlit 기반 웹 앱 (app.py)
-├── scripts/              # 유틸리티 및 디버깅 스크립트
+├── scripts/              # 선택적 유틸리티 및 디버깅 스크립트
 ├── docs/                 # 시스템 설계 철학 및 연동 가이드 문서
 ├── logs/                 # 애플리케이션 로그
-├── tests/                # 테스트 코드
-├── requirements.txt      # 필요 패키지 목록
+├── tests/                # pytest 기반 회귀 테스트
+├── requirements.txt      # 검증 환경 기준으로 고정된 패키지 목록
 └── .env.example          # 환경 변수 템플릿
 ```
 
@@ -91,7 +91,7 @@ pip install -r requirements.txt
 
 ### 3. API 키 설정
 
-Copy `.env.example` to `.env` and set your OpenRouter API key. The default generation model is DeepSeek, and the default embedding model is `baai/bge-m3`.
+프로젝트 루트의 `.env.example` 파일을 복사하여 `.env` 파일을 생성하고, OpenRouter API 키를 입력합니다. 기본 생성 모델은 DeepSeek, 기본 임베딩 모델은 `baai/bge-m3`입니다.
 
 > 💡 **상세 연동 가이드:** API 키 발급 및 설정에 대한 구체적인 방법은 [🔑 API 연동 가이드(API_SETUP.md)](docs/API_SETUP.md) 문서를 확인해 주세요.
 
@@ -117,12 +117,12 @@ EMBEDDING_MODEL=baai/bge-m3
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-#### Model/provider settings
+#### 모델/provider 설정
 
-- Chat models are created by `src/llms/factory.py::build_chat_model()`.
-- Embeddings are created by `src/llms/embeddings.py::build_embeddings_model()`.
-- Set `LLM_PROVIDER=gemini` or `EMBEDDING_PROVIDER=gemini` only when using Gemini fallback; that requires `GEMINI_API_KEY`.
-- Changing `EMBEDDING_MODEL` or `EMBEDDING_PROVIDER` requires rebuilding the FAISS index.
+- 생성 LLM은 `src/llms/factory.py`의 `build_chat_model()`에서 생성합니다.
+- 임베딩은 `src/llms/embeddings.py`의 `build_embeddings_model()`에서 생성합니다.
+- `LLM_PROVIDER=gemini` 또는 `EMBEDDING_PROVIDER=gemini`로 되돌릴 수 있지만, 그 경우 `GEMINI_API_KEY`가 필요합니다.
+- `EMBEDDING_MODEL` 또는 `EMBEDDING_PROVIDER`를 바꾸면 기존 FAISS 인덱스는 반드시 재생성해야 합니다.
 
 
 ---
@@ -149,10 +149,16 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 ### Step 2. 임베딩 파이프라인 실행
 
-준비된 PDF들을 텍스트로 변환하고 벡터 DB에 저장합니다.
+준비된 PDF들을 텍스트로 변환하고 벡터 DB에 저장합니다. 기본 임베딩 provider는 OpenRouter이고, 모델은 `baai/bge-m3`입니다.
 
 ```bash
 python -m src.core.embed_pipeline
+
+# 이번 실행에서 최대 N개만 처리
+python -m src.core.embed_pipeline --limit 20
+
+# 미처리 리포트 전체 처리
+python -m src.core.embed_pipeline --all
 ```
 
 > [!WARNING]
@@ -166,8 +172,10 @@ python -m src.core.embed_pipeline
 - **정교한 예외 처리 및 폴백(Fallback):** 엔진 설정과 관계없이 추출 과정에서 오류가 발생할 경우, 시스템이 중단되지 않고 자동으로 **표준 텍스트 추출 방식(fitz)**으로 전환하여 안정적인 처리를 보장합니다.
 
 > 💡 **(현재 설정) 임베딩 10건 제한 (테스트 모드) 안내:**
-> 다운로드된 PDF가 수십 건 이상일 경우 단기간 내 API 허용량(Rate Limit)을 초과할 수 있어, 현재 `src/configs/config.py` 파일 내에 `TEST_LIMIT = 10` (최대 10개만 임베딩)으로 안전 설정이 걸려있습니다.
-> **제한 해제 방법:** 토큰을 사용하는데 금전적인 제약이 적다면, `src/configs/config.py`에서 `TEST_LIMIT = 0`으로 변경하면 폴더 내의 **모든 리포트**를 개수 제한 없이 한 번에 임베딩할 수 있습니다.
+> 다운로드된 PDF가 수십 건 이상일 경우 단기간 내 API 허용량(Rate Limit) 또는 OpenRouter 크레딧 소진을 피하기 위해, 현재 `src/configs/config.py` 파일 내에 `TEST_LIMIT = 10` (최대 10개만 임베딩)으로 안전 설정이 걸려있습니다.
+> **제한 해제 방법:** `python -m src.core.embed_pipeline --all`을 사용하거나, `src/configs/config.py`에서 `TEST_LIMIT = 0`으로 변경하면 폴더 내의 **모든 리포트**를 개수 제한 없이 한 번에 임베딩할 수 있습니다.
+
+> 📌 **현재 로컬 점검 상태(2026-04-25 기준):** 이 작업 공간에는 `data/downloaded/` PDF 740개와 SQLite `reports` 740건이 있으며, 기본 `TEST_LIMIT=10` 설정 때문에 임베딩 완료 문서는 10건, 대기 문서는 730건입니다. `data/`는 git 추적 대상이 아니므로 다른 환경에서는 수치가 달라질 수 있습니다.
 
 ---
 
@@ -194,20 +202,26 @@ python -m streamlit run apps/gui/app.py
 
 ```bash
 python apps/cli/app.py
+
+# LLM 그래프를 실행하지 않고 데이터/인덱스 상태만 확인
+python apps/cli/app.py --status
 ```
 
 - 스크립트를 실행하면 터미널에 대화형 프롬프트가 나타납니다.
 - **진행 상태 및 쿼리 재구성 안내:** 답변 생성 중에 시각적인 로딩 상태(`🤖...`)를 표시하며, AI가 질문의 의도를 재분석한 경우(`🔍 검색어 재구성`) 결과를 함께 보여주어 투명성을 높였습니다.
 - 종료하려면 `q` 또는 `quit`를 입력하세요.
 - 현재 대화 메모리를 초기화하려면 `c` 또는 `clear`를 입력하세요.
+- 데이터 상태를 다시 보려면 `status` 또는 `s`를 입력하세요.
 
 #### 💡 공통 파이프라인 기능 설명
-- **현재 LangGraph 실행 흐름:** 기본 경로는 `query_rewrite -> router -> (rdb_sql_gen_node -> rdb_execute_node | vectordb_node) -> final_response_node -> END` 입니다. 두 검색 경로 모두 LLM이 `tool_calls`를 반환한 경우에만 `stock_price_tools`를 먼저 거친 뒤 같은 `final_response_node`로 들어갑니다.
+- **현재 LangGraph 실행 흐름:** 기본 경로는 `query_rewrite -> router -> (rdb_sql_gen_node -> rdb_execute_node | vectordb_node)` 입니다. 각 검색 노드는 직접 답변을 생성하거나, `tool_calls`가 필요한 경우에만 `stock_price_tools`로 보냅니다. tool이 실행된 경우에는 `final_response_node`가 tool 결과를 반영해 최종 응답을 만들고 `END`로 종료됩니다.
 - **⏳ 초기 실행 대기시간:** 애플리케이션 실행 후 LangGraph 상태 객체 컴파일 및 메모리 로딩 과정으로 인해 **약 10~20초 정도의 최초 대기 시간**이 발생할 수 있습니다.
 - **메타데이터 질문 (RDB 처리):** *"저장된 산업 리포트는 모두 몇 개야?"*, *"미래에셋증권에서 나온 가장 최근 리포트는 언제 발간됐어?"* 와 같은 질문은 벡터 DB를 거치지 않고 직접 SQLite DB에 SQL 변환하여 빠르게 답변합니다. 모든 문서를 벡터 검색하고 LLM에 컨텍스트로 집어넣는 방식에 비해 토큰 사용량을 획기적으로 줄여 비용과 속도 측면에서 훨씬 효율적입니다.
 - **문서 본문 질문 (Vector DB 처리):** *"삼성전자의 반도체 실적 전망 알려줘"* 와 같은 질문은 FAISS 벡터 DB를 검색하고 FlashRank를 통해 문서를 재평가(Reranking) 한 뒤, 참조 문서 출처 목록을 결과에 깔끔하게 첨부합니다.
+- **메타데이터 기반 VectorDB 필터링:** 질문에 종목명, 증권사명, 리포트 유형이 명시되어 있으면 SQLite 메타데이터에서 확인된 값을 기준으로 FAISS 검색 결과를 후필터링합니다. 예를 들어 “미래에셋증권 삼성전자 리포트”는 해당 종목/증권사 메타데이터를 가진 임베딩 문서만 답변 컨텍스트로 사용합니다.
 - **실시간 주가 조회 (Tool Calling):** RDB 또는 Vector DB 처리 중 LLM이 현재 주가 데이터가 필요하다고 판단하면, `get_stock_price` tool을 **자율적으로 호출(Tool Calling)**하여 KRX 상장 종목의 최근 주가를 실시간으로 조회합니다. 라우터가 별도로 판단하지 않아도 되므로 "리포트 분석 + 현재 주가" 복합 질의를 자연스럽게 처리합니다.
 - **이중 보안 가드레일 (Guardrail):** 데코레이터(`@sql_guardrail`)와 `sqlglot` 라이브러리를 통해 LLM이 생성한 위험한 SQL 명령어를 추상 구문 트리(AST) 레벨에서 사전 차단하고, DB 연결을 읽기 전용(`?mode=ro`)으로 강제하는 다중 보안을 적용하며, Pydantic Validator로 라우팅 응답 포맷을 검증합니다.
+- **상태 점검 유틸리티:** `src/core/status.py`가 로컬 데이터 상태를 읽기 전용으로 요약하며, CLI 시작 화면/`--status`와 GUI 사이드바에서 동일한 기준으로 표시합니다.
 
 > **💡 Reranking (문서 재평가) 기능 활성화 방법**
 > 기본적으로 빠른 응답 속도를 위해 Reranker 모델이 비활성화 되어 있습니다. 더 정확하고 문맥에 맞는 문서를 찾고 싶다면 `src/configs/config.py` 파일 상단의 `USE_RERANKER = False` 를 `True` 로 변경하세요. (최초 1회 실행 시 모델 다운로드로 인해 1~2분 정도 소요될 수 있습니다.)
@@ -230,26 +244,46 @@ python apps/cli/app.py
 3. **중앙 집중형 로깅 시스템 (Centralized Logging)**
    - 단순한 `print()` 출력을 배제하고, `src/configs/config.py`에 파이썬 내장 `logging` 모듈을 전역으로 설정했습니다.
    - 터미널(Stream) 진행 상황과 함께, 모든 동작과 구체적인 에러 이력이 `logs/finance_llm.log` 파일에 영구 기록되어 백그라운드 서버 모드로 구동할 때의 관찰성(Observability)을 확보했습니다.
+4. **로컬 FAISS 인덱스 신뢰 경계**
+   - `FAISS.load_local(..., allow_dangerous_deserialization=True)`를 사용하므로, `data/vector_db/index.pkl`은 직접 생성한 신뢰 가능한 인덱스만 로드해야 합니다. 외부에서 받은 `vector_db`는 그대로 사용하지 말고 재생성하는 것을 권장합니다.
+
+---
+
+## ✅ 테스트
+
+핵심 회귀 테스트는 `tests/` 아래에 있습니다.
+
+```bash
+python -m pytest -q
+```
+
+현재 테스트 범위:
+- 파일명 파싱 규칙
+- SQL 가드레일 및 읽기 전용 SELECT 허용
+- 데이터/인덱스 상태 스냅샷
+- VectorDB 메타데이터 필터 추론 및 적용
+- Tool Calling 이후 `final_response_node` 메시지 delta 반환
+- OpenRouter embedding 요청 payload
 
 ---
 
 ## 🔧 DB 초기화 방법
 
-새로운 규칙을 적용하거나 DB를 처음부터 다시 구성하고 싶을 때 사용합니다.
+새로운 청킹/정제 규칙을 적용하거나, `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`을 바꿔 FAISS를 처음부터 다시 구성하고 싶을 때 사용합니다.
 
 ```powershell
-# 0. Optional: back up SQLite DB
+# 0. 선택: SQLite DB 백업
 Copy-Item data/reports.db data/reports.backup.db -Force
 
-# 1. Delete FAISS index
+# 1. FAISS 인덱스 삭제
 if (Test-Path data/vector_db) {
     Remove-Item -Recurse -Force data/vector_db
 }
 
-# 2. Reset embedding state and parent chunks
+# 2. SQLite 임베딩 상태와 parent chunk 초기화
 python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('UPDATE reports SET is_embedded=0'); con.execute('DELETE FROM parent_chunks'); con.commit(); con.close(); print('embedding reset complete')"
 
-# 3. Rebuild all embeddings with the current provider/model
+# 3. 현재 EMBEDDING_PROVIDER/EMBEDDING_MODEL 기준으로 전체 재임베딩
 python -m src.core.embed_pipeline --all
 ```
 
@@ -261,7 +295,7 @@ python -m src.core.embed_pipeline --all
 
 - **마크다운 구조 활용:** `marker` 엔진 사용 시 제목(#), 리스트 등의 문서 구조를 인식한 채로 추출하며, `fitz` 엔진 사용 시에도 마크다운 헤더 기반 스플리터를 통해 논리 구조를 보존
 - **계층적 청킹:** `MarkdownHeaderTextSplitter`로 논리적 섹션 분할 후, 10% 가변 오버랩을 적용한 상세 청킹 수행
-- **BBox 기반 표 제거:** PyMuPDF의 표 감지 기능을 사용해 표 영역과 겹치는 텍스트 블록 물리적 배제
+- **텍스트/블록 기반 노이즈 제거:** 현재 기본 `pymupdf` 경로는 `page.get_text("text")`로 추출한 뒤 블록/라인 필터를 적용해 사이드바, 재무 레이블, 숫자 위주 표 파편을 제거
 - **재무 레이블 제거:** 손익계산서/재무상태표의 행 레이블(예: 지분법이익, 매출채권 등) 감지 및 제거
 - **준법고지 제거:** 리포트 하단의 면책 조항 및 애널리스트 준법 확인 문구 섹션 절단
 - **기타 노이즈:** 도표 캡션, 주석, 숫자 위주의 데이터 행 등 제거
@@ -279,7 +313,10 @@ python -m src.core.embed_pipeline --all
 - [x] **GUI 환경 지원:** 현재의 CLI(터미널) 방식을 넘어, 나중에는 Streamlit 등을 활용해 누구나 쉽게 접근할 수 있는 사용자 인터페이스(UI) 개발
 - [x] **Agent 및 툴 콜링 (Tool Calling):** AI가 스스로 판단하여 리포트 외의 최신·정량적 데이터를 수집하는 외부 API 호출 도입
   - [x] **실시간 주가 조회 Tool 통합:** `FinanceDataReader` 기반 `get_stock_price` 함수를 `@tool`로 등록하고 LangGraph `ToolNode`에 연결. `rdb_execute_node`와 `vectordb_node`의 LLM에 `bind_tools`로 바인딩하여 **LLM이 주가 조회가 필요하다고 판단하면 어느 경로에서든 자동으로 tool을 호출**하도록 구현 완료
-  - [x] **응답 생성 경로 일원화:** `rdb_execute_node`와 `vectordb_node`는 조회 결과를 state에 저장하고, 최종 자연어 응답은 `final_response_node`에서 생성하도록 정리. tool 호출이 발생한 경우에는 `stock_price_tools`를 거친 뒤 같은 `final_response_node`에서 문맥과 tool 결과를 함께 반영
+  - [x] **단순 Tool Calling 흐름 정리:** `rdb_execute_node`와 `vectordb_node`가 직접 답변 생성과 tool 호출 판단을 수행하고, tool이 실제 실행된 경우에만 `stock_price_tools -> final_response_node` 경로를 타도록 단순화
+- [x] **운영 상태 가시화:** `src/core/status.py`, CLI `--status`/`status`, Streamlit 사이드바를 통해 로컬 DB·FAISS·임베딩 진행 상태를 확인
+- [x] **회귀 테스트 기반 마련:** 파일명 파싱, SQL 가드레일, 상태 유틸, Tool Calling 응답 흐름을 pytest로 검증
+- [x] **VectorDB 메타데이터 필터링:** 질문에 명시된 종목명/증권사/리포트 유형을 SQLite 메타데이터 기준으로 추론하고, FAISS 검색 결과를 해당 조건으로 제한
 - [ ] **프롬프트 엔지니어링 개선 (Prompt Engineering):**
   서비스 사용 과정에서 관찰된 오류 중 상당수가 LLM의 프롬프트 해석 방식에서 기인합니다. 아래 항목들을 중심으로 프롬프트를 체계적으로 점검하고 개선할 예정입니다.
   - **라우터 오분류 개선:** 질의 의도가 모호하거나 복합적인 경우(예: "가장 최근 리포트 개수와 거기서 언급된 목표 주가") `router_node`가 `rdb`와 `vectordb` 중 의도와 다른 경로로 라우팅하는 케이스 분석 및 Few-shot 예시 보강
@@ -291,3 +328,15 @@ python -m src.core.embed_pipeline --all
     - 별도의 무거운 프레임워크 도입 없이, 가벼운 파이썬 스케줄링 라이브러리를 사용해 매일 정해진 시간(예: 평일 새벽 3시)에 백그라운드에서 동작하도록 구성합니다.
     - 크롤링 → DB 적재 → 임베딩의 3단계 처리 로직을 하나로 묶어 순차적으로 실행하고, 에러 발생 시 재시도 및 로깅이 이루어지도록 파이프라인을 구축합니다.
 ---
+## PDF Extraction Engine Comparison
+
+`EXTRACTION_ENGINE` now accepts `pymupdf`, `marker`, or `opendataloader`.
+Before changing the default engine, compare extractor behavior on local reports:
+
+```bash
+python -m src.core.compare_pdf_extractors --limit 10
+```
+
+The comparison command writes `reports/pdf_extraction_compare.csv` and
+`reports/pdf_extraction_compare.json`. See
+`docs/PDF_EXTRACTION_COMPARISON.md` for the full process and metric notes.

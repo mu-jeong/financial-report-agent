@@ -1,18 +1,21 @@
 import sys
 import os
 import uuid
+import argparse
 
 # 모듈 경로 추가 (finance_llm 패키지 접근)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from src.graphs.main_graph import graph_app
 from src.configs.config import SEARCH_TOP_K
+from src.core.status import format_status_text
 
 def run_search(query: str, thread_id: str = "default_thread") -> dict:
     """
     주어진 질문(query)에 대해 LangGraph 기반 RAG 파이프라인을 실행합니다.
     - thread_id: 대화 맥락을 유지하기 위한 세션 식별자
     """
+    from src.graphs.main_graph import graph_app
+
     config = {"configurable": {"thread_id": thread_id}}
     return graph_app.invoke({"question": query}, config=config)
 
@@ -20,8 +23,9 @@ def run_cli():
     current_thread_id = str(uuid.uuid4())
     print("\n============================================================")
     print("  📈 Finance LLM Query Assistant (with LangGraph Router)")
-    print("  (종료하려면 'q' 또는 'quit' 입력 | 메모리 초기화하려면 'c' 또는 'clear' 입력)")
+    print("  (종료: q/quit | 메모리 초기화: c/clear | 데이터 상태: status)")
     print("============================================================")
+    print(format_status_text())
     
     while True:
         try:
@@ -34,6 +38,9 @@ def run_cli():
             if user_query.lower() in ['c', 'clear']:
                 current_thread_id = str(uuid.uuid4())
                 print("\n🔄 대화 메모리가 초기화되었습니다.")
+                continue
+            if user_query.lower() in ['s', 'status']:
+                print("\n" + format_status_text())
                 continue
             
             # 1. 그래프 실행 (진행 상태 표시)
@@ -69,7 +76,10 @@ def run_cli():
                 print("  📚 참고한 문서들 (Top " + str(SEARCH_TOP_K) + ")")
                 print("-" * 60)
                 for info in final_state["rerank_info"]:
-                    print(f"  [{info['rank']}] {info['target_name']} ({info['report_date']})")
+                    score = info.get("score")
+                    score_text = f" | score={score:.4f}" if isinstance(score, float) else ""
+                    print(f"  [{info['rank']}] {info['target_name']} ({info['report_date']}){score_text}")
+                    print(f"       증권사: {info.get('broker', '-')}")
                     print(f"       파일명: {info['file_name']}")
                     
             print("=" * 60)
@@ -78,5 +88,20 @@ def run_cli():
             print("\n\n프로그램을 종료합니다.")
             break
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description="Finance LLM CLI")
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="LLM 그래프를 실행하지 않고 로컬 데이터/인덱스 상태만 출력합니다.",
+    )
+    args = parser.parse_args()
+
+    if args.status:
+        print(format_status_text())
+        return
+
     run_cli()
+
+if __name__ == "__main__":
+    main()

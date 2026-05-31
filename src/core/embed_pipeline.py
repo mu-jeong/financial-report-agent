@@ -1,7 +1,7 @@
 """
 embed_pipeline.py
 -----------------
-PDF → PyMuPDF BBox 텍스트 추출 → LangChain 청킹 → Gemini 임베딩 → FAISS 저장
+PDF → 선택형 텍스트/Markdown 추출 → LangChain 청킹 → Gemini 임베딩 → FAISS 저장
 
 사용된 LangChain 컴포넌트:
     ┌─────────────────────────────────────────────────────────────┐
@@ -12,10 +12,8 @@ PDF → PyMuPDF BBox 텍스트 추출 → LangChain 청킹 → Gemini 임베딩 
     └─────────────────────────────────────────────────────────────┘
 
 [텍스트 추출 방식]
-  PyMuPDF(fitz) BBox 기반 표 제외:
-  - page.find_tables()로 표 영역 BBox 수집
-  - get_text("blocks")로 텍스트 블록 추출 후 표 BBox와 50% 이상 겹치는 블록 제거
-  - 테스트 결과: 표 노이즈 0.0%, 가장 빠른 처리 속도
+  EXTRACTION_ENGINE 설정에 따라 pymupdf, marker, opendataloader 중 하나를 사용합니다.
+  추출 결과는 금융 리포트 전용 정제 필터를 거친 뒤 공통 청킹 단계로 전달됩니다.
 
 향후 LangGraph 파이프라인 구성 시 각 함수가 그대로 노드로 전환됩니다:
 
@@ -33,7 +31,7 @@ import os
 import re
 import sys
 import time
-import fitz          # PyMuPDF — BBox 기반 표 제외 텍스트 추출
+import argparse
 import uuid
 import json
 
@@ -53,28 +51,13 @@ from src.core.db_manager import (
     init_db, sync_from_directory, fetch_unembedded, mark_embedded, 
     insert_parent_chunks
 )
+from src.core.pdf_extraction import extract_pdf_text
 from src.configs import config
 from src.llms.embeddings import build_embeddings_model
-from src.utils.text_filters import is_sidebar_block, is_noise_line, strip_compliance
 
 logger = config.get_logger(__name__)
 
 # ── 환경설정 ─────────────────────────────────────────────────────────────────────
-
-MARKER_MODELS = None
-
-def get_marker_models():
-    """Marker 모델을 싱글톤으로 로드 (메모리 절약 및 속도 향상)."""
-    global MARKER_MODELS
-    if MARKER_MODELS is None:
-        try:
-            from marker.models import create_model_dict
-            logger.info("  [Extraction] Marker 모델 로딩 중 (최초 1회, 수 GB 다운로드될 수 있음)...")
-            MARKER_MODELS = create_model_dict()
-        except Exception as e:
-            logger.error(f"  ❌ Marker 모델 로드 실패: {e}")
-            raise e
-    return MARKER_MODELS
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -100,90 +83,18 @@ def node_extract_pdf(state: dict) -> dict:
     file_name = state["file_name"]
     pdf_path  = os.path.join(config.SAVE_DIR, file_name)
 
-    logger.info(f"  [1/3] PDF 텍스트 추출 중 ({config.EXTRACTION_ENGINE} 방식)...")
-
-    md_text = ""
-    # ① PDF 텍스트 추출 (Marker 또는 PyMuPDF fitz)
     try:
-        if config.EXTRACTION_ENGINE == "marker":
-            from marker.config.parser import ConfigParser
-            from marker.converters.pdf import PdfConverter
-            
-            model_dict = get_marker_models()
-            # v1.0+ 버전에서는 최소한의 기본값을 명시하는 것이 좋습니다.
-            config_dict = {
-                "output_format": "markdown",
-                "use_llm": False, 
-                "force_ocr": False
-            }
-            config_parser = ConfigParser(config_dict)
-            
-            converter = PdfConverter(
-                config=config_parser.generate_config_dict(),
-                artifact_dict=model_dict,
-                processor_list=config_parser.get_processors(),
-                renderer=config_parser.get_renderer(),
-                llm_service=config_parser.get_llm_service()
-            )
-            
-            rendered = converter(pdf_path)
-            md_text = rendered.markdown
-        else:
-            # 기본 방식: PyMuPDF (fitz) 일반 텍스트 추출 -> 마크다운처럼 처리하기 위해 blocks 활용
-            logger.info(f"  🔄 일반 텍스트 추출 방식(fitz)을 사용합니다.")
-            doc = fitz.open(pdf_path)
-            md_text = ""
-            for page in doc:
-                md_text += page.get_text("text") + "\n\n"
-            doc.close()
-            
+        result = extract_pdf_text(pdf_path, config.EXTRACTION_ENGINE, clean=True)
     except Exception as e:
-        engine_name = "Marker" if config.EXTRACTION_ENGINE == "marker" else "PyMuPDF"
-        logger.warning(f"  ⚠️ {engine_name} 추출 실패: {e}")
-        
-        # 모든 방식 실패 시 일반 텍스트 추출(fitz)로 최종 폴백
-        if not md_text.strip():
-            logger.warning(f"  🔄 일반 텍스트 추출 방식(fitz)으로 최종 폴백합니다.")
-            try:
-                doc = fitz.open(pdf_path)
-                md_text = ""
-                for page in doc:
-                    md_text += page.get_text("text") + "\n\n"
-                doc.close()
-            except Exception as e3:
-                logger.error(f"  ❌ 최종 폴백 추출도 실패: {e3}")
-                raise ValueError(f"PDF에서 텍스트를 추출할 수 없습니다: {file_name}")
+        logger.error(f"  PDF extraction failed: {e}")
+        raise ValueError(f"PDF에서 텍스트를 추출할 수 없습니다: {file_name}") from e
 
-    if not md_text.strip():
-        raise ValueError(f"PDF에서 텍스트가 비어있습니다: {file_name}")
-
-    # ② 준법 고지(Compliance) 섹션 이후 제거
-    md_text = strip_compliance(md_text)
-
-    # ③ 블록 및 라인 단위 필터링 적용
-    # 마크다운 블록(\n\n) 단위로 사이드바 여부 확인 및 라인 단위 노이즈 제거
-    blocks = md_text.split("\n\n")
-    clean_blocks = []
-    
-    for blk in blocks:
-        # 블록 단위 필터 (STOCK DATA 등)
-        if is_sidebar_block(blk):
-            continue
-            
-        # 라인 단위 필터
-        lines = blk.split("\n")
-        filtered_lines = [
-            line for line in lines 
-            if not is_noise_line(line)
-        ]
-        clean_blk = "\n".join(filtered_lines).strip()
-        if clean_blk:
-            clean_blocks.append(clean_blk)
-
-    raw_text = "\n\n".join(clean_blocks)
+    raw_text = result.text
+    if result.used_engine != result.requested_engine:
+        logger.info(f"  Extraction fallback used: {result.used_engine}")
 
     if not raw_text.strip():
-        raise ValueError(f"정제 후 남은 내용이 없습니다: {file_name}")
+        raise ValueError(f"PDF에서 텍스트가 비어있습니다: {file_name}")
 
     logger.info(f"  [1/3] 완료 — {len(raw_text):,}자 추출 (Markdown 정제 완료)")
     return {**state, "raw_text": raw_text}
@@ -242,6 +153,7 @@ def node_split_documents(state: dict) -> dict:
                 "target_name": state["target_name"],
                 "title": state["title"],
                 "report_date": state["report_date"],
+                "report_type": state.get("report_type", "company"),
                 "broker": state.get("broker", "알수없음")
             })
             parent_docs.append(p_doc)
@@ -256,6 +168,7 @@ def node_split_documents(state: dict) -> dict:
                     "target_name": state["target_name"],
                     "title": state["title"],
                     "report_date": state["report_date"],
+                    "report_type": state.get("report_type", "company"),
                     "broker": state.get("broker", "알수없음")
                 })
                 # 검색 성능 향상을 위해 Child 청크에도 핵심 맥락(기업명/제목) 주입
@@ -283,6 +196,7 @@ def node_split_documents(state: dict) -> dict:
                 "target_name": state["target_name"],
                 "title":       state["title"],
                 "report_date": state["report_date"],
+                "report_type": state.get("report_type", "company"),
                 "broker":      state.get("broker", "알수없음"),
                 "chunk_index": i
             })
@@ -366,6 +280,7 @@ def build_embeddings_fn():
     """Initialize the configured embeddings model."""
     return build_embeddings_model()
 
+
 def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
     """
     미처리 PDF를 최대 test_limit개 선택하여 전체 파이프라인 실행.
@@ -412,6 +327,7 @@ def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
             "target_name": row["target_name"],
             "title":       row["title"],
             "report_date": row["report_date"],
+            "report_type": row["report_type"],
             "broker":      row["broker"],
         }
 
@@ -452,5 +368,25 @@ def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
     print("=" * 60)
 
 
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Finance LLM PDF embedding pipeline")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=config.TEST_LIMIT,
+        help=(
+            "이번 실행에서 처리할 최대 파일 수입니다. "
+            "0이면 모든 미처리 파일을 처리합니다. 기본값은 config.TEST_LIMIT입니다."
+        ),
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="--limit 0과 동일하게 모든 미처리 파일을 처리합니다.",
+    )
+    args = parser.parse_args(argv)
+    run_pipeline(test_limit=0 if args.all else args.limit)
+
+
 if __name__ == "__main__":
-    run_pipeline()
+    main()

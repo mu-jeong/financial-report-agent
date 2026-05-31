@@ -5,6 +5,7 @@ from langchain_core.prompts import PromptTemplate
 from src.configs.config import get_logger
 from src.llms.factory import build_chat_model
 from src.configs.prompts import ROUTER_PROMPT
+from src.core.metadata_filters import infer_search_filters
 from src.graphs.state import State
 
 logger = get_logger(__name__)
@@ -27,6 +28,7 @@ class RouteDecision(BaseModel):
 
 def router_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
+    search_filters = infer_search_filters(query)
     llm = build_chat_model(temperature=0.0).with_structured_output(RouteDecision)
     
     prompt = PromptTemplate.from_template(ROUTER_PROMPT)
@@ -39,4 +41,4 @@ def router_node(state: State) -> dict:
         logger.warning(f"[Router] 구조화된 응답 파싱에 실패하여 기본값으로 대체합니다. ({e})")
         route = "vectordb"
         
-    return {"route": route, "search_filters": {}}
+    return {"route": route, "search_filters": search_filters}

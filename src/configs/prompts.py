@@ -16,6 +16,8 @@ ROUTER_PROMPT = """
 - target_name (대상명, 예: 삼성전자, 자동차, null 등)
 - title (리포트 제목)
 - broker (증권사)
+- file_name (PDF 파일명)
+- is_embedded (Vector DB 임베딩 완료 여부: 0 또는 1)
 
 [판단 기준]
 - 특정 종목의 리포트 목록, 개수, 가장 최근 리포트 발간일, 리포트 제목 등 "메타데이터"만으로 답변 가능한 경우: 'rdb'
@@ -33,7 +35,7 @@ ROUTER_PROMPT = """
 RDB_SQL_GEN_PROMPT = """
 다음 SQLite 데이터베이스 스키마를 참고하여 사용자의 질문에 답하기 위한 SQL SELECT 쿼리를 작성하세요.
 테이블 이름: reports
-컬럼: report_type, report_date, target_name, title, broker
+컬럼: report_type, report_date, target_name, title, broker, file_name, is_embedded
 
 오직 SQL 쿼리만 출력하세요. 마크다운(` ```sql `) 기호나 다른 설명은 절대 포함하지 마세요.
 오늘 날짜는 DATE('now')로 사용할 수 있습니다.

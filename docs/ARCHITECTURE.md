@@ -16,7 +16,7 @@ Finance LLM은 로컬에 저장한 증권사 리포트를 SQLite + FAISS로 색�
 | Orchestration | LangChain, LangGraph, Pydantic |
 | Vector DB | 로컬 FAISS (`data/vector_db/`) |
 | Relational DB | SQLite (`data/reports.db`) |
-| PDF 추출 | `pymupdf` 기본, `marker` 선택 가능 |
+| PDF 추출 | `pymupdf` 기본, `marker`, `opendataloader` 선택 가능 |
 | 실시간 주가 도구 | FinanceDataReader 기반 `get_stock_price` tool |
 | SQL guardrail | `sqlglot` AST 검증 + SQLite read-only connection |
 
@@ -71,7 +71,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 2. **SQLite 동기화**
    - `reports` 테이블에 리포트 메타데이터와 `is_embedded` 상태를 저장합니다.
 3. **PDF 텍스트 추출**
-   - `EXTRACTION_ENGINE`에 따라 `pymupdf`, `marker`를 사용합니다.
+   - `EXTRACTION_ENGINE`에 따라 `pymupdf`, `marker`, `opendataloader`를 사용합니다.
    - 실패 시 가능한 경우 `pymupdf`로 fallback합니다.
 4. **금융 리포트 정제**
    - 준법고지, 표 조각, 숫자 위주 행, 재무 레이블 등 검색 품질을 해치는 노이즈를 줄입니다.

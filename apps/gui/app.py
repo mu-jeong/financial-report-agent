@@ -8,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 
 from src.graphs.main_graph import graph_app
 from src.configs.config import SEARCH_TOP_K
+from src.core.status import format_bytes, get_data_status
 
 # 1. 페이지 초기 설정
 st.set_page_config(
@@ -32,6 +33,27 @@ current_thread = st.session_state.threads[current_id]
 with st.sidebar:
     st.title("📊 Finance Report Agent")
     st.markdown("증권사 분석 리포트 AI 어시스턴트")
+    st.divider()
+
+    status = get_data_status()
+    db_status = status["db"]
+    vector_status = status["vector_db"]
+    st.subheader("📦 데이터 상태")
+    col1, col2 = st.columns(2)
+    col1.metric("리포트", f"{db_status['total_reports']}건")
+    col2.metric("임베딩", f"{db_status['embedded_reports']}건")
+    st.caption(
+        f"대기 {db_status['pending_reports']}건 · PDF {status['downloaded_pdfs']}개 · "
+        f"FAISS {format_bytes(vector_status['total_size_bytes'])}"
+    )
+    if status["embedding_limit_active"] and db_status["pending_reports"] > 0:
+        st.warning(
+            f"TEST_LIMIT={status['config']['test_limit']} 상태입니다. "
+            "검색은 임베딩 완료 문서에만 적용됩니다.",
+            icon="⚠️",
+        )
+    if vector_status["has_pickle_index"]:
+        st.caption("보안: 직접 생성한 신뢰 가능한 FAISS 인덱스만 로드하세요.")
     st.divider()
     
     # 3-1. 새 대화 시작 버튼
@@ -103,7 +125,12 @@ if user_query := st.chat_input("질문을 입력해주세요... (ex: 최근 발�
                 if final_state.get("route") == "vectordb" and final_state.get("rerank_info"):
                     full_response += "\n\n---\n**📚 참고한 문서 (Source Context)**\n"
                     for info in final_state["rerank_info"]:
-                        full_response += f"1. `{info['target_name']}` ({info['report_date']}) - {info['file_name']}\n"
+                        score = info.get("score")
+                        score_text = f", score={score:.4f}" if isinstance(score, float) else ""
+                        full_response += (
+                            f"{info['rank']}. `{info['target_name']}` ({info['report_date']}) "
+                            f"- {info.get('broker', '-')} - {info['file_name']}{score_text}\n"
+                        )
                 
                 # DB 접근 가드레일 등에서 에러가 난 경우
                 elif "Error" in full_response or "차단" in full_response:

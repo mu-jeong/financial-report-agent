@@ -44,7 +44,7 @@ CHUNK_OVERLAP = 150    # 텍스트 스플리터 청크 간 겹치는(Overlap) �
 TEST_LIMIT = 10         # 처리할 파일 수 제한 (0이면 제한 없음)
 SEARCH_TOP_K = 5       # FAISS 검색 시 반환할 결과 개수
 USE_RERANKER = False   # FlashRank를 이용한 문서 재정렬 기능 활성화 여부
-EXTRACTION_ENGINE = "pymupdf" # [marker, pymupdf] - PDF 텍스트 추출 엔진 선택
+EXTRACTION_ENGINE = "pymupdf" # [marker, pymupdf, opendataloader] - PDF text extraction engine
 USE_PARENT_CHILD = True  # Parent-Child Chunking 활성화 여부
 
 # ==============================================================================
