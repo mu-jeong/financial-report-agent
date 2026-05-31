@@ -14,15 +14,9 @@ from src.nodes.vectordb import vectordb_node
 
 def final_response_node(state: State) -> dict:
     """검색 결과와 tool 결과를 바탕으로 최종 자연어 응답을 생성하는 노드."""
-    from langchain_google_genai import ChatGoogleGenerativeAI
+    from src.llms.factory import build_chat_model
 
-    from src.configs.config import GEMINI_API_KEY, GENERATION_MODEL
-
-    llm = ChatGoogleGenerativeAI(
-        model=GENERATION_MODEL,
-        google_api_key=GEMINI_API_KEY,
-        temperature=0.2,
-    )
+    llm = build_chat_model(temperature=0.2)
 
     if state.get("generation"):
         answer = state["generation"]

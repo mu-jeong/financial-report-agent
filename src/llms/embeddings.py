@@ -1,0 +1,135 @@
+"""Embedding model construction utilities."""
+
+from __future__ import annotations
+
+from typing import Any, Iterable
+
+import requests
+from langchain_core.embeddings import Embeddings
+
+from src.configs.config import (
+    EMBEDDING_MODEL,
+    EMBEDDING_PROVIDER,
+    GEMINI_API_KEY,
+    OPENROUTER_API_KEY,
+    OPENROUTER_APP_TITLE,
+    OPENROUTER_APP_URL,
+    OPENROUTER_DATA_COLLECTION,
+)
+
+
+class OpenRouterEmbeddings(Embeddings):
+    """LangChain embeddings wrapper for OpenRouter's embeddings endpoint."""
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        *,
+        base_url: str = "https://openrouter.ai/api/v1/embeddings",
+        batch_size: int = 64,
+        timeout: float = 60.0,
+        app_url: str = "",
+        app_title: str = "finance_llm",
+        data_collection: str = "deny",
+    ) -> None:
+        if not api_key:
+            raise ValueError(
+                "OPENROUTER_API_KEY is required when EMBEDDING_PROVIDER=openrouter. "
+                "Copy .env.example to .env and set your OpenRouter key."
+            )
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+        self.batch_size = batch_size
+        self.timeout = timeout
+        self.app_url = app_url
+        self.app_title = app_title
+        self.data_collection = data_collection
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+
+        embeddings: list[list[float]] = []
+        for batch in _batched(texts, self.batch_size):
+            embeddings.extend(self._embed(list(batch), input_type="search_document"))
+        return embeddings
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed(text, input_type="search_query")[0]
+
+    def _embed(self, inputs: str | list[str], *, input_type: str) -> list[list[float]]:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": inputs,
+            "input_type": input_type,
+            "encoding_format": "float",
+        }
+        if self.data_collection:
+            payload["provider"] = {"data_collection": self.data_collection}
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if self.app_url:
+            headers["HTTP-Referer"] = self.app_url
+        if self.app_title:
+            headers["X-Title"] = self.app_title
+
+        response = requests.post(
+            self.base_url,
+            headers=headers,
+            json=payload,
+            timeout=self.timeout,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise RuntimeError(
+                f"OpenRouter embeddings request failed: {response.status_code} {response.text}"
+            ) from exc
+
+        body = response.json()
+        data = body.get("data")
+        if not isinstance(data, list):
+            raise RuntimeError(f"OpenRouter embeddings response missing data: {body}")
+
+        sorted_data = sorted(data, key=lambda item: item.get("index", 0))
+        return [[float(value) for value in item["embedding"]] for item in sorted_data]
+
+
+def build_embeddings_model() -> Embeddings:
+    """Build the configured LangChain embeddings implementation."""
+    provider = EMBEDDING_PROVIDER.lower().strip()
+
+    if provider == "openrouter":
+        return OpenRouterEmbeddings(
+            model=EMBEDDING_MODEL,
+            api_key=OPENROUTER_API_KEY or "",
+            app_url=OPENROUTER_APP_URL,
+            app_title=OPENROUTER_APP_TITLE,
+            data_collection=OPENROUTER_DATA_COLLECTION,
+        )
+
+    if provider == "gemini":
+        if not GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is required when EMBEDDING_PROVIDER=gemini.")
+
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+        return GoogleGenerativeAIEmbeddings(
+            model=EMBEDDING_MODEL,
+            google_api_key=GEMINI_API_KEY,
+            task_type="retrieval_document",
+        )
+
+    raise ValueError(f"Unsupported EMBEDDING_PROVIDER: {EMBEDDING_PROVIDER!r}")
+
+
+def _batched(items: list[str], batch_size: int) -> Iterable[list[str]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    for start in range(0, len(items), batch_size):
+        yield items[start : start + batch_size]

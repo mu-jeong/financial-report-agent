@@ -1,9 +1,9 @@
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 
-from src.configs.config import GEMINI_API_KEY, GENERATION_MODEL, get_logger
+from src.configs.config import get_logger
+from src.llms.factory import build_chat_model
 from src.configs.prompts import ROUTER_PROMPT
 from src.graphs.state import State
 
@@ -27,11 +27,7 @@ class RouteDecision(BaseModel):
 
 def router_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
-    llm = ChatGoogleGenerativeAI(
-        model=GENERATION_MODEL, 
-        google_api_key=GEMINI_API_KEY, 
-        temperature=0.0
-    ).with_structured_output(RouteDecision)
+    llm = build_chat_model(temperature=0.0).with_structured_output(RouteDecision)
     
     prompt = PromptTemplate.from_template(ROUTER_PROMPT)
     chain = prompt | llm

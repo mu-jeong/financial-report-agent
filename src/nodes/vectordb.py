@@ -1,26 +1,23 @@
 import os
 
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.configs.config import GEMINI_API_KEY, EMBEDDING_MODEL, GENERATION_MODEL, FAISS_DIR, SEARCH_TOP_K, USE_RERANKER, get_logger
+from src.configs.config import FAISS_DIR, SEARCH_TOP_K, USE_RERANKER, get_logger
 from src.configs.prompts import VECTORDB_PROMPT
 from src.graphs.state import State
 from src.utils.ranker import get_ranker
 from src.core.db_manager import fetch_parent_content
 from src.nodes.stock_price import stock_price_tools
+from src.llms.embeddings import build_embeddings_model
+from src.llms.factory import build_chat_model
 
 logger = get_logger(__name__)
 
 
-def build_embeddings_fn() -> GoogleGenerativeAIEmbeddings:
-    return GoogleGenerativeAIEmbeddings(
-        model=EMBEDDING_MODEL,
-        google_api_key=GEMINI_API_KEY,
-        task_type="retrieval_query",
-    )
+def build_embeddings_fn():
+    return build_embeddings_model()
 
 
 def vectordb_node(state: State) -> dict:
@@ -84,11 +81,7 @@ def vectordb_node(state: State) -> dict:
         source_info = f"[{rank}] {meta.get('target_name', '알수없음')} ({meta.get('report_date', '날짜없음')}) - {meta.get('title', '제목없음')}"
         context_text += f"\n--- 문서 {rank} ---\n[출처: {source_info}]\n{result['text']}\n"
 
-    llm = ChatGoogleGenerativeAI(
-        model=GENERATION_MODEL,
-        google_api_key=GEMINI_API_KEY,
-        temperature=0.2,
-    ).bind_tools(stock_price_tools)
+    llm = build_chat_model(temperature=0.2).bind_tools(stock_price_tools)
 
     prompt = PromptTemplate.from_template(VECTORDB_PROMPT)
     formatted_prompt = prompt.format(context=context_text, question=query)

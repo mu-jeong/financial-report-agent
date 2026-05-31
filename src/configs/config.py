@@ -17,12 +17,25 @@ FAISS_DIR = os.path.join(BASE_DIR, "data", "vector_db")
 # 2. API 키 및 인증
 # ==============================================================================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_APP_URL = os.getenv("OPENROUTER_APP_URL", "")
+OPENROUTER_APP_TITLE = os.getenv("OPENROUTER_APP_TITLE", "finance_llm")
+OPENROUTER_DATA_COLLECTION = os.getenv("OPENROUTER_DATA_COLLECTION", "deny").strip().lower()
 
 # ==============================================================================
 # 3. LLM 및 파이프라인 상수 설정
 # ==============================================================================
-EMBEDDING_MODEL = "models/gemini-embedding-001"  # 임베딩용
-GENERATION_MODEL = "gemini-2.5-flash"            # 텍스트 생성용 (RAG)
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openrouter").strip().lower()
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "baai/bge-m3")  # embedding model
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").strip().lower()
+_DEFAULT_GENERATION_MODELS = {
+    "openrouter": "deepseek/deepseek-v4-flash",
+    "gemini": "gemini-2.5-flash",
+}
+GENERATION_MODEL = os.getenv(
+    "GENERATION_MODEL",
+    _DEFAULT_GENERATION_MODELS.get(LLM_PROVIDER, "deepseek/deepseek-v4-flash"),
+)
 
 PARENT_CHUNK_SIZE = 2000 # Parent-Child에서 부모 청크 크기
 CHILD_CHUNK_SIZE = 500   # Parent-Child에서 자식 청크 크기 (검색용)

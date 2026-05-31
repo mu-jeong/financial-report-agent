@@ -4,11 +4,10 @@
 
 ---
 
-### 🚀 Latest Update: [v0.2.0] (2026-03-15)
-- **Parent-Child Chunking**: 검색 정교화와 맥락 이해도 향상을 위한 Small-to-Big Retrieval 적용
-- **Marker-PDF Engine**: 복잡한 표/수식 추출을 위한 Marker-PDF 사용 옵션 제공
-- **Architecture**: SQLite-FAISS 계층 구조(parent-child chunking)를 통한 데이터 정규화 및 저장 효율성 극대화
-- **Context Optimization**: 중복된 부모 맥락 병합 로직을 통한 LLM 응답 품질 및 속도 개선
+### Latest Update: [v0.5] (2026-05-31)
+- **OpenRouter provider support**: generation now defaults to `deepseek/deepseek-v4-flash` via a shared chat model factory.
+- **Lower-cost embeddings**: embeddings now default to OpenRouter `baai/bge-m3` via a shared embeddings factory.
+- **FAISS rebuild guidance**: changing `EMBEDDING_PROVIDER` or `EMBEDDING_MODEL` requires rebuilding `data/vector_db` and resetting embedding state.
 
 👉 **[상세 내용 확인하기 (Changelog)](./CHANGELOG.md)**
 
@@ -92,7 +91,7 @@ pip install -r requirements.txt
 
 ### 3. API 키 설정
 
-프로젝트 루트의 `.env.example` 파일을 복사하여 `.env` 파일을 생성하고, 본인의 Gemini API 키를 입력합니다.
+Copy `.env.example` to `.env` and set your OpenRouter API key. The default generation model is DeepSeek, and the default embedding model is `baai/bge-m3`.
 
 > 💡 **상세 연동 가이드:** API 키 발급 및 설정에 대한 구체적인 방법은 [🔑 API 연동 가이드(API_SETUP.md)](docs/API_SETUP.md) 문서를 확인해 주세요.
 
@@ -104,8 +103,26 @@ copy .env.example .env # Windows (cmd)
 `.env` 파일 내용:
 
 ```env
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+GENERATION_MODEL=deepseek/deepseek-v4-flash
+OPENROUTER_APP_TITLE=finance_llm
+OPENROUTER_DATA_COLLECTION=deny
+
+# Embedding / vector DB. Rebuild data/vector_db after changing this.
+EMBEDDING_PROVIDER=openrouter
+EMBEDDING_MODEL=baai/bge-m3
+
+# Optional fallback only when LLM_PROVIDER=gemini or EMBEDDING_PROVIDER=gemini
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
+
+#### Model/provider settings
+
+- Chat models are created by `src/llms/factory.py::build_chat_model()`.
+- Embeddings are created by `src/llms/embeddings.py::build_embeddings_model()`.
+- Set `LLM_PROVIDER=gemini` or `EMBEDDING_PROVIDER=gemini` only when using Gemini fallback; that requires `GEMINI_API_KEY`.
+- Changing `EMBEDDING_MODEL` or `EMBEDDING_PROVIDER` requires rebuilding the FAISS index.
 
 
 ---
@@ -220,12 +237,20 @@ python apps/cli/app.py
 
 새로운 규칙을 적용하거나 DB를 처음부터 다시 구성하고 싶을 때 사용합니다.
 
-```bash
-# 1. FAISS 인덱스 삭제 (PowerShell 기준)
-Remove-Item -Recurse -Force data/vector_db
+```powershell
+# 0. Optional: back up SQLite DB
+Copy-Item data/reports.db data/reports.backup.db -Force
 
-# 2. SQLite 임베딩 상태 초기화
-python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('UPDATE reports SET is_embedded=0'); con.commit(); print('완료')"
+# 1. Delete FAISS index
+if (Test-Path data/vector_db) {
+    Remove-Item -Recurse -Force data/vector_db
+}
+
+# 2. Reset embedding state and parent chunks
+python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('UPDATE reports SET is_embedded=0'); con.execute('DELETE FROM parent_chunks'); con.commit(); con.close(); print('embedding reset complete')"
+
+# 3. Rebuild all embeddings with the current provider/model
+python -m src.core.embed_pipeline --all
 ```
 
 ---

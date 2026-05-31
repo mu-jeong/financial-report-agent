@@ -47,7 +47,6 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 from dotenv import load_dotenv
 from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from src.core.db_manager import (
@@ -55,6 +54,7 @@ from src.core.db_manager import (
     insert_parent_chunks
 )
 from src.configs import config
+from src.llms.embeddings import build_embeddings_model
 from src.utils.text_filters import is_sidebar_block, is_noise_line, strip_compliance
 
 logger = config.get_logger(__name__)
@@ -75,11 +75,6 @@ def get_marker_models():
             logger.error(f"  ❌ Marker 모델 로드 실패: {e}")
             raise e
     return MARKER_MODELS
-
-
-if not config.GEMINI_API_KEY or config.GEMINI_API_KEY == "your_api_key_here":
-    logger.error("[오류] .env 파일에 GEMINI_API_KEY를 설정해주세요.")
-    sys.exit(1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -298,7 +293,7 @@ def node_split_documents(state: dict) -> dict:
         return {**state, "documents": docs}
 
 
-def node_embed_and_store(state: dict, embeddings_fn: GoogleGenerativeAIEmbeddings) -> dict:
+def node_embed_and_store(state: dict, embeddings_fn) -> dict:
     """
     [LangGraph 노드: store]
     Document 리스트를 임베딩 후 FAISS에 저장합니다.
@@ -367,14 +362,9 @@ def node_mark_complete(state: dict) -> dict:
 # 파이프라인 실행
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_embeddings_fn() -> GoogleGenerativeAIEmbeddings:
-    """Gemini 임베딩 함수 초기화."""
-    return GoogleGenerativeAIEmbeddings(
-        model=config.EMBEDDING_MODEL,
-        google_api_key=config.GEMINI_API_KEY,
-        task_type="retrieval_document",
-    )
-
+def build_embeddings_fn():
+    """Initialize the configured embeddings model."""
+    return build_embeddings_model()
 
 def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
     """

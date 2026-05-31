@@ -3,12 +3,12 @@ import sqlite3
 import functools
 
 import sqlglot
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.configs.config import GEMINI_API_KEY, GENERATION_MODEL, DB_PATH, get_logger
+from src.configs.config import DB_PATH, get_logger
+from src.llms.factory import build_chat_model
 from src.configs.prompts import RDB_SQL_GEN_PROMPT, RDB_ANSWER_PROMPT
 from src.graphs.state import State
 from src.nodes.stock_price import stock_price_tools
@@ -18,11 +18,7 @@ logger = get_logger(__name__)
 
 def rdb_sql_gen_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
-    llm = ChatGoogleGenerativeAI(
-        model=GENERATION_MODEL,
-        google_api_key=GEMINI_API_KEY,
-        temperature=0.0,
-    )
+    llm = build_chat_model(temperature=0.0)
 
     prompt = PromptTemplate.from_template(RDB_SQL_GEN_PROMPT)
     chain = prompt | llm | StrOutputParser()
@@ -90,11 +86,7 @@ def rdb_execute_node(state: State) -> dict:
 
     answer_prompt = PromptTemplate.from_template(RDB_ANSWER_PROMPT)
 
-    llm = ChatGoogleGenerativeAI(
-        model=GENERATION_MODEL,
-        google_api_key=GEMINI_API_KEY,
-        temperature=0.0,
-    ).bind_tools(stock_price_tools)
+    llm = build_chat_model(temperature=0.0).bind_tools(stock_price_tools)
 
     formatted_prompt = answer_prompt.format(question=query, db_result=str(db_result))
     ai_msg: AIMessage = llm.invoke(formatted_prompt)

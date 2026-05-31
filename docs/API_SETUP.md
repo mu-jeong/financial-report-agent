@@ -1,46 +1,88 @@
 # 🔑 API 연동 가이드 (API Setup Guide)
 
-이 문서는 Finance LLM 프로젝트를 실행하기 위해 필요한 **Google Gemini API 키 발급** 및 **환경 변수(.env) 설정 방법**을 안내합니다.
+이 문서는 Finance LLM 실행에 필요한 API 키와 `.env` 설정을 안내합니다.
+현재 기본 구성은 **OpenRouter**를 통해 생성 모델과 임베딩 모델을 모두 사용합니다.
 
-## 1. Google Gemini API 키 발급 방법
-
-이 프로젝트는 텍스트 임베딩(Vector 변환)과 질의응답(RAG) 텍스트 생성을 위해 모두 Google의 Gemini 모델을 사용합니다. 무료 구간 내에서 훌륭한 성능을 제공합니다.
-
-1. **Google AI Studio 접속:**
-   - 브라우저를 열고 [Google AI Studio (aistudio.google.com)](https://aistudio.google.com/) 로 이동합니다.
-   - 구글 계정으로 로그인합니다.
-2. **API 키 생성:**
-   - 좌측 메뉴판에서 **"Get API key"** (또는 API 키 발급) 항목을 클릭합니다.
-   - **"Create API key"** 버튼을 누릅니다.
-   - 프로젝트를 선택하라는 창이 나오면 기존 프로젝트를 선택하거나, 새로운 프로젝트 생성을 선택합니다.
-   - 생성된 영문자와 숫자로 이루어진 긴 문자열이 바로 API Key입니다. **이 키는 외부에 유출되지 않도록 주의하세요.**
+- 생성 LLM 기본값: `deepseek/deepseek-v4-flash`
+- 임베딩 기본값: `baai/bge-m3`
+- Gemini는 `LLM_PROVIDER=gemini` 또는 `EMBEDDING_PROVIDER=gemini`로 되돌릴 때만 선택적으로 필요합니다.
 
 ---
 
-## 2. 프로젝트에서 환경 변수 설정하기 (.env 파일)
+## 1. OpenRouter API 키 발급
 
-소스 코드 내에 API 키를 직접 적는 것은 보안상 매우 위험합니다(깃허브 등에 올릴 경우 특히). 따라서 환경 변수를 외부 파일인 `.env`로 빼서 관리합니다.
+1. [OpenRouter Keys](https://openrouter.ai/settings/keys)에 접속합니다.
+2. 로그인 후 **Create Key**를 눌러 API 키를 생성합니다.
+3. 생성된 키는 한 번만 볼 수 있으므로 안전한 곳에 보관합니다.
+4. 프로젝트 루트의 `.env` 파일에 `OPENROUTER_API_KEY`로 저장합니다.
 
-1. **`.env` 파일 생성:**
-   프로젝트의 최상위 루트 경로(README.md 파일이 있는 곳)에 `.env` 라는 이름의 새 파일을 만듭니다. (확장자 없음)
-   
-   이전에 이미 제공된 템플릿 파일이 있다면 복사해서 사용할 수 있습니다.
-   ```bash
-   # Linux/macOS
-   cp .env.example .env
-   
-   # Windows (cmd)
-   copy .env.example .env
-   ```
-
-2. **API 키 입력:**
-   생성된 `.env` 파일을 메모장이나 VS Code로 엽니다. 아까 발급받은 API 키를 복사하여 아래 형식으로 붙여넣습니다. (따옴표는 쓰지 마세요)
-
-   ```env
-   GEMINI_API_KEY=AIzaSyBxxxxxxx_xxxxxxxxxxxxxxxxxxxxxx
-   ```
-
-3. **자동 인식:**
-   파이썬 코드 내의 `src/configs/config.py` 에서 `load_dotenv()` 함수를 호출하므로, 프로그램 실행 시 자동으로 이 `.env` 파일을 읽어들여 안전하게 API 키를 사용합니다.
+> OpenRouter 계정에 크레딧/결제 설정이 없으면 유료 모델 호출이 실패할 수 있습니다.
 
 ---
+
+## 2. `.env` 파일 만들기
+
+프로젝트 루트에서 `.env.example`을 복사합니다.
+
+```bash
+# Linux/macOS
+cp .env.example .env
+
+# Windows (cmd)
+copy .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
+```
+
+`.env`의 기본 예시는 아래와 같습니다.
+
+```env
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+GENERATION_MODEL=deepseek/deepseek-v4-flash
+OPENROUTER_APP_TITLE=finance_llm
+OPENROUTER_DATA_COLLECTION=deny
+
+EMBEDDING_PROVIDER=openrouter
+EMBEDDING_MODEL=baai/bge-m3
+
+# Optional fallback only when LLM_PROVIDER=gemini or EMBEDDING_PROVIDER=gemini
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+---
+
+## 3. 설정 의미
+
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `LLM_PROVIDER` | `openrouter` | 생성 LLM 공급자. `openrouter` 또는 `gemini` |
+| `GENERATION_MODEL` | `deepseek/deepseek-v4-flash` | 답변 생성, 라우팅, SQL 생성에 사용할 모델 |
+| `EMBEDDING_PROVIDER` | `openrouter` | 임베딩 공급자. `openrouter` 또는 `gemini` |
+| `EMBEDDING_MODEL` | `baai/bge-m3` | FAISS 인덱스 생성/검색에 사용할 임베딩 모델 |
+| `OPENROUTER_DATA_COLLECTION` | `deny` | 데이터 수집을 하지 않는 provider로 라우팅하도록 제한 |
+| `GEMINI_API_KEY` | 없음 | Gemini fallback을 사용할 때만 필요 |
+
+---
+
+## 4. 임베딩 모델 변경 시 주의
+
+임베딩 모델을 바꾸면 기존 `data/vector_db` FAISS 인덱스는 재사용하면 안 됩니다.
+벡터 차원과 분포가 달라져 검색 품질이 깨질 수 있습니다.
+
+재빌드 절차는 README의 **DB 초기화 방법**을 따르세요. 핵심 명령은 아래와 같습니다.
+
+```powershell
+if (Test-Path data/vector_db) { Remove-Item -Recurse -Force data/vector_db }
+python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('UPDATE reports SET is_embedded=0'); con.execute('DELETE FROM parent_chunks'); con.commit(); con.close()"
+python -m src.core.embed_pipeline --all
+```
+
+---
+
+## 5. 보안 원칙
+
+- `.env`에는 실제 API 키가 들어가므로 git에 커밋하지 않습니다.
+- `.env.example`에는 placeholder만 둡니다.
+- OpenRouter API 키가 노출되면 즉시 OpenRouter 콘솔에서 폐기하고 새 키를 발급하세요.
