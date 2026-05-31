@@ -9,8 +9,6 @@ from langchain_core.embeddings import Embeddings
 
 from src.configs.config import (
     EMBEDDING_MODEL,
-    EMBEDDING_PROVIDER,
-    GEMINI_API_KEY,
     OPENROUTER_API_KEY,
     OPENROUTER_APP_TITLE,
     OPENROUTER_APP_URL,
@@ -35,7 +33,7 @@ class OpenRouterEmbeddings(Embeddings):
     ) -> None:
         if not api_key:
             raise ValueError(
-                "OPENROUTER_API_KEY is required when EMBEDDING_PROVIDER=openrouter. "
+                "OPENROUTER_API_KEY is required for OpenRouter embeddings. "
                 "Copy .env.example to .env and set your OpenRouter key."
             )
         self.model = model
@@ -101,31 +99,14 @@ class OpenRouterEmbeddings(Embeddings):
 
 
 def build_embeddings_model() -> Embeddings:
-    """Build the configured LangChain embeddings implementation."""
-    provider = EMBEDDING_PROVIDER.lower().strip()
-
-    if provider == "openrouter":
-        return OpenRouterEmbeddings(
-            model=EMBEDDING_MODEL,
-            api_key=OPENROUTER_API_KEY or "",
-            app_url=OPENROUTER_APP_URL,
-            app_title=OPENROUTER_APP_TITLE,
-            data_collection=OPENROUTER_DATA_COLLECTION,
-        )
-
-    if provider == "gemini":
-        if not GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY is required when EMBEDDING_PROVIDER=gemini.")
-
-        from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
-        return GoogleGenerativeAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            google_api_key=GEMINI_API_KEY,
-            task_type="retrieval_document",
-        )
-
-    raise ValueError(f"Unsupported EMBEDDING_PROVIDER: {EMBEDDING_PROVIDER!r}")
+    """Build the OpenRouter embeddings implementation."""
+    return OpenRouterEmbeddings(
+        model=EMBEDDING_MODEL,
+        api_key=OPENROUTER_API_KEY or "",
+        app_url=OPENROUTER_APP_URL,
+        app_title=OPENROUTER_APP_TITLE,
+        data_collection=OPENROUTER_DATA_COLLECTION,
+    )
 
 
 def _batched(items: list[str], batch_size: int) -> Iterable[list[str]]:

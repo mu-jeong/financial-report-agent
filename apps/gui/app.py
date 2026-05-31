@@ -1,144 +1,240 @@
-import sys
 import os
-import uuid
+import sys
+import subprocess
+from pathlib import Path
+
 import streamlit as st
 
-# 모듈 경로 추가 (finance_llm 패키지 접근)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
+from src.configs.config import SAVE_DIR
+from src.core.conversation_store import (
+    append_message,
+    create_thread,
+    delete_thread,
+    get_chat_history,
+    list_messages,
+    list_threads,
+    rename_thread,
+)
+from src.core.status import get_data_status
 from src.graphs.main_graph import graph_app
-from src.configs.config import SEARCH_TOP_K
-from src.core.status import format_bytes, get_data_status
 
-# 1. 페이지 초기 설정
+REPORT_PDF_DIR = os.getenv("REPORT_PDF_DIR", SAVE_DIR)
+
 st.set_page_config(
     page_title="Finance Report Agent",
-    page_icon="📈",
-    layout="wide"
+    layout="wide",
 )
 
-# 2. Session State 초기화 (데이터 영속성 보장)
-if "threads" not in st.session_state:
-    # 세션 딕셔너리 구조: { "thread_id": {"name": "대화방 이름", "messages": [{"role": "user/assistant", "content": "내용"}]} }
-    default_id = str(uuid.uuid4())
-    st.session_state.threads = {
-        default_id: {"name": "새로운 대화", "messages": []}
-    }
-    st.session_state.current_thread_id = default_id
 
-current_id = st.session_state.current_thread_id
-current_thread = st.session_state.threads[current_id]
+def _sidebar_rerun() -> None:
+    st.rerun(scope="fragment")
 
-# 3. 사이드바 (Sidebar) - 다중 대화(Thread) 목록 관리 UI
-with st.sidebar:
-    st.title("📊 Finance Report Agent")
+
+def _app_rerun() -> None:
+    st.rerun(scope="app")
+
+
+def _load_threads() -> list[dict]:
+    threads = list_threads()
+    if not threads:
+        thread_id = create_thread("새로운 대화")
+        threads = list_threads()
+        st.session_state.current_thread_id = thread_id
+    return threads
+
+
+def _ensure_current_thread(threads: list[dict]) -> None:
+    if "current_thread_id" not in st.session_state:
+        st.session_state.current_thread_id = threads[0]["id"]
+    thread_ids = {thread["id"] for thread in threads}
+    if st.session_state.current_thread_id not in thread_ids:
+        st.session_state.current_thread_id = threads[0]["id"]
+
+
+def _resolve_report_pdf(file_name: str) -> Path | None:
+    safe_file_name = Path(file_name).name
+    pdf_path = Path(REPORT_PDF_DIR).expanduser() / safe_file_name
+    if pdf_path.exists() and pdf_path.is_file():
+        return pdf_path
+    return None
+
+
+def _open_report_pdf(file_name: str) -> tuple[bool, str | None]:
+    pdf_path = _resolve_report_pdf(file_name)
+    if pdf_path is None:
+        return False, "PDF 파일을 찾을 수 없습니다. REPORT_PDF_DIR 설정과 파일명을 확인해 주세요."
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(pdf_path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(pdf_path)])
+        else:
+            subprocess.Popen(["xdg-open", str(pdf_path)])
+    except OSError as exc:
+        return False, f"PDF를 여는 중 오류가 발생했습니다: {exc}"
+    return True, None
+
+
+def _render_sources(rerank_info: list[dict] | None, *, key_prefix: str) -> None:
+    if not rerank_info:
+        return
+    with st.expander(f"참고한 문서 (Top {len(rerank_info)})", expanded=False):
+        for index, info in enumerate(rerank_info):
+            rank = info.get("rank", "-")
+            file_name = info.get("file_name", "-")
+            display_text = (
+                f"{rank}. {info.get('target_name', '-')} ({info.get('report_date', '-')}) "
+                f"- {info.get('broker', '-')} - {file_name}"
+            )
+            text_col, open_col = st.columns([0.86, 0.14], gap="small", vertical_alignment="center")
+            text_col.write(display_text)
+            if open_col.button("열기", key=f"{key_prefix}_open_pdf_{index}", use_container_width=True):
+                opened, error_message = _open_report_pdf(file_name)
+                if not opened:
+                    st.warning(error_message)
+
+
+def _render_message(message: dict, *, index: int) -> None:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if message["role"] == "assistant":
+            _render_sources(
+                (message.get("metadata") or {}).get("rerank_info"),
+                key_prefix=f"message_{index}",
+            )
+
+
+def _set_current_thread(thread_id: str) -> None:
+    if st.session_state.current_thread_id != thread_id:
+        st.session_state.current_thread_id = thread_id
+        st.session_state.editing_thread_id = None
+        _app_rerun()
+
+
+def _delete_thread_and_select_next(thread_id: str) -> None:
+    was_current = st.session_state.current_thread_id == thread_id
+    delete_thread(thread_id)
+    remaining_threads = list_threads()
+    if not remaining_threads:
+        st.session_state.current_thread_id = create_thread("새로운 대화")
+        _app_rerun()
+    elif was_current:
+        st.session_state.current_thread_id = remaining_threads[0]["id"]
+        _app_rerun()
+    else:
+        _sidebar_rerun()
+
+
+def _render_thread_row(thread: dict, *, selected: bool) -> None:
+    editing_id = st.session_state.get("editing_thread_id")
+    thread_id = thread["id"]
+
+    if editing_id == thread_id:
+        new_name = st.text_input(
+            "대화명",
+            value=thread["name"],
+            key=f"rename_input_{thread_id}",
+            label_visibility="collapsed",
+        )
+        if st.button("저장", key=f"save_thread_{thread_id}", use_container_width=True):
+            clean_name = new_name.strip() or "새로운 대화"
+            rename_thread(thread_id, clean_name)
+            st.session_state.editing_thread_id = None
+            if selected:
+                _app_rerun()
+            else:
+                _sidebar_rerun()
+        if st.button("취소", key=f"cancel_thread_{thread_id}", use_container_width=True):
+            st.session_state.editing_thread_id = None
+            _sidebar_rerun()
+        return
+
+    label = f"> {thread['name']}" if selected else f"- {thread['name']}"
+    thread_col, action_col = st.columns([0.82, 0.18], gap="small", vertical_alignment="center")
+    if thread_col.button(label, key=f"thread_{thread_id}", use_container_width=True):
+        _set_current_thread(thread_id)
+    with action_col.popover("", use_container_width=True):
+        if st.button("이름 변경", key=f"edit_thread_{thread_id}", use_container_width=True):
+            st.session_state.editing_thread_id = thread_id
+            _sidebar_rerun()
+        if st.button("삭제", key=f"delete_thread_{thread_id}", use_container_width=True):
+            _delete_thread_and_select_next(thread_id)
+
+
+@st.fragment
+def render_sidebar(current_id: str) -> None:
+    threads = _load_threads()
+
+    st.title("Finance Report Agent")
     st.markdown("증권사 분석 리포트 AI 어시스턴트")
     st.divider()
 
     status = get_data_status()
     db_status = status["db"]
-    vector_status = status["vector_db"]
-    st.subheader("📦 데이터 상태")
+    st.subheader("데이터 상태")
     col1, col2 = st.columns(2)
     col1.metric("리포트", f"{db_status['total_reports']}건")
     col2.metric("임베딩", f"{db_status['embedded_reports']}건")
-    st.caption(
-        f"대기 {db_status['pending_reports']}건 · PDF {status['downloaded_pdfs']}개 · "
-        f"FAISS {format_bytes(vector_status['total_size_bytes'])}"
-    )
-    if status["embedding_limit_active"] and db_status["pending_reports"] > 0:
-        st.warning(
-            f"TEST_LIMIT={status['config']['test_limit']} 상태입니다. "
-            "검색은 임베딩 완료 문서에만 적용됩니다.",
-            icon="⚠️",
-        )
-    if vector_status["has_pickle_index"]:
-        st.caption("보안: 직접 생성한 신뢰 가능한 FAISS 인덱스만 로드하세요.")
     st.divider()
-    
-    # 3-1. 새 대화 시작 버튼
-    if st.button("➕ 새 대화 시작", use_container_width=True):
-        new_id = str(uuid.uuid4())
-        st.session_state.threads[new_id] = {"name": f"대화 {len(st.session_state.threads) + 1}", "messages": []}
-        st.session_state.current_thread_id = new_id
-        st.rerun()  # UI 갱신을 위해 앱 재실행
-    
-    st.subheader("💬 대화 목록")
-    # 3-2. 생성된 쓰레드(대화방)를 버튼으로 출력하여 이동 가능하게 구현
-    for t_id, t_info in list(st.session_state.threads.items()):
-        # 현재 활성화된 방을 시각적으로 구분
-        btn_label = f"🟢 {t_info['name']}" if t_id == current_id else f"⚪ {t_info['name']}"
-        
-        # 버튼을 누르면 해당 방의 ID로 current_thread_id 교체
-        if st.button(btn_label, key=f"btn_{t_id}", use_container_width=True):
-            if t_id != current_id:
-                st.session_state.current_thread_id = t_id
-                st.rerun()
-                
-    st.divider()
-    
-    # 3-3. 현재 쓰레드(메모리) 초기화 기능
-    if st.button("🗑️ 현재 대화 비우기", use_container_width=True):
-        st.session_state.threads[current_id]["messages"] = [] # 프론트엔드 기록 삭제
-        # LangGraph 백엔드 메모리(History)도 비우도록 thread_id 자체를 갱신
-        new_id = str(uuid.uuid4())
-        st.session_state.threads[new_id] = {"name": st.session_state.threads[current_id]["name"], "messages": []}
-        del st.session_state.threads[current_id]
-        st.session_state.current_thread_id = new_id
-        st.rerun()
 
-# 4. 메인 채팅 화면 영역
-st.header(f"{current_thread['name']}")
+    if st.button("새 대화 시작", use_container_width=True):
+        st.session_state.current_thread_id = create_thread(f"대화 {len(threads) + 1}")
+        st.session_state.editing_thread_id = None
+        _app_rerun()
 
-# 4-1. 방에 돌아올 때마다 과거 대화 내용(messages 필드)을 순회하며 화면에 렌더링
-for msg in current_thread["messages"]:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    st.subheader("대화 목록")
+    for thread in threads:
+        _render_thread_row(thread, selected=thread["id"] == current_id)
 
-# 5. 사용자 채팅 입력부
-if user_query := st.chat_input("질문을 입력해주세요... (ex: 최근 발행된 현대차 리포트 요약해줘)"):
-    
-    # "새로운 대화"라는 이름이라면, 사용자의 첫 질문 내용으로 방 제목 자동 변경
-    if current_thread["name"] in ["새로운 대화"] or current_thread["name"].startswith("대화 "):
-        st.session_state.threads[current_id]["name"] = user_query[:15] + "..."
-    
-    # 사용자의 질문을 화면에 표시하고 기록에 추가
-    with st.chat_message("user"):
-        st.markdown(user_query)
-    current_thread["messages"].append({"role": "user", "content": user_query})
 
-    # AI의 답변 처리 영역
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        
-        # LangGraph 호출 및 결과 출력 (비동기 스트리밍 대신 invoke 사용 예시)
-        with st.spinner("AI가 리포트 내용을 검색하고 분석 중입니다... 🔍"):
-            # LangGraph의 config에 현재 thread_id를 넣어 맥락(Memory)을 유지시킴
-            config = {"configurable": {"thread_id": current_id}}
-            
-            try:
-                # 파이프라인(VectorDB 분기 or RDB 분기) 호출
-                final_state = graph_app.invoke({"question": user_query}, config=config)
-                full_response = final_state.get("generation", "응답을 생성하지 못했습니다.")
-                
-                # 라우팅 경로가 벡터 검색(VectorDB)이었고, 참조 문항이 반환되었다면 마크다운으로 깔끔하게 덧붙임
-                if final_state.get("route") == "vectordb" and final_state.get("rerank_info"):
-                    full_response += "\n\n---\n**📚 참고한 문서 (Source Context)**\n"
-                    for info in final_state["rerank_info"]:
-                        score = info.get("score")
-                        score_text = f", score={score:.4f}" if isinstance(score, float) else ""
-                        full_response += (
-                            f"{info['rank']}. `{info['target_name']}` ({info['report_date']}) "
-                            f"- {info.get('broker', '-')} - {info['file_name']}{score_text}\n"
-                        )
-                
-                # DB 접근 가드레일 등에서 에러가 난 경우
-                elif "Error" in full_response or "차단" in full_response:
-                    full_response = f"⚠️ {full_response}"
-                    
-            except Exception as e:
-                full_response = f"🚨 오류가 발생했습니다: {str(e)}"
-        
-        # AI 응답 출력 및 기록 저장
-        message_placeholder.markdown(full_response)
-        current_thread["messages"].append({"role": "assistant", "content": full_response})
+def render_chat(current_id: str, current_thread: dict) -> None:
+    st.header(current_thread["name"])
+
+    messages = list_messages(current_id)
+    for index, message in enumerate(messages):
+        _render_message(message, index=index)
+
+
+    if user_query := st.chat_input("질문을 입력해 주세요... (ex: 최근 발행된 현대차 리포트 요약해줘)"):
+        if not messages and (current_thread["name"] == "새로운 대화" or current_thread["name"].startswith("대화 ")):
+            rename_thread(current_id, user_query[:15] + "...")
+
+        prior_history = get_chat_history(current_id)
+        append_message(current_id, "user", user_query)
+
+        with st.chat_message("user"):
+            st.markdown(user_query)
+
+        with st.chat_message("assistant"):
+            with st.spinner("AI가 리포트 내용을 검색하고 분석 중입니다..."):
+                config = {"configurable": {"thread_id": current_id}}
+                try:
+                    final_state = graph_app.invoke(
+                        {"question": user_query, "chat_history": prior_history},
+                        config=config,
+                    )
+                    answer = final_state.get("generation", "응답을 생성하지 못했습니다.")
+                    if "Error" in answer or "차단" in answer:
+                        answer = f"주의: {answer}"
+                    rerank_info = final_state.get("rerank_info", []) if final_state.get("route") == "vectordb" else []
+                except Exception as exc:
+                    answer = f"오류가 발생했습니다: {exc}"
+                    rerank_info = []
+
+            st.markdown(answer)
+            _render_sources(rerank_info, key_prefix=f"live_{current_id}_{len(messages)}")
+            append_message(current_id, "assistant", answer, {"rerank_info": rerank_info})
+        _app_rerun()
+
+
+threads = _load_threads()
+_ensure_current_thread(threads)
+current_id = st.session_state.current_thread_id
+current_thread = next(thread for thread in threads if thread["id"] == current_id)
+
+with st.sidebar:
+    render_sidebar(current_id)
+
+render_chat(current_id, current_thread)

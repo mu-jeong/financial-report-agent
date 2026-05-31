@@ -1,10 +1,13 @@
 import os
+from datetime import datetime
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
 from src.configs.config import (
     FAISS_DIR,
+    RECENCY_WEIGHT,
+    RERANK_CANDIDATE_MULTIPLIER,
     SEARCH_TOP_K,
     USE_RERANKER,
     get_logger,
@@ -25,36 +28,21 @@ def build_embeddings_fn():
     return build_embeddings_model()
 
 
-def vectordb_node(state: State) -> dict:
-    query = state.get("rewritten_query", state["question"])
-    search_filters = state.get("search_filters") or infer_search_filters(query)
-    if not os.path.exists(FAISS_DIR):
-        msg = "faiss_db/ 폴더가 없어 검색을 진행할 수 없습니다. 먼저 임베딩 파이프라인을 실행해 주세요."
-        logger.warning(msg)
-        return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
+def _metadata_aware_fetch_k(faiss_store: FAISS, search_filters: dict | None) -> int:
+    """Fetch enough candidates before deterministic metadata filtering.
 
-    embeddings_fn = build_embeddings_fn()
-    faiss_store = FAISS.load_local(
-        FAISS_DIR,
-        embeddings_fn,
-        allow_dangerous_deserialization=True,
-    )
+    FAISS does vector ranking first, while report dates live in metadata. If the
+    user asks for "5월" and we only inspect the top few vector hits, all May
+    documents can be dropped before the metadata filter gets a chance to match.
+    """
+    default_fetch_k = max(SEARCH_TOP_K * 8, SEARCH_TOP_K)
+    if not search_filters:
+        return default_fetch_k
+    total_docs = len(getattr(faiss_store, "index_to_docstore_id", {}) or {})
+    return max(default_fetch_k, total_docs)
 
-    fetch_k = max(SEARCH_TOP_K * 8, SEARCH_TOP_K)
-    docs_with_scores = faiss_store.similarity_search_with_score(query, k=fetch_k)
-    docs_with_scores = filter_docs_with_scores(docs_with_scores, search_filters)
-    if not docs_with_scores:
-        if search_filters:
-            filter_text = ", ".join(f"{key}={value}" for key, value in search_filters.items())
-            msg = (
-                "지정된 조건에 맞는 임베딩 완료 리포트를 찾지 못했습니다. "
-                f"(적용 조건: {filter_text})"
-            )
-        else:
-            msg = "관련 리포트를 찾지 못했습니다."
-        logger.info(msg)
-        return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
 
+def _build_passages(docs_with_scores: list[tuple]) -> list[dict]:
     passages = []
     seen_parent_ids = set()
     for rank, (doc, score) in enumerate(docs_with_scores):
@@ -78,13 +66,101 @@ def vectordb_node(state: State) -> dict:
                 "meta": meta,
             }
         )
+    return passages
 
+
+def _parse_report_date(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date().toordinal()
+    except ValueError:
+        return None
+
+
+def apply_recency_weight(passages: list[dict], weight: float = RECENCY_WEIGHT) -> list[dict]:
+    """Boost newer reports after semantic ranking.
+
+    The semantic rank remains the main signal. ``RECENCY_WEIGHT`` adds a small
+    normalized bonus based on report_date so that similarly relevant passages
+    prefer newer reports.
+    """
+    if not passages or weight <= 0:
+        return passages
+
+    ordinals = [
+        parsed
+        for passage in passages
+        if (parsed := _parse_report_date(passage.get("meta", {}).get("report_date"))) is not None
+    ]
+    if not ordinals:
+        return passages
+
+    oldest, newest = min(ordinals), max(ordinals)
+    span = max(newest - oldest, 1)
+    weighted: list[dict] = []
+    total = max(len(passages) - 1, 1)
+    for index, passage in enumerate(passages):
+        item = dict(passage)
+        ordinal = _parse_report_date(item.get("meta", {}).get("report_date"))
+        recency_score = ((ordinal - oldest) / span) if ordinal is not None else 0.0
+        relevance_score = item.get("rerank_score")
+        if relevance_score is None:
+            # Preserve the current semantic order when no external rerank score exists.
+            relevance_score = 1.0 - (index / total)
+        final_score = float(relevance_score) + (weight * recency_score)
+        item["recency_score"] = recency_score
+        item["final_score"] = final_score
+        weighted.append(item)
+
+    return sorted(weighted, key=lambda item: item["final_score"], reverse=True)
+
+
+def select_top_passages(query: str, docs_with_scores: list[tuple]) -> list[dict]:
+    """Build passages and select final context entries using SEARCH_TOP_K."""
+    passages = _build_passages(docs_with_scores)
+    candidate_count = min(
+        len(passages),
+        max(SEARCH_TOP_K, SEARCH_TOP_K * max(RERANK_CANDIDATE_MULTIPLIER, 1)),
+    )
     if USE_RERANKER:
-        ranker, req_cls = get_ranker()
-        rerank_request = req_cls(query=query, passages=passages)
-        top_passages = ranker.rerank(rerank_request)[:3]
+        ranked = get_ranker().rerank(query, passages, candidate_count)
     else:
-        top_passages = passages[:3]
+        ranked = passages[:candidate_count]
+    return apply_recency_weight(ranked, RECENCY_WEIGHT)[:SEARCH_TOP_K]
+
+
+def vectordb_node(state: State) -> dict:
+    query = state.get("rewritten_query", state["question"])
+    search_filters = state.get("search_filters") or infer_search_filters(query)
+    if not os.path.exists(FAISS_DIR):
+        msg = "faiss_db/ 폴더가 없어 검색을 진행할 수 없습니다. 먼저 임베딩 파이프라인을 실행해 주세요."
+        logger.warning(msg)
+        return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
+
+    embeddings_fn = build_embeddings_fn()
+    faiss_store = FAISS.load_local(
+        FAISS_DIR,
+        embeddings_fn,
+        allow_dangerous_deserialization=True,
+    )
+
+    fetch_k = _metadata_aware_fetch_k(faiss_store, search_filters)
+    docs_with_scores = faiss_store.similarity_search_with_score(query, k=fetch_k)
+    docs_with_scores = filter_docs_with_scores(docs_with_scores, search_filters)
+    if not docs_with_scores:
+        if search_filters:
+            filter_text = ", ".join(f"{key}={value}" for key, value in search_filters.items())
+            msg = (
+                "지정된 조건에 맞는 임베딩 완료 리포트를 찾지 못했습니다. "
+                f"(적용 조건: {filter_text})"
+            )
+        else:
+            msg = "관련 리포트를 찾지 못했습니다."
+        logger.info(msg)
+        return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
+
+    top_passages = select_top_passages(query, docs_with_scores)
 
     context_parts = []
     rerank_info = []
@@ -105,6 +181,9 @@ def vectordb_node(state: State) -> dict:
                 "broker": meta.get("broker", "-"),
                 "file_name": meta.get("file_name", "-"),
                 "score": float(result.get("score", 0.0)),
+                "rerank_score": result.get("rerank_score"),
+                "recency_score": result.get("recency_score"),
+                "final_score": result.get("final_score"),
             }
         )
 

@@ -1,125 +1,104 @@
-"""
-embed_pipeline.py
------------------
-PDF → 선택형 텍스트/Markdown 추출 → LangChain 청킹 → Gemini 임베딩 → FAISS 저장
+﻿"""
+PDF embedding pipeline.
 
-사용된 LangChain 컴포넌트:
-    ┌─────────────────────────────────────────────────────────────┐
-    │  RecursiveCharacterTextSplitter  텍스트 청킹                │
-    │  GoogleGenerativeAIEmbeddings    임베딩 (gemini-embedding-001)│
-    │  FAISS (langchain_community)     벡터 스토어 (영구 저장)    │
-    │  Document (langchain_core)       문서 표준 포맷             │
-    └─────────────────────────────────────────────────────────────┘
-
-[텍스트 추출 방식]
-  EXTRACTION_ENGINE 설정에 따라 pymupdf, marker, opendataloader 중 하나를 사용합니다.
-  추출 결과는 금융 리포트 전용 정제 필터를 거친 뒤 공통 청킹 단계로 전달됩니다.
-
-향후 LangGraph 파이프라인 구성 시 각 함수가 그대로 노드로 전환됩니다:
-
-    graph.add_node("extract", node_extract_pdf)
-    graph.add_node("split",   node_split_documents)
-    graph.add_node("store",   node_embed_and_store)
-    graph.add_node("mark",    node_mark_complete)
-
-    graph.add_edge("extract", "split")
-    graph.add_edge("split",   "store")
-    graph.add_edge("store",   "mark")
+Flow:
+1. Extract PDF text or Markdown with the configured extraction engine.
+2. Split extracted content into LangChain documents.
+3. Embed chunks with the configured OpenRouter embedding model.
+4. Store vectors in FAISS and mark source reports as embedded in SQLite.
 """
 
+import argparse
+import json
 import os
-import re
 import sys
 import time
-import argparse
 import uuid
-import json
+from pathlib import Path
 
-# 프로젝트 루트 경로를 참조할 수 있도록 설정
+# Make the project root importable when the file is executed directly.
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-
-# stdout 라인 버퍼링 해제
-if hasattr(sys.stdout, 'reconfigure'):
+# Flush progress logs promptly during long embedding jobs.
+if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
-from dotenv import load_dotenv
-from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
-from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+
+from src.configs import config
 from src.core.db_manager import (
-    init_db, sync_from_directory, fetch_unembedded, mark_embedded, 
-    insert_parent_chunks
+    fetch_unembedded,
+    init_db,
+    insert_parent_chunks,
+    mark_embedded,
+    sync_from_directory,
 )
 from src.core.pdf_extraction import extract_pdf_text
-from src.configs import config
 from src.llms.embeddings import build_embeddings_model
 
 logger = config.get_logger(__name__)
 
-# ── 환경설정 ─────────────────────────────────────────────────────────────────────
 
+def sync_report_pdf_dir_env(pdf_dir: str | os.PathLike = config.SAVE_DIR) -> None:
+    """Write the absolute PDF directory to .env for GUI open-file support."""
+    env_path = config.BASE_DIR / ".env"
+    report_pdf_dir = Path(pdf_dir).resolve().as_posix()
+    env_line = f"REPORT_PDF_DIR={report_pdf_dir}"
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 텍스트 정제 헬퍼
-# ═══════════════════════════════════════════════════════════════════════════════
+    if env_path.exists():
+        content = env_path.read_text(encoding="utf-8-sig")
+        lines = content.splitlines()
+        updated = False
+        for index, line in enumerate(lines):
+            if line.strip().startswith("REPORT_PDF_DIR="):
+                lines[index] = env_line
+                updated = True
+                break
+        if not updated:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(env_line)
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        env_path.write_text(env_line + "\n", encoding="utf-8")
 
+    os.environ["REPORT_PDF_DIR"] = report_pdf_dir
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LangGraph 노드 함수
-# 각 함수의 입력·출력이 state dict 기반이므로 LangGraph 노드로 바로 전환 가능
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def node_extract_pdf(state: dict) -> dict:
-    """
-    [LangGraph 노드: extract]
-    PyMuPDF을 사용하여 PDF를 텍스트로 추출한 뒤 
-    기존 필터(사이드바, 라인 노이즈, 준법고지)를 적용합니다.
-
-    입력 state 키: file_name, report_date, target_name, title
-    출력 state 키: + raw_text
-    """
+    """Extract text from a PDF and attach it to the graph state."""
     file_name = state["file_name"]
-    pdf_path  = os.path.join(config.SAVE_DIR, file_name)
+    pdf_path = os.path.join(config.SAVE_DIR, file_name)
 
     try:
         result = extract_pdf_text(pdf_path, config.EXTRACTION_ENGINE, clean=True)
-    except Exception as e:
-        logger.error(f"  PDF extraction failed: {e}")
-        raise ValueError(f"PDF에서 텍스트를 추출할 수 없습니다: {file_name}") from e
+    except Exception as exc:
+        logger.error(f"  PDF extraction failed: {exc}")
+        raise ValueError(f"Could not extract text from PDF: {file_name}") from exc
 
     raw_text = result.text
     if result.used_engine != result.requested_engine:
         logger.info(f"  Extraction fallback used: {result.used_engine}")
 
     if not raw_text.strip():
-        raise ValueError(f"PDF에서 텍스트가 비어있습니다: {file_name}")
+        raise ValueError(f"Extracted text is empty: {file_name}")
 
-    logger.info(f"  [1/3] 완료 — {len(raw_text):,}자 추출 (Markdown 정제 완료)")
+    logger.info(f"  [1/3] Extracted {len(raw_text):,} characters")
     return {**state, "raw_text": raw_text}
 
 
 def node_split_documents(state: dict) -> dict:
-    """
-    [LangGraph 노드: split]
-    추출된 마크다운 텍스트를 MarkdownHeaderTextSplitter로 1차 분할한 뒤, 
-    RecursiveCharacterTextSplitter로 2차 청킹합니다.
-    USE_PARENT_CHILD가 활성화된 경우 Parent(큰 맥락)-Child(작은 검색단위) 구조로 분할합니다.
-    
-    입력 state 키: raw_text + 메타데이터
-    출력 state 키: + documents (Child 또는 일반 청크), + parent_documents (Parent-Child 모드 시)
-    """
-    # 1. 마크다운 헤더 기반 분할
+    """Split extracted Markdown/text into retrieval chunks."""
     headers_to_split_on = [
         ("#", "Header 1"),
         ("##", "Header 2"),
         ("###", "Header 3"),
     ]
-    
+
     markdown_splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=headers_to_split_on,
-        strip_headers=False
+        strip_headers=False,
     )
     header_splits = markdown_splitter.split_text(state["raw_text"])
 
@@ -127,154 +106,143 @@ def node_split_documents(state: dict) -> dict:
     child_docs = []
 
     if config.USE_PARENT_CHILD:
-        # --- Parent-Child Chunking 모드 ---
-        logger.info(f"  [2/3] Parent-Child 모드로 분할 중...")
-        
-        # Parent Splitter (큰 덩어리)
+        logger.info("  [2/3] Splitting with parent-child chunking...")
+
         parent_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.PARENT_CHUNK_SIZE,
             chunk_overlap=int(config.PARENT_CHUNK_SIZE * 0.1),
-            separators=["\n\n", "\n", ". ", " ", ""]
+            separators=["\n\n", "\n", ". ", " ", ""],
         )
-        # Child Splitter (검색용 작은 덩어리)
         child_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.CHILD_CHUNK_SIZE,
             chunk_overlap=int(config.CHILD_CHUNK_SIZE * 0.1),
-            separators=["\n\n", "\n", ". ", " ", ""]
+            separators=["\n\n", "\n", ". ", " ", ""],
         )
 
         parents = parent_splitter.split_documents(header_splits)
-        
-        for p_idx, p_doc in enumerate(parents):
-            p_id = str(uuid.uuid4())
-            p_doc.metadata.update({
-                "parent_id": p_id,
-                "file_name": state["file_name"],
-                "target_name": state["target_name"],
-                "title": state["title"],
-                "report_date": state["report_date"],
-                "report_type": state.get("report_type", "company"),
-                "broker": state.get("broker", "알수없음")
-            })
-            parent_docs.append(p_doc)
 
-            # 해당 Parent를 Child 조각으로 나눔
-            children = child_splitter.split_documents([p_doc])
-            for c_idx, c_doc in enumerate(children):
-                c_doc.metadata.update({
-                    "parent_id": p_id, # 부모 추적용 ID만 저장 (중복 제거)
-                    "child_index": c_idx,
+        for p_doc in parents:
+            p_id = str(uuid.uuid4())
+            p_doc.metadata.update(
+                {
+                    "parent_id": p_id,
                     "file_name": state["file_name"],
                     "target_name": state["target_name"],
                     "title": state["title"],
                     "report_date": state["report_date"],
                     "report_type": state.get("report_type", "company"),
-                    "broker": state.get("broker", "알수없음")
-                })
-                # 검색 성능 향상을 위해 Child 청크에도 핵심 맥락(기업명/제목) 주입
-                header_context = f"[기업: {state['target_name']}, 제목: {state['title']}]\n"
+                    "broker": state.get("broker", "unknown"),
+                }
+            )
+            parent_docs.append(p_doc)
+
+            children = child_splitter.split_documents([p_doc])
+            for c_idx, c_doc in enumerate(children):
+                c_doc.metadata.update(
+                    {
+                        "parent_id": p_id,
+                        "child_index": c_idx,
+                        "file_name": state["file_name"],
+                        "target_name": state["target_name"],
+                        "title": state["title"],
+                        "report_date": state["report_date"],
+                        "report_type": state.get("report_type", "company"),
+                        "broker": state.get("broker", "unknown"),
+                    }
+                )
+                header_context = f"[Company: {state['target_name']}, Title: {state['title']}]\n"
                 c_doc.page_content = header_context + c_doc.page_content
                 child_docs.append(c_doc)
 
-        logger.info(f"  [2/3] 완료 — Parent {len(parent_docs)}개 / Child {len(child_docs)}개 생성 (ID 참조 방식)")
+        logger.info(
+            f"  [2/3] Created {len(parent_docs)} parent chunks and "
+            f"{len(child_docs)} child chunks"
+        )
         return {**state, "documents": child_docs, "parent_documents": parent_docs}
 
-    else:
-        # --- 일반 모드 (기존 방식) ---
-        chunk_overlap = int(config.CHUNK_SIZE * 0.1)
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config.CHUNK_SIZE,
-            chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", ". ", " ", ""]
-        )
-        
-        docs = text_splitter.split_documents(header_splits)
+    chunk_overlap = int(config.CHUNK_SIZE * 0.1)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=config.CHUNK_SIZE,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
 
-        for i, doc in enumerate(docs):
-            doc.metadata.update({
-                "file_name":   state["file_name"],
+    docs = text_splitter.split_documents(header_splits)
+
+    for i, doc in enumerate(docs):
+        doc.metadata.update(
+            {
+                "file_name": state["file_name"],
                 "target_name": state["target_name"],
-                "title":       state["title"],
+                "title": state["title"],
                 "report_date": state["report_date"],
                 "report_type": state.get("report_type", "company"),
-                "broker":      state.get("broker", "알수없음"),
-                "chunk_index": i
-            })
-            header_context = f"[기업: {state['target_name']}, 제목: {state['title']}]\n"
-            doc.page_content = header_context + doc.page_content
+                "broker": state.get("broker", "unknown"),
+                "chunk_index": i,
+            }
+        )
+        header_context = f"[Company: {state['target_name']}, Title: {state['title']}]\n"
+        doc.page_content = header_context + doc.page_content
 
-        logger.info(f"  [2/3] 완료 — {len(docs)}개 청크 생성 (일반 Markdown Header 기반)")
-        return {**state, "documents": docs}
+    logger.info(f"  [2/3] Created {len(docs)} chunks")
+    return {**state, "documents": docs}
 
 
 def node_embed_and_store(state: dict, embeddings_fn) -> dict:
-    """
-    [LangGraph 노드: store]
-    Document 리스트를 임베딩 후 FAISS에 저장합니다.
+    """Embed chunks, persist parent chunks if needed, and update the FAISS index."""
+    logger.info("  [3/3] Updating FAISS index")
 
-    ChromaDB 대신 FAISS 사용 — Windows 환경에서 안정적, LangChain 네이티브 지원.
-    FAISS 파일은 faiss_db/ 에 영구 저장됩니다.
-    """
-    logger.info("  [3/3] FAISS 저장 시작")
-
-    docs      = state["documents"]
-    file_name = state["file_name"]
-    texts     = [doc.page_content for doc in docs]
+    docs = state["documents"]
+    texts = [doc.page_content for doc in docs]
     metadatas = [doc.metadata for doc in docs]
 
-    # ① Parent-Child 모드인 경우 부모 청크를 SQLite에 저장
     if config.USE_PARENT_CHILD and "parent_documents" in state:
-        logger.info(f"  [3/3] 부모 청크 {len(state['parent_documents'])}개 DB 저장 중...")
+        logger.info(f"  [3/3] Saving {len(state['parent_documents'])} parent chunks to SQLite...")
         parent_data = []
         for p_doc in state["parent_documents"]:
-            parent_data.append({
-                "id": p_doc.metadata["parent_id"],
-                "content": p_doc.page_content,
-                "file_name": p_doc.metadata["file_name"],
-                "metadata": json.dumps(p_doc.metadata, ensure_ascii=False)
-            })
+            parent_data.append(
+                {
+                    "id": p_doc.metadata["parent_id"],
+                    "content": p_doc.page_content,
+                    "file_name": p_doc.metadata["file_name"],
+                    "metadata": json.dumps(p_doc.metadata, ensure_ascii=False),
+                }
+            )
         insert_parent_chunks(parent_data)
 
-    # ② 임베딩 호출 (GoogleGenerativeAIEmbeddings)
-    logger.info(f"  [3/3] 임베딩 중... ({len(docs)}개 청크)")
-    vectors = [[float(x) for x in v] for v in embeddings_fn.embed_documents(texts)]
-    # ② FAISS 로드 또는 새로 생성
-    text_embeddings = list(zip(texts, vectors))   # List[(text, vector)]
+    logger.info(f"  [3/3] Embedding {len(docs)} chunks...")
+    vectors = [[float(x) for x in vector] for vector in embeddings_fn.embed_documents(texts)]
+    text_embeddings = list(zip(texts, vectors))
+
     faiss_index_file = os.path.join(config.FAISS_DIR, "index.faiss")
     if os.path.exists(faiss_index_file):
-        logger.info(f"  [3/3] 기존 FAISS 인덱스 로드 중...")
+        logger.info("  [3/3] Loading existing FAISS index...")
         faiss_store = FAISS.load_local(
-            config.FAISS_DIR, embeddings_fn,
-            allow_dangerous_deserialization=True
+            config.FAISS_DIR,
+            embeddings_fn,
+            allow_dangerous_deserialization=True,
         )
         faiss_store.add_embeddings(text_embeddings, metadatas=metadatas)
     else:
-        logger.info(f"  [3/3] FAISS 인덱스 신규 생성 중...")
+        logger.info("  [3/3] Creating new FAISS index...")
         os.makedirs(config.FAISS_DIR, exist_ok=True)
         faiss_store = FAISS.from_embeddings(
-            text_embeddings, embeddings_fn, metadatas=metadatas
+            text_embeddings,
+            embeddings_fn,
+            metadatas=metadatas,
         )
 
     faiss_store.save_local(config.FAISS_DIR)
-    logger.info(f"  [3/3] 완료 — {len(docs)}개 청크 저장 ({config.FAISS_DIR}/)")
+    logger.info(f"  [3/3] Saved {len(docs)} chunks to {config.FAISS_DIR}/")
     return {**state, "stored_count": len(docs)}
 
 
 def node_mark_complete(state: dict) -> dict:
-    """
-    [LangGraph 노드: mark]
-    SQLite의 is_embedded 플래그를 1로 업데이트합니다.
-
-    입력 state 키: file_name
-    """
+    """Mark a source report as embedded in SQLite."""
     mark_embedded(state["file_name"])
-    logger.info(f"  ✅ SQLite 업데이트 완료 (is_embedded=1)")
+    logger.info("  SQLite updated: is_embedded=1")
     return state
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 파이프라인 실행
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def build_embeddings_fn():
     """Initialize the configured embeddings model."""
@@ -282,31 +250,22 @@ def build_embeddings_fn():
 
 
 def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
-    """
-    미처리 PDF를 최대 test_limit개 선택하여 전체 파이프라인 실행.
-    (test_limit가 0이거나 None이면 전체 미처리 파일 처리)
-
-    순서: extract → split → store → mark
-    """
+    """Run the embedding pipeline for pending reports."""
     print("=" * 60)
-    print("  Finance LLM — Embedding Pipeline (테스트 모드)")
+    print("  Finance LLM Embedding Pipeline")
     print("=" * 60)
 
-    # SQLite 초기화 + downloaded/ 폴더 동기화
     init_db()
+    sync_report_pdf_dir_env(config.SAVE_DIR)
     sync_from_directory(config.SAVE_DIR)
 
     pending = fetch_unembedded()
     if not pending:
-        logger.info("\n✅ 모든 파일이 이미 임베딩 완료 상태입니다.")
+        logger.info("\nAll files are already embedded.")
         return
 
-    # test_limit가 0이거나 None이면 전체 처리, 그 외에는 슬라이싱
-    if test_limit and test_limit > 0:
-        targets = pending[:test_limit]
-    else:
-        targets = pending
-    print(f"\n📄 처리 대상: {len(targets)}건 (전체 미처리: {len(pending)}건)\n")
+    targets = pending[:test_limit] if test_limit and test_limit > 0 else pending
+    print(f"\nPending targets: {len(targets)} / total pending: {len(pending)}\n")
 
     embeddings_fn = build_embeddings_fn()
 
@@ -314,57 +273,52 @@ def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
 
     for idx, row in enumerate(targets, 1):
         file_name = row["file_name"]
-        print(f"\n[{idx}/{len(targets)}] {row['target_name']} — {row['title'][:40]}")
+        print(f"\n[{idx}/{len(targets)}] {row['target_name']} - {row['title'][:40]}")
 
         if not os.path.exists(os.path.join(config.SAVE_DIR, file_name)):
-            logger.warning(f"  ⚠️  파일 없음, 건너뜀\n")
+            logger.warning("  File is missing; skipping.\n")
             failed += 1
             continue
 
-        # 초기 state 구성 (LangGraph의 GraphState에 해당)
         state: dict = {
-            "file_name":   file_name,
+            "file_name": file_name,
             "target_name": row["target_name"],
-            "title":       row["title"],
+            "title": row["title"],
             "report_date": row["report_date"],
             "report_type": row["report_type"],
-            "broker":      row["broker"],
+            "broker": row["broker"],
         }
 
         try:
-            # ── 노드 순차 실행 ───────────────────────────────────────────────
-            # LangGraph 전환 시 아래 4줄이 그대로 그래프 엣지가 됩니다.
             state = node_extract_pdf(state)
             state = node_split_documents(state)
             state = node_embed_and_store(state, embeddings_fn)
             state = node_mark_complete(state)
-            # ─────────────────────────────────────────────────────────────────
-
             success += 1
-
         except KeyboardInterrupt:
-            logger.warning("[중단] 사용자가 강제로 종료했습니다.")
+            logger.warning("[Interrupted] Stopping at user request.")
             break
-        except Exception as e:
-            # 예상치 못한 일반 프로세스 예외 (BaseException 대신 표준 Exception만 포착)
-            logger.error(f"  ❌ 오류 ({type(e).__name__}): {e}")
+        except Exception as exc:
+            logger.error(f"  Error ({type(exc).__name__}): {exc}")
             failed += 1
 
-        # 파일 간 API 레이트 리밋 방지
         if idx < len(targets):
             print()
             time.sleep(2)
 
-    # 결과 요약
     print("\n" + "=" * 60)
-    print(f"  완료: {success}건 성공 / {failed}건 실패")
-    faiss_size = sum(
-        os.path.getsize(os.path.join(config.FAISS_DIR, f))
-        for f in os.listdir(config.FAISS_DIR)
-        if os.path.isfile(os.path.join(config.FAISS_DIR, f))
-    ) if os.path.exists(config.FAISS_DIR) else 0
-    print(f"  FAISS 인덱스 크기: {faiss_size / 1024:.1f} KB")
-    print(f"  저장 위치: {os.path.abspath(config.FAISS_DIR)}/")
+    print(f"  Done: {success} succeeded / {failed} failed")
+    faiss_size = (
+        sum(
+            os.path.getsize(os.path.join(config.FAISS_DIR, file_name))
+            for file_name in os.listdir(config.FAISS_DIR)
+            if os.path.isfile(os.path.join(config.FAISS_DIR, file_name))
+        )
+        if os.path.exists(config.FAISS_DIR)
+        else 0
+    )
+    print(f"  FAISS index size: {faiss_size / 1024:.1f} KB")
+    print(f"  Saved at: {os.path.abspath(config.FAISS_DIR)}/")
     print("=" * 60)
 
 
@@ -375,14 +329,14 @@ def main(argv: list[str] | None = None) -> None:
         type=int,
         default=config.TEST_LIMIT,
         help=(
-            "이번 실행에서 처리할 최대 파일 수입니다. "
-            "0이면 모든 미처리 파일을 처리합니다. 기본값은 config.TEST_LIMIT입니다."
+            "Maximum number of pending files to process in this run. "
+            "Use 0 to process every pending file. Default: config.TEST_LIMIT."
         ),
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="--limit 0과 동일하게 모든 미처리 파일을 처리합니다.",
+        help="Process every pending file. Equivalent to --limit 0.",
     )
     args = parser.parse_args(argv)
     run_pipeline(test_limit=0 if args.all else args.limit)

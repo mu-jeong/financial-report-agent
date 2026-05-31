@@ -20,7 +20,7 @@ The embedding pipeline keeps the same downstream contract for all engines:
 2. Apply finance-report cleanup filters.
 3. Split with `MarkdownHeaderTextSplitter`.
 4. Build parent-child chunks.
-5. Store embeddings with the configured provider (`EMBEDDING_PROVIDER=openrouter`, `EMBEDDING_MODEL=baai/bge-m3` by default).
+5. Store embeddings with the configured OpenRouter embedding model (`EMBEDDING_MODEL=baai/bge-m3` by default).
 
 Changing extraction behavior can change chunk text. If you want a clean production index after changing the extraction engine or embedding model, delete `data/vector_db`, reset `reports.is_embedded`, clear `parent_chunks`, and rerun `python -m src.core.embed_pipeline --all`.
 

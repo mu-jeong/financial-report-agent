@@ -1,342 +1,193 @@
-# 📊 Finance Report Agent: 증권사 리포트 분석용 LangChain, LangGraph AI Agent
+# Finance LLM
 
-폴더에 저장된 증권사 종목/산업/경제 분석 리포트(PDF)를 정제하여 FAISS 벡터 DB에 저장하고, 자연어 질의로 금융 데이터를 검색하는 LangChain, LangGraph 기반 AI Agent 입니다.
+증권사 리포트 PDF를 수집하고 SQLite + FAISS에 색인한 뒤, LangGraph 기반 RAG 파이프라인으로 재무 질문에 답하는 프로젝트입니다.
 
----
+## 최근 변경 요약
 
-### 🚀 Latest Update: [v0.5] (2026-05-31)
-- **OpenRouter 전환**: 생성 LLM 기본값을 `deepseek/deepseek-v4-flash`로 변경하고, 공통 LLM factory를 통해 provider를 교체할 수 있게 했습니다.
-- **임베딩 비용 최적화**: 임베딩 기본값을 OpenRouter `baai/bge-m3`로 변경했습니다.
-- **FAISS 재빌드 절차 명확화**: 임베딩 모델 변경 시 `data/vector_db`, `reports.is_embedded`, `parent_chunks`를 함께 초기화하도록 문서화했습니다.
-- **테스트 보강**: OpenRouter embedding payload 테스트를 추가했습니다.
+- **OpenRouter 단일 연동**: 생성 모델, 임베딩, 선택형 rerank를 OpenRouter API 기준으로 통합했습니다.
+- **저비용 임베딩**: 약 2,000건의 리포트를 임베딩 벡터화하는 데 약 **$0.05**가 소요되었습니다. 실제 비용은 문서 길이와 청크 수에 따라 달라질 수 있습니다.
+- **기본 모델**: 생성 모델은 `deepseek/deepseek-v4-flash`, 임베딩은 `baai/bge-m3`를 사용합니다.
+- **Rerank 기본 비활성화**: 비용을 고려해 `USE_RERANKER=false`가 기본값입니다. 필요할 때 `cohere/rerank-v3.5`를 켤 수 있습니다.
+- **대화 장기 메모리**: CLI/GUI 대화는 `data/conversations.db`에 저장되어 프로그램 재시작 후에도 불러올 수 있습니다.
+- **수집 옵션 개선**: 다운로드 카테고리, 목표 개수, 조회 기간을 설정할 수 있습니다. 기본 카테고리는 `company`입니다.
+- **날짜 기반 검색 개선**: 질문에서 날짜, 월, 분기, 연도를 추론해 `report_date` 메타데이터로 필터링합니다.
+- **참고 문서 UI 개선**: GUI의 참고 문서는 기본적으로 접힌 dropdown 안에 텍스트 목록으로 표시됩니다.
 
-👉 **[상세 내용 확인하기 (Changelog)](./CHANGELOG.md)**
+## 주요 기능
 
----
+- 증권사 리포트 PDF 다운로드 및 파일명 파싱
+- SQLite `reports` 테이블과 FAISS 벡터 인덱스 동기화
+- Parent-Child Chunking 기반 문맥 확장 검색
+- LangGraph 기반 query rewrite, routing, RDB 검색, VectorDB 검색, 답변 생성
+- SQL guardrail: `SELECT`와 `reports` 테이블 중심의 read-only SQLite 접근
+- OpenRouter 임베딩(`baai/bge-m3`) 지원
+- 선택형 OpenRouter rerank(`cohere/rerank-v3.5`) 또는 FlashRank fallback
+- `report_date` 기준 최신성 가중치(`RECENCY_WEIGHT`) 지원
+- FinanceDataReader 기반 주가 조회 tool calling
+- Streamlit GUI와 CLI 실행
 
-## 📸 실행 예시 (Screenshots)
-
-| ![GUI](examples/example3.png) | ![CLI](examples/example1.png) |
-|:---:|:---:|
-| **GUI 실행 예시 (Streamlit)** | **CLI 실행 예시 (Terminal)** |
-
-## 🎯 프로젝트 목적
-
-매일 발간되는 수 십 개의 증권사 리포트를 일일히 다 모니터링 하기에는 많은 시간이 소요됩니다. 읽고 지나쳤지만 기억이 나지 않거나, 안 읽은 보고서에서도 내가 원하는 중요한 정보가 있을 수 있습니다. **Finance Report Agent**는 이런 부분에서 어려움을 겪고 있는 사용자들에게 도움을 주고자 개발되었습니다.
-
-LangChain, LangGraph를 활용하여 저장된 보고서를 RDB, Vector DB에 데이터화하고, 자연어 질문을 통해 원하는 정보를 정확하게 찾아낼 수 있는 지능형 금융 에이전트 구축을 목적으로 합니다.
-
-## ⚠️ 주의사항 (Disclaimer)
-
-본 프로젝트는 금융 분야의 LLM 활용 및 데이터 파이프라인 학습을 목적으로 작성된 프로젝트입니다. 제공되는 스크립트의 사용으로 인해 발생할 수 있는 모든 이슈에 대한 책임은 사용자 본인에게 있습니다. 특히, 데이터 소스의 이용 약관 및 저작권 정책을 반드시 확인하고 준수하여 사용하시기 바랍니다.
-
----
-
-## 🗂️ 프로젝트 구조
-
-```
-finance_llm/
-├── data/                 # 데이터 저장소 (다운로드 리포트, DB, 벡터 인덱스)
-│   ├── downloaded/       # 분석 대상 PDF 저장 폴더
-│   ├── vector_db/        # FAISS 인덱스 저장 폴더 (자동 생성)
-│   └── reports.db        # SQLite DB (자동 생성)
-├── src/                  # 메인 비즈니스 로직
-│   ├── configs/          # 설정, 필터링 규칙 및 프롬프트
-│   ├── core/             # 핵심 파이프라인 및 상태 유틸 (db_manager.py, embed_pipeline.py, status.py 등)
-│   ├── graphs/           # LangGraph 흐름 조립 및 상태 정의
-│   ├── nodes/            # LangGraph의 개별 비즈니스 로직 모듈
-│   └── utils/            # 공통 유틸리티 (text_filters.py, ranker.py 등)
-├── apps/                 # 사용자 인터페이스 엔트리포인트
-│   ├── cli/              # 터미널 기반 CLI (app.py)
-│   └── gui/              # Streamlit 기반 웹 앱 (app.py)
-├── scripts/              # 선택적 유틸리티 및 디버깅 스크립트
-├── docs/                 # 시스템 설계 철학 및 연동 가이드 문서
-├── logs/                 # 애플리케이션 로그
-├── tests/                # pytest 기반 회귀 테스트
-├── requirements.txt      # 검증 환경 기준으로 고정된 패키지 목록
-└── .env.example          # 환경 변수 템플릿
-```
-
----
-
-## ⚙️ 환경 설정
-
-> ⚠️ **필수 요구사항:** 본 프로젝트는 최신 타입 힌트(`|` 문법 및 `TypedDict` 등)를 사용하므로 **`Python 3.10 이상`**의 환경이 권장됩니다. 하위 버전에서는 문법 에러가 발생할 수 있습니다.
-
-### 1. 가상환경 생성 및 활성화 (권장)
-
-프로젝트 의존성을 독립적으로 관리하기 위해 파이썬 가상환경(venv)을 사용하는 것을 강력히 권장합니다.
+## 설치
 
 ```bash
-# 가상환경 생성 (.venv) - Python 3.10 이상 지정
-# (Windows의 경우 환경 변수에 등록된 python 버전에 따라 python 또는 py -3.10 등을 사용하세요)
-python -m venv .venv 
-# 또는 Mac/Linux에서 특정 버전 지정 시: python3.10 -m venv .venv
-
-# 가상환경 활성화 (Windows)
+git clone <repository-url>
+cd finance_llm
+python -m venv .venv
 .venv\Scripts\activate
-
-# 가상환경 활성화 (macOS/Linux)
-source .venv/bin/activate
-```
-
-### 2. 패키지 설치
-
-활성화된 가상환경 내에서 `requirements.txt`에 명시된 필수 패키지들을 설치합니다.
-
-```bash
-python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. API 키 설정
+## 환경 변수 설정
 
-프로젝트 루트의 `.env.example` 파일을 복사하여 `.env` 파일을 생성하고, OpenRouter API 키를 입력합니다. 기본 생성 모델은 DeepSeek, 기본 임베딩 모델은 `baai/bge-m3`입니다.
-
-> 💡 **상세 연동 가이드:** API 키 발급 및 설정에 대한 구체적인 방법은 [🔑 API 연동 가이드(API_SETUP.md)](docs/API_SETUP.md) 문서를 확인해 주세요.
-
-```bash
-cp .env.example .env  # Linux/macOS
-copy .env.example .env # Windows (cmd)
-```
-
-`.env` 파일 내용:
+루트의 `.env.example`을 복사해 `.env`를 만들고 OpenRouter API 키를 설정합니다.
 
 ```env
-LLM_PROVIDER=openrouter
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-GENERATION_MODEL=deepseek/deepseek-v4-flash
-OPENROUTER_APP_TITLE=finance_llm
+OPENROUTER_API_KEY=sk-or-v1-your-key
 OPENROUTER_DATA_COLLECTION=deny
 
-# Embedding / vector DB. Rebuild data/vector_db after changing this.
-EMBEDDING_PROVIDER=openrouter
-EMBEDDING_MODEL=baai/bge-m3
+GENERATION_MODEL=deepseek/deepseek-v4-flash
+GENERATION_TEMPERATURE=0.1
+GENERATION_MAX_TOKENS=4096
 
-# Optional fallback only when LLM_PROVIDER=gemini or EMBEDDING_PROVIDER=gemini
-GEMINI_API_KEY=your_gemini_api_key_here
+EMBEDDING_MODEL=baai/bge-m3
+EMBEDDING_DIMENSIONS=1024
+
+USE_RERANKER=false
+RERANK_PROVIDER=openrouter
+RERANK_MODEL=cohere/rerank-v3.5
+RERANK_TIMEOUT=20
+RERANK_CANDIDATE_MULTIPLIER=3
+RECENCY_WEIGHT=0.15
+
+CRAWLER_CATEGORIES=company
+CRAWLER_MODE=LATEST
+CRAWLER_TARGET_DATE=2026-05-31
+CRAWLER_TARGET_COUNT=100
+CRAWLER_LOOKBACK_DAYS=7
+CRAWLER_MAX_LOOKBACK_DAYS=30
 ```
 
-#### 모델/provider 설정
+자세한 설정은 [`docs/API_SETUP.md`](docs/API_SETUP.md)를 참고하세요.
 
-- 생성 LLM은 `src/llms/factory.py`의 `build_chat_model()`에서 생성합니다.
-- 임베딩은 `src/llms/embeddings.py`의 `build_embeddings_model()`에서 생성합니다.
-- `LLM_PROVIDER=gemini` 또는 `EMBEDDING_PROVIDER=gemini`로 되돌릴 수 있지만, 그 경우 `GEMINI_API_KEY`가 필요합니다.
-- `EMBEDDING_MODEL` 또는 `EMBEDDING_PROVIDER`를 바꾸면 기존 FAISS 인덱스는 반드시 재생성해야 합니다.
+## PDF 파일명 규칙
 
+다운로드된 PDF는 기본적으로 `data/downloaded/` 아래에 저장됩니다.
 
----
+```text
+[카테고리]_[YYYY-MM-DD]_[대상]_[증권사]_[제목].pdf
+```
 
-## 🚀 사용 방법
+예시:
 
-### Step 1. 리포트 파일 준비 (⚠️ 파일명 규칙 엄수)
+```text
+company_2026-05-29_NAVER_미래에셋증권_기업 분석.pdf
+industry_2026-05-20_반도체_신한투자증권_HBM 전망.pdf
+economy_2026-05-15_null_한국투자증권_금리 전망.pdf
+```
 
-분석하고자 하는 PDF 파일을 `data/downloaded/` 폴더에 넣습니다. 본 파이프라인은 파일명을 기준으로 메타데이터를 파싱하므로 아래 **규칙을 반드시 지켜야 합니다.**
+## 리포트 다운로드
 
-- **파일명 규칙:** `[유형]_[YYYY-MM-DD]_[대상]_[증권사]_[제목].pdf`
-- **예시:** `company_2024-02-21_삼성전자_미래에셋증권_HBM 공급 확대 전망.pdf`
-- **유형:** `company` (종목), `industry` (산업), `economy` (경제)
-- 경제 리포트처럼 특정 대상이 없는 경우 대상 부분에 `null` 등을 기재합니다.
+```bash
+python -m src.core.report_crawler
+```
 
-> **Note:** `src/core/report_crawler.py`를 사용하여 네이버 금융에서 자동으로 수집할 수도 있으나 이는 선택 사항(Optional)입니다. 다른 경로로 수집한 파일이라도 위 규칙대로 이름만 지정되어 있으면 정상적으로 처리됩니다.
-> 
-> 💡 **(현재 설정) 크롤러 수집 설정:**
-> `src/core/report_crawler.py` 실행 시 수집되는 데이터는 `src/configs/config.py`의 설정을 따릅니다.
-> - **LATEST 모드:** 오늘부터 역순으로 탐색하여 리포트가 발견되는 가장 최근 날짜의 데이터를 자동으로 수집합니다.
-> - **SPECIFIC_DATE 모드:** `CRAWLER_TARGET_DATE`에 지정된 날짜의 리포트만 정밀 수집합니다.
+주요 옵션:
 
----
+- `CRAWLER_CATEGORIES=company`: 기본값. `industry`, `economy`, `company,industry`, `all`도 가능
+- `CRAWLER_MODE=LATEST`: `CRAWLER_TARGET_DATE`를 탐색 종료일로 보고, `CRAWLER_LOOKBACK_DAYS`만큼 과거로 내려가며 최신 리포트 수집
+- `CRAWLER_MODE=SPECIFIC_DATE`: `CRAWLER_TARGET_DATE` 기준 수집
+- `CRAWLER_TARGET_COUNT=100`: 원하는 개수까지 여러 날짜를 이어서 수집
+- `CRAWLER_LOOKBACK_DAYS=7`: 한 번의 조회에서 최근 며칠까지 볼지 설정
+- `CRAWLER_MAX_LOOKBACK_DAYS=30`: 목표 개수 확보를 위해 과거로 확장할 최대 기간
 
-### Step 2. 임베딩 파이프라인 실행
+예를 들어 아래 설정은 2026-05-31을 기준일로 삼고, 2026-05-31부터 과거 7일 범위에서 리포트를 찾습니다.
 
-준비된 PDF들을 텍스트로 변환하고 벡터 DB에 저장합니다. 기본 임베딩 provider는 OpenRouter이고, 모델은 `baai/bge-m3`입니다.
+```env
+CRAWLER_MODE=LATEST
+CRAWLER_TARGET_DATE=2026-05-31
+CRAWLER_LOOKBACK_DAYS=7
+```
+
+## 임베딩 인덱스 생성
 
 ```bash
 python -m src.core.embed_pipeline
+python -m src.core.embed_pipeline --all
+python -m src.core.embed_pipeline --limit 100
+```
 
-# 이번 실행에서 최대 N개만 처리
-python -m src.core.embed_pipeline --limit 20
+모델, chunk 크기, PDF 추출 엔진을 바꾼 뒤에는 기존 FAISS 인덱스를 재생성하는 것이 안전합니다.
 
-# 미처리 리포트 전체 처리
+```powershell
+Remove-Item -Recurse -Force data\vector_db
+python - <<'PY'
+from src.core.db_manager import get_connection
+conn = get_connection()
+conn.execute("UPDATE reports SET is_embedded = 0")
+conn.execute("DELETE FROM parent_chunks")
+conn.commit()
+conn.close()
+PY
 python -m src.core.embed_pipeline --all
 ```
 
-> [!WARNING]
-> **Marker 엔진 하드웨어 요구 사항:** 
-> 만약 텍스트 추출 엔진으로 `marker` (`config.py`의 `EXTRACTION_ENGINE = "marker"`)를 사용할 경우, **최소 16GB 이상의 시스템 메모리(RAM)**가 권장됩니다. 또한 **GPU(CUDA 등)가 없을 경우** CPU로만 연산이 수행되어 추출 시간이 리포트당 수 분 이상으로 매우 길어질 수 있으니 참고하시기 바랍니다. 저사양 환경에서는 메모리 부족으로 인해 프로그램이 강제 종료될 수 있습니다.
+## 실행
 
-- **마크다운(Markdown) 기반 지능형 파이프라인:** 단순히 텍스트를 뽑아내는 것이 아니라, **`PDF → Markdown 변환 → Markdown 기반 Split`**의 3단계 공정을 거칩니다.
-    - **Step 1 (추출):** `EXTRACTION_ENGINE` 설정에 따라 `PyMuPDF (fitz)` 또는 `marker-pdf`를 사용하여 PDF 데이터를 추출합니다. `marker` 엔진 사용 시 시각적 구조를 분석해 마크다운 형식을 생성하며, `fitz` 엔진은 가장 빠른 텍스트 추출 속도를 제공합니다.
-    - **Step 2 (정제):** 금융 리포트 특화 필터로 표 영역, 재무 레이블, 준법고지 등을 정밀하게 제거합니다.
-    - **Step 3 (분할):** `MarkdownHeaderTextSplitter`를 사용해 문서의 논리적 섹션 단위를 보존하며 청킹합니다.
-- **정교한 예외 처리 및 폴백(Fallback):** 엔진 설정과 관계없이 추출 과정에서 오류가 발생할 경우, 시스템이 중단되지 않고 자동으로 **표준 텍스트 추출 방식(fitz)**으로 전환하여 안정적인 처리를 보장합니다.
-
-> 💡 **(현재 설정) 임베딩 10건 제한 (테스트 모드) 안내:**
-> 다운로드된 PDF가 수십 건 이상일 경우 단기간 내 API 허용량(Rate Limit) 또는 OpenRouter 크레딧 소진을 피하기 위해, 현재 `src/configs/config.py` 파일 내에 `TEST_LIMIT = 10` (최대 10개만 임베딩)으로 안전 설정이 걸려있습니다.
-> **제한 해제 방법:** `python -m src.core.embed_pipeline --all`을 사용하거나, `src/configs/config.py`에서 `TEST_LIMIT = 0`으로 변경하면 폴더 내의 **모든 리포트**를 개수 제한 없이 한 번에 임베딩할 수 있습니다.
-
-> 📌 **현재 로컬 점검 상태(2026-04-25 기준):** 이 작업 공간에는 `data/downloaded/` PDF 740개와 SQLite `reports` 740건이 있으며, 기본 `TEST_LIMIT=10` 설정 때문에 임베딩 완료 문서는 10건, 대기 문서는 730건입니다. `data/`는 git 추적 대상이 아니므로 다른 환경에서는 수치가 달라질 수 있습니다.
-
----
-
-### Step 3. 복합 검색 (RDB + 벡터 DB 대화형 챗봇)
-
-저장된 내용을 바탕으로 자연어 검색 및 AI 답변을 받아볼 수 있습니다. 사용자의 취향에 따라 **웹 브라우저 기반의 모던 UI** 또는 **빠른 터미널 CLI** 환경 중 하나를 선택하여 진행할 수 있습니다. 두 환경 모두 질문의 의도에 따라 LangGraph가 자동으로 탐색 경로(Router)를 나눕니다.
-
-#### 옵션 A: 모던 웹 브라우저 UI (Streamlit 환경 - 권장)
-다중 쓰레드 대화 세션을 관리하며, 가장 직관적인 UI(ChatGPT 형태)를 제공합니다.
-
-```bash
-# 가상환경이 켜진 상태에서 아래 명령어 실행
-python -m streamlit run apps/gui/app.py
-```
-
-> **💡 처음 실행 빈 화면 이메일 입력 관련 안내:**
-> 코드를 처음 실행하면 터미널이나 브라우저에 "이메일을 입력하라"는 영문 안내(Welcome to Streamlit! If you'd like to receive helpful onboarding emails...)가 뜰 수 있습니다. 
-> 이때 당황하지 마시고 **아무것도 입력하지 않은 빈칸(공란) 상태로 그냥 `Enter` 키를 누르시면** 이메일 등록 과정을 건너뛰고 정상적으로 UI 서버가 시작됩니다!
-
-- **다중 쓰레드 (채팅방 관리) 지원:** 왼쪽 사이드바에서 `➕ 새 대화 시작` 버튼을 눌러 독립적인 대화방을 계속 추가할 수 있습니다. 방을 넘나들어도 각자의 대화 맥락(History)이 유지됩니다.
-
-#### 옵션 B: 터미널 CLI 환경
-명령어 환경에 익숙하거나 시스템 리소스를 최소화하여 파이프라인을 테스트하고 싶을 때 사용합니다.
+### CLI
 
 ```bash
 python apps/cli/app.py
-
-# LLM 그래프를 실행하지 않고 데이터/인덱스 상태만 확인
 python apps/cli/app.py --status
 ```
 
-- 스크립트를 실행하면 터미널에 대화형 프롬프트가 나타납니다.
-- **진행 상태 및 쿼리 재구성 안내:** 답변 생성 중에 시각적인 로딩 상태(`🤖...`)를 표시하며, AI가 질문의 의도를 재분석한 경우(`🔍 검색어 재구성`) 결과를 함께 보여주어 투명성을 높였습니다.
-- 종료하려면 `q` 또는 `quit`를 입력하세요.
-- 현재 대화 메모리를 초기화하려면 `c` 또는 `clear`를 입력하세요.
-- 데이터 상태를 다시 보려면 `status` 또는 `s`를 입력하세요.
+### Streamlit GUI
 
-#### 💡 공통 파이프라인 기능 설명
-- **현재 LangGraph 실행 흐름:** 기본 경로는 `query_rewrite -> router -> (rdb_sql_gen_node -> rdb_execute_node | vectordb_node)` 입니다. 각 검색 노드는 직접 답변을 생성하거나, `tool_calls`가 필요한 경우에만 `stock_price_tools`로 보냅니다. tool이 실행된 경우에는 `final_response_node`가 tool 결과를 반영해 최종 응답을 만들고 `END`로 종료됩니다.
-- **⏳ 초기 실행 대기시간:** 애플리케이션 실행 후 LangGraph 상태 객체 컴파일 및 메모리 로딩 과정으로 인해 **약 10~20초 정도의 최초 대기 시간**이 발생할 수 있습니다.
-- **메타데이터 질문 (RDB 처리):** *"저장된 산업 리포트는 모두 몇 개야?"*, *"미래에셋증권에서 나온 가장 최근 리포트는 언제 발간됐어?"* 와 같은 질문은 벡터 DB를 거치지 않고 직접 SQLite DB에 SQL 변환하여 빠르게 답변합니다. 모든 문서를 벡터 검색하고 LLM에 컨텍스트로 집어넣는 방식에 비해 토큰 사용량을 획기적으로 줄여 비용과 속도 측면에서 훨씬 효율적입니다.
-- **문서 본문 질문 (Vector DB 처리):** *"삼성전자의 반도체 실적 전망 알려줘"* 와 같은 질문은 FAISS 벡터 DB를 검색하고 FlashRank를 통해 문서를 재평가(Reranking) 한 뒤, 참조 문서 출처 목록을 결과에 깔끔하게 첨부합니다.
-- **메타데이터 기반 VectorDB 필터링:** 질문에 종목명, 증권사명, 리포트 유형이 명시되어 있으면 SQLite 메타데이터에서 확인된 값을 기준으로 FAISS 검색 결과를 후필터링합니다. 예를 들어 “미래에셋증권 삼성전자 리포트”는 해당 종목/증권사 메타데이터를 가진 임베딩 문서만 답변 컨텍스트로 사용합니다.
-- **실시간 주가 조회 (Tool Calling):** RDB 또는 Vector DB 처리 중 LLM이 현재 주가 데이터가 필요하다고 판단하면, `get_stock_price` tool을 **자율적으로 호출(Tool Calling)**하여 KRX 상장 종목의 최근 주가를 실시간으로 조회합니다. 라우터가 별도로 판단하지 않아도 되므로 "리포트 분석 + 현재 주가" 복합 질의를 자연스럽게 처리합니다.
-- **이중 보안 가드레일 (Guardrail):** 데코레이터(`@sql_guardrail`)와 `sqlglot` 라이브러리를 통해 LLM이 생성한 위험한 SQL 명령어를 추상 구문 트리(AST) 레벨에서 사전 차단하고, DB 연결을 읽기 전용(`?mode=ro`)으로 강제하는 다중 보안을 적용하며, Pydantic Validator로 라우팅 응답 포맷을 검증합니다.
-- **상태 점검 유틸리티:** `src/core/status.py`가 로컬 데이터 상태를 읽기 전용으로 요약하며, CLI 시작 화면/`--status`와 GUI 사이드바에서 동일한 기준으로 표시합니다.
+```bash
+streamlit run apps/gui/app.py
+```
 
-> **💡 Reranking (문서 재평가) 기능 활성화 방법**
-> 기본적으로 빠른 응답 속도를 위해 Reranker 모델이 비활성화 되어 있습니다. 더 정확하고 문맥에 맞는 문서를 찾고 싶다면 `src/configs/config.py` 파일 상단의 `USE_RERANKER = False` 를 `True` 로 변경하세요. (최초 1회 실행 시 모델 다운로드로 인해 1~2분 정도 소요될 수 있습니다.)
+GUI와 CLI 대화 이력은 `data/conversations.db`에 저장됩니다. Streamlit 사이드바의 대화 목록에서 각 대화 오른쪽 `...` 메뉴를 열어 이름 변경 또는 삭제를 선택할 수 있습니다. 대화 목록은 sidebar fragment로 묶어 일부 관리 작업은 필요한 영역만 갱신되도록 했습니다. 이 파일은 로컬 상태 파일이며 일반적으로 Git에 포함하지 않습니다.
 
----
+참고 문서의 `열기` 버튼은 브라우저 링크가 아니라 Streamlit 서버가 실행 중인 PC에서 PDF를 직접 엽니다. 파일은 `REPORT_PDF_DIR` 환경 변수의 폴더와 참고 문서의 파일명을 조합해 찾습니다. `REPORT_PDF_DIR`은 임베딩 파이프라인이 문서 폴더의 절대경로를 기준으로 `.env`에 자동 생성하거나 기존 값만 갱신합니다. 로컬 사용에는 적합하지만, 원격 서버에 배포한 경우에는 서버 PC에서 파일이 열립니다.
 
-## 🛡️ 백엔드 성능 및 보안 최적화 (Advanced Engineering)
+## 검색 및 답변 흐름
 
-본 프로젝트는 단순한 데모를 넘어 **실제 프로덕션 환경의 안정성**을 고려하여 설계되었습니다.
+1. `query_rewrite`: 질문을 검색 친화적으로 정리합니다.
+2. `router`: RDB 질문인지 VectorDB 질문인지 판단합니다.
+3. RDB 검색: LLM이 SQL을 생성하고 guardrail을 통과한 read-only SELECT만 실행합니다.
+4. VectorDB 검색: FAISS 후보를 넉넉히 가져온 뒤 날짜/종목/증권사/리포트 유형 필터와 최신성 가중치를 적용합니다.
+5. `USE_RERANKER=true`일 때 OpenRouter rerank를 추가로 적용합니다. 기본값은 비용을 고려해 false입니다.
+6. 답변과 참고 문서 목록을 반환합니다. GUI에서는 참고 문서가 접힌 dropdown 안에 텍스트 목록으로 표시되며, `열기` 버튼으로 로컬 PDF 뷰어를 실행할 수 있습니다.
 
-1. **이중 SQL 인젝션 방어 (AST 파싱 & Read-Only DB 커넥션)**
-   - 가장 근본적인 방어를 위해 LLM이 RDB를 조회할 때 사용하는 SQLite 연결 정보를 읽기 전용(`?mode=ro`)으로 강제하여 물리적인 데이터 변조(UPDATE, DELETE, DROP 등)를 원천 차단합니다.
-   - 이에 더해, `sqlglot` 모듈을 통한 애플리케이션 계층의 가드레일을 적용해 LLM이 작성한 쿼리를 **추상 구문 트리(AST)로 완벽 파싱**하여 검증합니다. 허락되지 않은 내부 테이블(`sqlite_master` 등) 접근을 차단하고 오직 `SELECT` 명령만 통과시키므로 난독화(Obfuscation)된 악의적 SQL 공격도 사전에 막아냅니다.
-2. **배치(Batch) 처리를 통한 디스크 I/O 병목 제거**
-   - 수백 개의 리포트를 DB에 동기화할 때 반복되는 `sqlite3.connect()` 열고 닫기로 인한 병목을 해소했습니다. (`src/core/db_manager.py`)
-   - 파일을 순회하며 메모리(List)에서 메타데이터만 미리 파싱한 후, **단일 트랜잭션의 `.executemany()`**를 활용해 DB 쓰기(Write) 작업을 한 번에 처리합니다.
-*   **RAG 정확도의 핵심은 구조적 전처리(Structural Pre-processing):**
-    단순한 텍스트 추출을 넘어, **`PDF → Markdown → Split`**으로 이어지는 마크다운 중심의 파이프라인을 구축했습니다. 이는 문서의 헤더(제목) 구조를 청크에 녹여내어, 검색 시 질문과 관련된 문단의 맥락을 완벽하게 보존하도록 돕습니다.
-*   **안정적인 하이브리드 추출:** 딥러닝 기반의 정밀 추출(`marker`)과 전통적인 규칙 기반 고속 추출(`PyMuPDF`)을 결합한 폴백 시스템을 통해, 환경에 구애받지 않는 단단한 데이터 적재 환경을 제공합니다.
-3. **중앙 집중형 로깅 시스템 (Centralized Logging)**
-   - 단순한 `print()` 출력을 배제하고, `src/configs/config.py`에 파이썬 내장 `logging` 모듈을 전역으로 설정했습니다.
-   - 터미널(Stream) 진행 상황과 함께, 모든 동작과 구체적인 에러 이력이 `logs/finance_llm.log` 파일에 영구 기록되어 백그라운드 서버 모드로 구동할 때의 관찰성(Observability)을 확보했습니다.
-4. **로컬 FAISS 인덱스 신뢰 경계**
-   - `FAISS.load_local(..., allow_dangerous_deserialization=True)`를 사용하므로, `data/vector_db/index.pkl`은 직접 생성한 신뢰 가능한 인덱스만 로드해야 합니다. 외부에서 받은 `vector_db`는 그대로 사용하지 말고 재생성하는 것을 권장합니다.
+## PDF 추출 엔진 비교
 
----
+`EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader` 중 하나로 설정할 수 있습니다.
 
-## ✅ 테스트
+```bash
+python -m src.core.compare_pdf_extractors --limit 10
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker --limit 5
+```
 
-핵심 회귀 테스트는 `tests/` 아래에 있습니다.
+자세한 내용은 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.
+
+## 테스트
 
 ```bash
 python -m pytest -q
 ```
 
-현재 테스트 범위:
-- 파일명 파싱 규칙
-- SQL 가드레일 및 읽기 전용 SELECT 허용
-- 데이터/인덱스 상태 스냅샷
-- VectorDB 메타데이터 필터 추론 및 적용
-- Tool Calling 이후 `final_response_node` 메시지 delta 반환
-- OpenRouter embedding 요청 payload
+현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter, OpenRouter embedding/rerank payload, conversation store, VectorDB Top-K/최신성 로직을 검증합니다.
 
----
+## 주의사항
 
-## 🔧 DB 초기화 방법
+- 이 프로젝트는 투자 조언이나 매수/매도 추천을 제공하지 않습니다.
+- 오래된 PDF와 잘못 추출된 표는 답변 품질에 영향을 줄 수 있습니다.
+- `.env`에는 실제 API 키가 들어가므로 커밋하지 마세요.
+- FAISS의 `index.pkl`은 pickle 역직렬화를 사용하므로 신뢰할 수 없는 파일을 로드하지 마세요.
 
-새로운 청킹/정제 규칙을 적용하거나, `EMBEDDING_PROVIDER`/`EMBEDDING_MODEL`을 바꿔 FAISS를 처음부터 다시 구성하고 싶을 때 사용합니다.
+## 개선 제안
 
-```powershell
-# 0. 선택: SQLite DB 백업
-Copy-Item data/reports.db data/reports.backup.db -Force
-
-# 1. FAISS 인덱스 삭제
-if (Test-Path data/vector_db) {
-    Remove-Item -Recurse -Force data/vector_db
-}
-
-# 2. SQLite 임베딩 상태와 parent chunk 초기화
-python -c "import sqlite3; con=sqlite3.connect('data/reports.db'); con.execute('UPDATE reports SET is_embedded=0'); con.execute('DELETE FROM parent_chunks'); con.commit(); con.close(); print('embedding reset complete')"
-
-# 3. 현재 EMBEDDING_PROVIDER/EMBEDDING_MODEL 기준으로 전체 재임베딩
-python -m src.core.embed_pipeline --all
-```
-
----
-
-## 🧹 텍스트 정제 규칙 (Pre-processing)
-
-증권사 리포트의 노이즈를 제거하기 위해 아래와 같은 규칙 기반 필터가 적용됩니다.
-
-- **마크다운 구조 활용:** `marker` 엔진 사용 시 제목(#), 리스트 등의 문서 구조를 인식한 채로 추출하며, `fitz` 엔진 사용 시에도 마크다운 헤더 기반 스플리터를 통해 논리 구조를 보존
-- **계층적 청킹:** `MarkdownHeaderTextSplitter`로 논리적 섹션 분할 후, 10% 가변 오버랩을 적용한 상세 청킹 수행
-- **텍스트/블록 기반 노이즈 제거:** 현재 기본 `pymupdf` 경로는 `page.get_text("text")`로 추출한 뒤 블록/라인 필터를 적용해 사이드바, 재무 레이블, 숫자 위주 표 파편을 제거
-- **재무 레이블 제거:** 손익계산서/재무상태표의 행 레이블(예: 지분법이익, 매출채권 등) 감지 및 제거
-- **준법고지 제거:** 리포트 하단의 면책 조항 및 애널리스트 준법 확인 문구 섹션 절단
-- **기타 노이즈:** 도표 캡션, 주석, 숫자 위주의 데이터 행 등 제거
-
----
-
-## 📝 TODO
-
-현재의 단방향 검색 구조(FAISS → LLM)를 넘어, LangChain 생태계의 장점을 살린 고도화 로드맵입니다.
-
-- [x] **LangGraph 기반 질문 라우팅:** 사용자의 질의 의도에 따라 RDB(메타데이터)와 Vector DB(문서 본문)를 동적으로 분기(Router)하는 구조 구현 (토큰 효율성 최적화)
-- [x] **대화형 챗봇 메모리 (History):** LangGraph 내장 `MemorySaver` 및 `Query Rewrite` 노드를 활용해 이전 질의응답 맥락 유지
-- [x] **대화 메모리 초기화 기능 (CLI):** 특정 키워드(예: 'c' 또는 'clear') 입력 시 `thread_id`를 갱신하여 현재까지의 메모리를 초기화하고 새로운 세션 시작
-- [x] **다중 대화 쓰레드(세션) 관리 기능:** 여러 개의 독립적인 대화 쓰레드(세션)를 동시에 유지 및 저장하고, 과거의 대화 세션을 불러오거나 관리할 수 있는 히스토리 기능 확장 도입(**GUI 한정**)
-- [x] **GUI 환경 지원:** 현재의 CLI(터미널) 방식을 넘어, 나중에는 Streamlit 등을 활용해 누구나 쉽게 접근할 수 있는 사용자 인터페이스(UI) 개발
-- [x] **Agent 및 툴 콜링 (Tool Calling):** AI가 스스로 판단하여 리포트 외의 최신·정량적 데이터를 수집하는 외부 API 호출 도입
-  - [x] **실시간 주가 조회 Tool 통합:** `FinanceDataReader` 기반 `get_stock_price` 함수를 `@tool`로 등록하고 LangGraph `ToolNode`에 연결. `rdb_execute_node`와 `vectordb_node`의 LLM에 `bind_tools`로 바인딩하여 **LLM이 주가 조회가 필요하다고 판단하면 어느 경로에서든 자동으로 tool을 호출**하도록 구현 완료
-  - [x] **단순 Tool Calling 흐름 정리:** `rdb_execute_node`와 `vectordb_node`가 직접 답변 생성과 tool 호출 판단을 수행하고, tool이 실제 실행된 경우에만 `stock_price_tools -> final_response_node` 경로를 타도록 단순화
-- [x] **운영 상태 가시화:** `src/core/status.py`, CLI `--status`/`status`, Streamlit 사이드바를 통해 로컬 DB·FAISS·임베딩 진행 상태를 확인
-- [x] **회귀 테스트 기반 마련:** 파일명 파싱, SQL 가드레일, 상태 유틸, Tool Calling 응답 흐름을 pytest로 검증
-- [x] **VectorDB 메타데이터 필터링:** 질문에 명시된 종목명/증권사/리포트 유형을 SQLite 메타데이터 기준으로 추론하고, FAISS 검색 결과를 해당 조건으로 제한
-- [ ] **프롬프트 엔지니어링 개선 (Prompt Engineering):**
-  서비스 사용 과정에서 관찰된 오류 중 상당수가 LLM의 프롬프트 해석 방식에서 기인합니다. 아래 항목들을 중심으로 프롬프트를 체계적으로 점검하고 개선할 예정입니다.
-  - **라우터 오분류 개선:** 질의 의도가 모호하거나 복합적인 경우(예: "가장 최근 리포트 개수와 거기서 언급된 목표 주가") `router_node`가 `rdb`와 `vectordb` 중 의도와 다른 경로로 라우팅하는 케이스 분석 및 Few-shot 예시 보강
-  - **SQL 생성 품질 개선:** `RDB_SQL_GEN_PROMPT`에서 LLM이 존재하지 않는 컬럼을 포함한 쿼리를 생성하는 오류 방지를 위해 스키마 설명 방식과 예시 쿼리를 강화
-  - **종목명 추출 정확도 향상:** `get_stock_price` tool 호출 시 약칭·영문 표기(예: "현대차" → "현대자동차") 처리 실패 케이스 식별 및 tool description 또는 system 프롬프트 내 정규화 지침 추가
-- [ ] **데이터 수집·적재 자동화 파이프라인 (Automated Ingestion Pipeline):**
-  현재 리포트 다운로드(`report_crawler.py`)와 벡터 임베딩(`embed_pipeline.py`)은 수작업으로 실행해야 하는 구조입니다. 이를 **매일 새벽 자동으로 실행**되도록 스케줄링하여, 항상 최신 리포트가 DB에 반영되는 상태를 유지합니다.
-  - **크론잡 스케줄링 — `Python 패키지 활용 (schedule 또는 APScheduler 등)`:**
-    - 별도의 무거운 프레임워크 도입 없이, 가벼운 파이썬 스케줄링 라이브러리를 사용해 매일 정해진 시간(예: 평일 새벽 3시)에 백그라운드에서 동작하도록 구성합니다.
-    - 크롤링 → DB 적재 → 임베딩의 3단계 처리 로직을 하나로 묶어 순차적으로 실행하고, 에러 발생 시 재시도 및 로깅이 이루어지도록 파이프라인을 구축합니다.
----
-## PDF Extraction Engine Comparison
-
-`EXTRACTION_ENGINE` now accepts `pymupdf`, `marker`, or `opendataloader`.
-Before changing the default engine, compare extractor behavior on local reports:
-
-```bash
-python -m src.core.compare_pdf_extractors --limit 10
-```
-
-The comparison command writes `reports/pdf_extraction_compare.csv` and
-`reports/pdf_extraction_compare.json`. See
-`docs/PDF_EXTRACTION_COMPARISON.md` for the full process and metric notes.
+- PDF chunk 생성 시 page number, bbox, text offset을 함께 저장해 참고 문서 클릭 시 PDF의 해당 chunk 위치로 바로 이동
+- `최근 7일`, `올해`, `전분기` 같은 상대 날짜 표현 추가 확장
+- 비용 절감을 위한 rerank 조건부 실행 또는 rerank 결과 캐싱
+- crawler HTML fixture를 늘려 사이트 구조 변경 감지 강화
+- Streamlit 대화 목록 검색, 제목 수정, export 기능 추가

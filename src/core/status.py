@@ -15,7 +15,6 @@ from typing import Any
 from src.configs.config import (
     DB_PATH,
     EMBEDDING_MODEL,
-    EMBEDDING_PROVIDER,
     EXTRACTION_ENGINE,
     FAISS_DIR,
     GENERATION_MODEL,
@@ -146,7 +145,6 @@ def get_data_status(
         "vector_db": vector_db,
         "config": {
             "generation_model": GENERATION_MODEL,
-            "embedding_provider": EMBEDDING_PROVIDER,
             "embedding_model": EMBEDDING_MODEL,
             "test_limit": TEST_LIMIT,
             "search_top_k": SEARCH_TOP_K,

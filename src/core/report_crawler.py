@@ -2,25 +2,114 @@ import os
 import re
 from bs4 import BeautifulSoup
 import requests
-from datetime import datetime, date
-from urllib.parse import urljoin
+from datetime import datetime, date, timedelta
 import sys
 
 # 프로젝트 루트 경로를 참조할 수 있도록 설정
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
+REPORT_CATEGORY_URLS = {
+    "company": "/research/company_list.naver",
+    "industry": "/research/industry_list.naver",
+    "economy": "/research/economy_list.naver",
+}
 
-def download_naver_reports(target_date_str=None):
+
+def normalize_report_categories(categories: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    """Normalize crawler category selection.
+
+    Args:
+        categories: Comma-separated string or iterable of category names.
+            Supported values are company, industry, economy, and all.
+
+    Returns:
+        Ordered list of category names. Defaults to ["company"].
+    """
+    if categories is None or categories == "":
+        raw_categories = ["company"]
+    elif isinstance(categories, str):
+        raw_categories = [part.strip().lower() for part in categories.split(",")]
+    else:
+        raw_categories = [str(part).strip().lower() for part in categories]
+
+    raw_categories = [category for category in raw_categories if category]
+    if not raw_categories:
+        return ["company"]
+    if "all" in raw_categories:
+        return list(REPORT_CATEGORY_URLS)
+
+    selected: list[str] = []
+    invalid: list[str] = []
+    for category in raw_categories:
+        if category not in REPORT_CATEGORY_URLS:
+            invalid.append(category)
+            continue
+        if category not in selected:
+            selected.append(category)
+
+    if invalid:
+        allowed = ", ".join([*REPORT_CATEGORY_URLS, "all"])
+        raise ValueError(f"Unsupported report categories: {', '.join(invalid)}. Allowed: {allowed}")
+
+    return selected or ["company"]
+
+
+def _parse_target_date(target_date_str: str | None) -> date | None:
+    if not target_date_str:
+        return None
+    return datetime.strptime(target_date_str, "%Y-%m-%d").date()
+
+
+def _crawl_start_date(end_date: date, lookback_days: int, target_count: int, max_lookback_days: int) -> date:
+    """Resolve the oldest date to scan inclusively.
+
+    - lookback_days explicitly means "collect this many previous days too".
+    - target_count mode needs a safety window even when lookback_days is 0, so
+      it can keep going past the first available report date until enough rows
+      are collected.
+    """
+    effective_lookback = max(lookback_days, max_lookback_days if target_count > 0 else 0)
+    return end_date - timedelta(days=effective_lookback)
+
+
+def classify_report_date(report_date: date, start_date: date, end_date: date) -> str:
+    """Classify a report date against the inclusive crawl window.
+
+    Returns:
+        - "skip_newer": keep scanning; the row is newer than the requested end.
+        - "process": download/count the row.
+        - "stop_older": stop this category; later pages will be even older.
+    """
+    if report_date > end_date:
+        return "skip_newer"
+    if report_date < start_date:
+        return "stop_older"
+    return "process"
+
+
+def download_naver_reports(
+    target_date_str=None,
+    target_count: int = 0,
+    lookback_days: int = 0,
+    max_lookback_days: int = 30,
+    categories: str | list[str] | tuple[str, ...] | None = None,
+):
     total_processed = 0
     base_url = "https://finance.naver.com"
+    stop_all_categories = False
+    target_count = max(0, int(target_count or 0))
+    lookback_days = max(0, int(lookback_days or 0))
+    max_lookback_days = max(lookback_days, int(max_lookback_days or 0))
     
-    # 3가지 리포트 유형별 URL 및 카테고리 정의
+    selected_categories = normalize_report_categories(categories)
+
+    # 선택된 리포트 유형별 URL 및 카테고리 정의
     # (카테고리명, URL)
     report_categories = [
-        ("company", base_url + "/research/company_list.naver"),
-        ("industry", base_url + "/research/industry_list.naver"),
-        ("economy", base_url + "/research/economy_list.naver"),
+        (category, base_url + REPORT_CATEGORY_URLS[category])
+        for category in selected_categories
     ]
+    print(f"수집 카테고리: {', '.join(selected_categories)}")
 
     def sanitize(text: str) -> str:
         """Windows 파일명에 사용할 수 없는 특수문자 제거 및 길이 제한"""
@@ -40,17 +129,26 @@ def download_naver_reports(target_date_str=None):
         os.makedirs(save_dir)
 
     # 날짜 설정 로직
-    target_date = None
+    target_date = _parse_target_date(target_date_str)
+    start_date = None
     if target_date_str:
-        target_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
-        print(f"[{target_date}] 까지의 리포트를 다운로드합니다.")
+        start_date = _crawl_start_date(target_date, lookback_days, target_count, max_lookback_days)
+        print(f"[{start_date} ~ {target_date}] 범위의 리포트를 다운로드합니다.")
     else:
         print("작성일을 지정하지 않아 '가장 최근 날짜'의 리포트만 다운로드합니다.")
+
+    if target_count > 0:
+        print(f"목표 처리 건수: {target_count}건")
+    if lookback_days > 0:
+        print(f"명시 수집 기간: 기준일 포함 최근 {lookback_days + 1}일")
 
     # 가장 최근 날짜를 추적하기 위한 변수
     global_latest_date = None
 
     for r_type, list_url in report_categories:
+        if stop_all_categories:
+            break
+
         print(f"\n==========================================")
         print(f"👉 탐색 시작: {r_type.upper()} ({list_url})")
         print(f"==========================================")
@@ -101,9 +199,16 @@ def download_naver_reports(target_date_str=None):
                 if not target_date_str and global_latest_date is None:
                     global_latest_date = report_date
                     target_date = global_latest_date
+                    start_date = _crawl_start_date(target_date, lookback_days, target_count, max_lookback_days)
+                    print(f"[{start_date} ~ {target_date}] 범위의 리포트를 다운로드합니다.")
                 
-                # 현재 읽은 리포트의 날짜가 타겟 날짜보다 과거면 크롤링 즉시 종료
-                if isinstance(target_date, date) and report_date < target_date:
+                if not isinstance(target_date, date) or not isinstance(start_date, date):
+                    continue
+
+                date_action = classify_report_date(report_date, start_date, target_date)
+                if date_action == "skip_newer":
+                    continue
+                if date_action == "stop_older":
                     stop_crawling = True
                     break
 
@@ -162,6 +267,12 @@ def download_naver_reports(target_date_str=None):
                     print(f"  ⏭ 이미 존재: {file_name}")
                     total_processed += 1
 
+                if target_count > 0 and total_processed >= target_count:
+                    print(f"  🎯 목표 처리 건수 도달: {total_processed}/{target_count}건")
+                    stop_crawling = True
+                    stop_all_categories = True
+                    break
+
             # 페이지 내 유효한 데이터가 없으면 종료
             if not valid_rows_found:
                 break
@@ -176,12 +287,25 @@ def download_naver_reports(target_date_str=None):
 # ==========================================
 
 if __name__ == "__main__":
-    from src.configs.config import CRAWLER_MODE, CRAWLER_TARGET_DATE
+    from src.configs.config import (
+        CRAWLER_CATEGORIES,
+        CRAWLER_LOOKBACK_DAYS,
+        CRAWLER_MAX_LOOKBACK_DAYS,
+        CRAWLER_MODE,
+        CRAWLER_TARGET_COUNT,
+        CRAWLER_TARGET_DATE,
+    )
     from datetime import timedelta, timezone, datetime
 
     if CRAWLER_MODE == 'SPECIFIC_DATE':
         print(f"\n[System] 🔍 지정된 날짜({CRAWLER_TARGET_DATE}) 기준 리포트 탐색 중...")
-        processed_count = download_naver_reports(CRAWLER_TARGET_DATE)
+        processed_count = download_naver_reports(
+            CRAWLER_TARGET_DATE,
+            target_count=CRAWLER_TARGET_COUNT,
+            lookback_days=CRAWLER_LOOKBACK_DAYS,
+            max_lookback_days=CRAWLER_MAX_LOOKBACK_DAYS,
+            categories=CRAWLER_CATEGORIES,
+        )
         if processed_count > 0:
             print(f"\n[System] 🎉 {CRAWLER_TARGET_DATE} 일자의 데이터 {processed_count}건을 성공적으로 받아왔습니다!")
         else:
@@ -192,12 +316,28 @@ if __name__ == "__main__":
         current_date = datetime.now(KST).date()
 
         print(f"[System] KST 기준 오늘 날짜: {current_date}")
+
+        if CRAWLER_TARGET_COUNT > 0 or CRAWLER_LOOKBACK_DAYS > 0:
+            target_date_str = current_date.strftime("%Y-%m-%d")
+            print(f"\n[System] 🔍 {target_date_str} 기준 리포트 탐색 중...")
+            processed_count = download_naver_reports(
+                target_date_str,
+                target_count=CRAWLER_TARGET_COUNT,
+                lookback_days=CRAWLER_LOOKBACK_DAYS,
+                max_lookback_days=CRAWLER_MAX_LOOKBACK_DAYS,
+                categories=CRAWLER_CATEGORIES,
+            )
+            print(f"\n[System] ✅ 처리된 데이터: {processed_count}건")
+            sys.exit(0)
         
         while True:
             target_date_str = current_date.strftime("%Y-%m-%d")
             print(f"\n[System] 🔍 {target_date_str} 기준 리포트 탐색 중...")
             
-            processed_count = download_naver_reports(target_date_str)
+            processed_count = download_naver_reports(
+                target_date_str,
+                categories=CRAWLER_CATEGORIES,
+            )
             
             if processed_count > 0:
                 print(f"\n[System] 🎉 {target_date_str} 일자의 데이터 {processed_count}건을 성공적으로 받아왔습니다! 크롤링을 종료합니다.")
