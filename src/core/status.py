@@ -66,6 +66,7 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
         "parent_chunks": 0,
         "min_report_date": None,
         "max_report_date": None,
+        "report_date_counts": {},
         "report_types": {},
         "error": None,
     }
@@ -82,8 +83,8 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
                 SELECT
                     COUNT(*) AS total_reports,
                     COALESCE(SUM(CASE WHEN is_embedded = 1 THEN 1 ELSE 0 END), 0) AS embedded_reports,
-                    MIN(report_date) AS min_report_date,
-                    MAX(report_date) AS max_report_date
+                    MIN(CASE WHEN report_date IS NOT NULL AND TRIM(report_date) != '' THEN SUBSTR(TRIM(report_date), 1, 10) END) AS min_report_date,
+                    MAX(CASE WHEN report_date IS NOT NULL AND TRIM(report_date) != '' THEN SUBSTR(TRIM(report_date), 1, 10) END) AS max_report_date
                 FROM reports
                 """
             ).fetchone()
@@ -110,6 +111,21 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
                 "SELECT report_type, COUNT(*) AS count FROM reports GROUP BY report_type ORDER BY report_type"
             ).fetchall()
             info["report_types"] = {row["report_type"]: int(row["count"]) for row in report_types}
+
+            report_dates = conn.execute(
+                """
+                SELECT SUBSTR(TRIM(report_date), 1, 10) AS report_date, COUNT(*) AS count
+                FROM reports
+                WHERE report_date IS NOT NULL AND TRIM(report_date) != ''
+                  AND is_embedded = 1
+                GROUP BY SUBSTR(TRIM(report_date), 1, 10)
+                ORDER BY SUBSTR(TRIM(report_date), 1, 10)
+                """
+            ).fetchall()
+            info["report_date_counts"] = {
+                row["report_date"]: int(row["count"])
+                for row in report_dates
+            }
     except sqlite3.Error as exc:
         info["error"] = str(exc)
 
@@ -214,6 +230,121 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
         )
 
     return lines
+
+
+READINESS_LABELS = {
+    "ready": "검색 가능",
+    "warning": "주의 필요",
+    "blocked": "준비 필요",
+}
+
+
+def assess_readiness(status: dict[str, Any]) -> dict[str, Any]:
+    """Classify whether the app is ready for non-developer search usage.
+
+    The readiness result is intentionally action-oriented so Quick Start, CLI
+    status, and the Streamlit sidebar can all tell users what to do next.
+    """
+    db = status["db"]
+    vector_db = status["vector_db"]
+    messages: list[str] = []
+    next_actions: list[str] = []
+    level = "ready"
+
+    def block(message: str, action: str) -> None:
+        nonlocal level
+        level = "blocked"
+        messages.append(message)
+        next_actions.append(action)
+
+    def warn(message: str, action: str) -> None:
+        nonlocal level
+        if level != "blocked":
+            level = "warning"
+        messages.append(message)
+        next_actions.append(action)
+
+    if db.get("error"):
+        block(
+            f"SQLite 상태를 확인하지 못했습니다: {db['error']}",
+            ".env의 DB_PATH 설정과 data/reports.db 파일을 확인하세요.",
+        )
+    elif not db.get("exists") or db["total_reports"] == 0:
+        block(
+            "검색할 리포트 메타데이터가 없습니다.",
+            "RUN_QUICKSTART.bat을 다시 실행하거나 python -m src.core.report_crawler를 실행하세요.",
+        )
+
+    if not vector_db["has_faiss_index"]:
+        block(
+            "FAISS 검색 인덱스가 없습니다.",
+            "python -m src.core.embed_pipeline --all 로 임베딩 인덱스를 생성하세요.",
+        )
+    elif db["embedded_reports"] == 0:
+        block(
+            "임베딩 완료 리포트가 없어 검색할 수 없습니다.",
+            "python -m src.core.embed_pipeline --all 로 리포트를 임베딩하세요.",
+        )
+
+    if db["total_reports"] > 0 and db["pending_reports"] > 0:
+        warn(
+            f"아직 임베딩되지 않은 리포트가 {db['pending_reports']}건 있습니다.",
+            "누락 없이 검색하려면 python -m src.core.embed_pipeline --all 을 한 번 더 실행하세요.",
+        )
+
+    if status["embedding_limit_active"] and db["pending_reports"] > 0:
+        warn(
+            "TEST_LIMIT가 켜져 있어 임베딩 파이프라인 1회 실행 시 일부 문서만 처리될 수 있습니다.",
+            "전체 처리하려면 .env에서 TEST_LIMIT=0으로 설정하거나 --all 실행을 유지하세요.",
+        )
+
+    if vector_db["exists"] and vector_db["has_pickle_index"]:
+        warn(
+            "FAISS index.pkl은 pickle 기반입니다.",
+            "직접 생성한 신뢰 가능한 인덱스만 로드하고 외부에서 받은 index.pkl은 사용하지 마세요.",
+        )
+
+    if not messages:
+        messages.append("리포트 DB와 FAISS 인덱스가 준비되어 질문할 수 있습니다.")
+        next_actions.append("Streamlit GUI에서 질문을 입력하세요.")
+
+    return {
+        "level": level,
+        "label": READINESS_LABELS[level],
+        "messages": messages,
+        "next_actions": _dedupe_preserve_order(next_actions),
+    }
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def format_readiness_lines(status: dict[str, Any]) -> list[str]:
+    """Return user-facing readiness lines for terminals and Quick Start."""
+    readiness = assess_readiness(status)
+    lines = [
+        "",
+        f"Quick Start 준비 상태: {readiness['label']}",
+        "-" * 60,
+    ]
+    lines.extend(f"- {message}" for message in readiness["messages"])
+    if readiness["next_actions"]:
+        lines.append("다음 행동:")
+        lines.extend(f"  {index}. {action}" for index, action in enumerate(readiness["next_actions"], 1))
+    return lines
+
+
+def format_readiness_text(status: dict[str, Any] | None = None) -> str:
+    """Return terminal-friendly readiness text."""
+    return "\n".join(format_readiness_lines(status or get_data_status()))
 
 
 def format_status_text(status: dict[str, Any] | None = None) -> str:

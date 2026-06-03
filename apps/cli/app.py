@@ -9,6 +9,17 @@ from src.configs.config import SEARCH_TOP_K
 from src.core.conversation_store import append_message, delete_thread, ensure_thread, get_chat_history
 from src.core.status import format_status_text
 
+
+CLI_DEPRECATION_NOTICE = (
+    "[DEPRECATED] CLI 모드는 유지보수 전용입니다. "
+    "신규 기능 개발은 중단되었으며 Streamlit GUI 또는 RUN_QUICKSTART.bat을 사용하세요."
+)
+
+
+def print_deprecation_notice() -> None:
+    print(CLI_DEPRECATION_NOTICE)
+
+
 def run_search(query: str, thread_id: str = "default_thread", chat_history: list | None = None) -> dict:
     """
     주어진 질문(query)에 대해 LangGraph 기반 RAG 파이프라인을 실행합니다.
@@ -23,9 +34,10 @@ def run_cli():
     current_thread_id = "cli_default"
     ensure_thread(current_thread_id, "CLI 기본 대화")
     print("\n============================================================")
-    print("  📈 Finance LLM Query Assistant (with LangGraph Router)")
+    print("  📈 Finance LLM Query Assistant (DEPRECATED CLI)")
     print("  (종료: q/quit | 메모리 초기화: c/clear | 데이터 상태: status)")
     print("============================================================")
+    print_deprecation_notice()
     print(format_status_text())
     
     while True:
@@ -100,7 +112,7 @@ def run_cli():
             break
 
 def main():
-    parser = argparse.ArgumentParser(description="Finance LLM CLI")
+    parser = argparse.ArgumentParser(description="Finance LLM CLI (deprecated; use Streamlit GUI)")
     parser.add_argument(
         "--status",
         action="store_true",
@@ -109,6 +121,7 @@ def main():
     args = parser.parse_args()
 
     if args.status:
+        print_deprecation_notice()
         print(format_status_text())
         return
 

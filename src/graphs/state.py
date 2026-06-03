@@ -16,3 +16,5 @@ class State(TypedDict):
     faiss_context: Optional[str]    # VectorDB에서 검색된 컨텍스트 (VectorDB 경로)
     rerank_info: Optional[list]     # 재정렬된 문서/검색된 문서 정보 로깅용 (VectorDB 경로)
     generation: Optional[str]       # 최종 답변 (예외 발생 시 등)
+    no_vector_results: Optional[bool]
+    memory_retry_attempted: Optional[bool]

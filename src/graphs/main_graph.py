@@ -10,6 +10,24 @@ from src.nodes.stock_price import stock_price_tool_node
 from src.nodes.vectordb import vectordb_node
 
 
+def should_retry_vectordb_without_memory(state: State) -> bool:
+    """Retry VectorDB search once when history-influenced retrieval found nothing."""
+    return bool(state.get("no_vector_results")) and not bool(state.get("memory_retry_attempted"))
+
+
+def clear_short_term_memory_retry_node(state: State) -> dict:
+    """Prepare a one-time VectorDB retry that ignores conversation short-term memory."""
+    return {
+        "rewritten_query": state["question"],
+        "search_filters": None,
+        "generation": None,
+        "rerank_info": None,
+        "faiss_context": None,
+        "no_vector_results": False,
+        "memory_retry_attempted": True,
+    }
+
+
 def final_response_node(state: State) -> dict:
     """Generate a final answer only when tool output needs to be folded back in."""
     from src.llms.factory import build_chat_model
@@ -54,6 +72,7 @@ def build_graph():
     workflow.add_node("rdb_sql_gen_node", rdb_sql_gen_node)
     workflow.add_node("rdb_execute_node", rdb_execute_node)
     workflow.add_node("vectordb_node", vectordb_node)
+    workflow.add_node("clear_short_term_memory_retry", clear_short_term_memory_retry_node)
     workflow.add_node("stock_price_tools", stock_price_tool_node)
     workflow.add_node("final_response_node", final_response_node)
 
@@ -91,15 +110,22 @@ def build_graph():
         },
     )
 
+    def after_vectordb(state: State) -> str:
+        if should_retry_vectordb_without_memory(state):
+            return "clear_short_term_memory_retry"
+        return after_generation(state)
+
     workflow.add_conditional_edges(
         "vectordb_node",
-        after_generation,
+        after_vectordb,
         {
+            "clear_short_term_memory_retry": "clear_short_term_memory_retry",
             "stock_price_tools": "stock_price_tools",
             "final_response_node": "final_response_node",
         },
     )
 
+    workflow.add_edge("clear_short_term_memory_retry", "vectordb_node")
     workflow.add_edge("stock_price_tools", "final_response_node")
     workflow.add_edge("final_response_node", END)
 

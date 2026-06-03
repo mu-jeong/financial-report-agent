@@ -158,7 +158,11 @@ def vectordb_node(state: State) -> dict:
         else:
             msg = "관련 리포트를 찾지 못했습니다."
         logger.info(msg)
-        return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
+        return {
+            "generation": msg,
+            "no_vector_results": True,
+            "search_filters": search_filters,
+        }
 
     top_passages = select_top_passages(query, docs_with_scores)
 
@@ -208,6 +212,7 @@ def vectordb_node(state: State) -> dict:
             "faiss_context": context_text,
             "rerank_info": rerank_info,
             "search_filters": search_filters,
+            "no_vector_results": False,
             "messages": [tool_context_message, ai_msg],
         }
 
@@ -223,5 +228,6 @@ def vectordb_node(state: State) -> dict:
         "rerank_info": rerank_info,
         "generation": answer,
         "search_filters": search_filters,
+        "no_vector_results": False,
         "messages": [tool_context_message, ai_msg],
     }

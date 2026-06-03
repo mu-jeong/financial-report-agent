@@ -8,11 +8,16 @@ This project supports three extraction engines:
 
 ## Configure The Production Engine
 
-Set `EXTRACTION_ENGINE` in `src/configs/config.py`.
+Set `EXTRACTION_ENGINE` in `.env`. The default value is defined once in
+`src/configs/settings.py` and exported through `src/configs/config.py` for
+compatibility.
 
-```python
-EXTRACTION_ENGINE = "opendataloader"
+```env
+EXTRACTION_ENGINE=pymupdf
 ```
+
+Use `opendataloader` or `marker` only after checking their runtime requirements
+on your machine.
 
 The embedding pipeline keeps the same downstream contract for all engines:
 
