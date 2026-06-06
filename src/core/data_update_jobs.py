@@ -7,11 +7,14 @@ embedding can continue without blocking normal search interactions.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +24,10 @@ from src.configs.settings import BASE_DIR
 JOB_DIR = BASE_DIR / "logs" / "data_update_jobs"
 STATUS_PATH = JOB_DIR / "status.json"
 LOG_PATH = JOB_DIR / "latest.log"
+
+
+class ParentProcessExited(RuntimeError):
+    """Raised when the GUI process that started an update job has exited."""
 
 
 def _today() -> date:
@@ -108,6 +115,98 @@ def read_status() -> dict[str, Any] | None:
         return None
 
 
+def process_is_alive(pid: int | str | None) -> bool:
+    """Return whether a process id appears to still be alive."""
+    if pid is None:
+        return False
+    try:
+        process_id = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            process_query_limited_information = 0x1000
+            handle = kernel32.OpenProcess(process_query_limited_information, False, process_id)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return False
+                return exit_code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def is_update_job_active(status: dict[str, Any] | None) -> bool:
+    """Return whether a persisted update-job status still represents live work."""
+    if not status or status.get("state") != "running":
+        return False
+    pid = status.get("pid")
+    if pid is None:
+        return True
+    return process_is_alive(pid)
+
+
+def _raise_if_parent_exited(parent_pid: int | None) -> None:
+    if parent_pid is not None and not process_is_alive(parent_pid):
+        raise ParentProcessExited("parent Streamlit process exited")
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+
+    try:
+        os.killpg(process.pid, 15)
+    except OSError:
+        process.terminate()
+
+
+def _start_parent_watchdog(process: subprocess.Popen[Any], parent_pid: int | None) -> None:
+    if parent_pid is None:
+        return
+
+    def watch() -> None:
+        while process.poll() is None:
+            if not process_is_alive(parent_pid):
+                _terminate_process_tree(process)
+                return
+            time.sleep(1)
+
+    threading.Thread(target=watch, name="data-update-parent-watchdog", daemon=True).start()
+
+
+def _popen_creation_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
 def start_update_job(
     *,
     label: str,
@@ -140,13 +239,14 @@ def start_update_job(
     ]
     if selected_dates:
         command.extend(["--dates", *selected_dates])
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    parent_pid = os.getpid()
+    command.extend(["--parent-pid", str(parent_pid)])
     process = subprocess.Popen(
         command,
         cwd=BASE_DIR,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        creationflags=creationflags,
+        **_popen_creation_kwargs(),
     )
     status = {
         "state": "running",
@@ -159,32 +259,19 @@ def start_update_job(
         "end_date": end_date,
         "selected_dates": selected_dates,
         "log_path": str(LOG_PATH),
+        "parent_pid": parent_pid,
     }
     _write_status(status)
     return status
 
 
-def _run_subprocess(command: list[str], *, env: dict[str, str] | None = None) -> tuple[int, str]:
-    run_env = dict(os.environ if env is None else env)
-    run_env.setdefault("PYTHONIOENCODING", "utf-8")
-    run_env.setdefault("PYTHONUTF8", "1")
-    with LOG_PATH.open("a", encoding="utf-8", errors="replace") as log_file:
-        log_file.write("\n$ " + " ".join(command) + "\n")
-        log_file.flush()
-        process = subprocess.run(
-            command,
-            cwd=BASE_DIR,
-            env=run_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        output = process.stdout or ""
-        log_file.write(output)
-        log_file.write(f"\n[exit] {process.returncode}\n")
-        return process.returncode, output
+def _run_subprocess(
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    parent_pid: int | None = None,
+) -> tuple[int, str]:
+    return _run_subprocess_stream(command, env=env, parent_pid=parent_pid)
 
 
 def _run_subprocess_stream(
@@ -192,7 +279,9 @@ def _run_subprocess_stream(
     *,
     env: dict[str, str] | None = None,
     on_line: Callable[[str], None] | None = None,
+    parent_pid: int | None = None,
 ) -> tuple[int, str]:
+    _raise_if_parent_exited(parent_pid)
     run_env = dict(os.environ if env is None else env)
     run_env.setdefault("PYTHONIOENCODING", "utf-8")
     run_env.setdefault("PYTHONUTF8", "1")
@@ -210,7 +299,9 @@ def _run_subprocess_stream(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **_popen_creation_kwargs(),
         )
+        _start_parent_watchdog(process, parent_pid)
         assert process.stdout is not None
         for line in process.stdout:
             output_parts.append(line)
@@ -220,6 +311,7 @@ def _run_subprocess_stream(
                 on_line(line.rstrip("\n"))
         return_code = process.wait()
         log_file.write(f"\n[exit] {return_code}\n")
+        _raise_if_parent_exited(parent_pid)
         return return_code, "".join(output_parts)
 
 
@@ -246,6 +338,7 @@ def run_update_job(
     end_date: str | None,
     label: str,
     selected_dates: list[str] | tuple[str, ...] | None = None,
+    parent_pid: int | None = None,
 ) -> int:
     """Run crawler then embedding pipeline, updating status as each phase completes."""
     try:
@@ -279,10 +372,15 @@ def run_update_job(
                     "selected_dates": normalized_dates,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
+                    "parent_pid": parent_pid,
                 }
             )
             crawler_env = build_crawler_env(range_start, range_end)
-            code, output = _run_subprocess([sys.executable, "-m", "src.core.report_crawler"], env=crawler_env)
+            code, output = _run_subprocess(
+                [sys.executable, "-m", "src.core.report_crawler"],
+                env=crawler_env,
+                parent_pid=parent_pid,
+            )
             if code != 0:
                 raise RuntimeError(f"crawler failed with exit code {code}")
             processed_total += _processed_report_count(output)
@@ -300,6 +398,7 @@ def run_update_job(
                     "selected_dates": normalized_dates,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
+                    "parent_pid": parent_pid,
                 }
             )
             return 0
@@ -316,6 +415,7 @@ def run_update_job(
                 "selected_dates": normalized_dates,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
+                "parent_pid": parent_pid,
             }
         )
 
@@ -331,7 +431,7 @@ def run_update_job(
                     "state": "running",
                     "phase": "embed",
                     "percent": percent,
-                    "message": f"{label}: 임베딩 중 ({current}/{total}) {file_label}",
+                    "message": f"{label}: 처리 중 ({current}/{total}) {file_label}",
                     "label": label,
                     "start_date": start_date,
                     "end_date": end_date,
@@ -341,12 +441,14 @@ def run_update_job(
                     "embedding_current": current,
                     "embedding_total": total,
                     "embedding_file": file_label,
+                    "parent_pid": parent_pid,
                 }
             )
 
         code, _ = _run_subprocess_stream(
             [sys.executable, "-m", "src.core.embed_pipeline", "--all"],
             on_line=on_embed_line,
+            parent_pid=parent_pid,
         )
         if code != 0:
             raise RuntimeError(f"embedding failed with exit code {code}")
@@ -363,6 +465,7 @@ def run_update_job(
                 "selected_dates": normalized_dates,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
+                "parent_pid": parent_pid,
             }
         )
         return 0
@@ -379,6 +482,7 @@ def run_update_job(
                 "selected_dates": normalize_date_list(selected_dates),
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
+                "parent_pid": parent_pid,
                 "error": str(exc),
             }
         )
@@ -393,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--end-date", required=True)
     run_parser.add_argument("--label", required=True)
     run_parser.add_argument("--dates", nargs="*")
+    run_parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -401,6 +506,7 @@ def main(argv: list[str] | None = None) -> int:
             end_date=args.end_date,
             label=args.label,
             selected_dates=args.dates,
+            parent_pid=args.parent_pid,
         )
     return 1
 

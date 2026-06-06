@@ -31,9 +31,12 @@ def clear_short_term_memory_retry_node(state: State) -> dict:
 def final_response_node(state: State) -> dict:
     """Generate a final answer only when tool output needs to be folded back in."""
     from src.llms.factory import build_chat_model
+    from src.utils.citations import remove_unavailable_citations
 
     answer = state.get("generation")
     if answer:
+        source_count = len(state.get("rerank_info") or [])
+        answer = remove_unavailable_citations(str(answer), source_count=source_count)
         return {
             "generation": answer,
             "chat_history": [("사용자", state["question"]), ("AI", answer)],
@@ -52,6 +55,8 @@ def final_response_node(state: State) -> dict:
                 part.get("text", "") if isinstance(part, dict) else str(part)
                 for part in answer
             )
+        source_count = len(state.get("rerank_info") or [])
+        answer = remove_unavailable_citations(str(answer), source_count=source_count)
         if not isinstance(messages[-1], AIMessage):
             message_delta = [response]
 

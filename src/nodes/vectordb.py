@@ -19,6 +19,7 @@ from src.graphs.state import State
 from src.nodes.stock_price import stock_price_tools
 from src.llms.embeddings import build_embeddings_model
 from src.llms.factory import build_chat_model
+from src.utils.citations import remove_unavailable_citations
 from src.utils.ranker import get_ranker
 
 logger = get_logger(__name__)
@@ -133,6 +134,10 @@ def select_top_passages(query: str, docs_with_scores: list[tuple]) -> list[dict]
 def vectordb_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
     search_filters = state.get("search_filters") or infer_search_filters(query)
+    temporal_context = state.get("temporal_context")
+    temporal_context_text = ""
+    if temporal_context:
+        temporal_context_text = f"\n[상대 날짜 해석]\n{temporal_context['description']}\n"
     if not os.path.exists(FAISS_DIR):
         msg = "faiss_db/ 폴더가 없어 검색을 진행할 수 없습니다. 먼저 임베딩 파이프라인을 실행해 주세요."
         logger.warning(msg)
@@ -155,6 +160,8 @@ def vectordb_node(state: State) -> dict:
                 "지정된 조건에 맞는 임베딩 완료 리포트를 찾지 못했습니다. "
                 f"(적용 조건: {filter_text})"
             )
+            if temporal_context:
+                msg += f"\n해석한 날짜 기준: {temporal_context['description']}"
         else:
             msg = "관련 리포트를 찾지 못했습니다."
         logger.info(msg)
@@ -182,6 +189,7 @@ def vectordb_node(state: State) -> dict:
                 "rank": rank,
                 "target_name": meta.get("target_name", "-"),
                 "report_date": meta.get("report_date", "-"),
+                "title": meta.get("title", "-"),
                 "broker": meta.get("broker", "-"),
                 "file_name": meta.get("file_name", "-"),
                 "score": float(result.get("score", 0.0)),
@@ -202,6 +210,7 @@ def vectordb_node(state: State) -> dict:
             "최신 주가가 꼭 필요할 때만 `get_stock_price` 도구를 호출하세요.\n\n"
             f"사용자 원질문: {state['question']}\n"
             f"재작성 질의: {query}\n\n"
+            f"{temporal_context_text}"
             f"{prompt.format(context=context_text, question=query)}"
         )
     )
@@ -222,6 +231,7 @@ def vectordb_node(state: State) -> dict:
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in answer
         )
+    answer = remove_unavailable_citations(str(answer), source_count=len(rerank_info))
 
     return {
         "faiss_context": context_text,

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import re
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 from typing import Any, Iterable
 
@@ -20,6 +20,7 @@ from src.core.db_manager import get_connection
 logger = get_logger(__name__)
 
 SearchFilters = dict[str, str]
+TemporalContext = dict[str, str]
 
 REPORT_TYPE_KEYWORDS = {
     "company": ("company", "종목", "기업", "회사", "개별주", "개별 종목"),
@@ -86,15 +87,137 @@ def _range_filters(start: str, end: str) -> SearchFilters:
     return {"report_date_start": start, "report_date_end": end}
 
 
-def _infer_date_filters(query: str, known_months: Iterable[str]) -> SearchFilters:
-    """Infer report_date bounds from explicit temporal expressions.
+def _temporal_context(expression: str, start: str, end: str, today: date) -> TemporalContext:
+    if start == end:
+        range_text = start
+    else:
+        range_text = f"{start}~{end}"
+    return {
+        "expression": expression,
+        "report_date_start": start,
+        "report_date_end": end,
+        "current_date": today.isoformat(),
+        "description": f"{expression}={range_text} (오늘 {today.isoformat()} 기준)",
+    }
 
-    The returned filters are always normalized to an inclusive
-    ``report_date_start`` / ``report_date_end`` range, regardless of whether the
-    query used a full date, a year-month, a year, a quarter, or a month without a
-    year. If a month has no year, the latest matching year in local metadata is
-    used as the anchor.
-    """
+
+def _bounds_for_current_week(today: date) -> tuple[str, str]:
+    """Return Monday-through-today bounds for Korean "이번주/금주" queries."""
+    start = today - timedelta(days=today.weekday())
+    return start.isoformat(), today.isoformat()
+
+
+def _bounds_for_week_offset(today: date, week_offset: int) -> tuple[str, str]:
+    start = today - timedelta(days=today.weekday()) + timedelta(days=7 * week_offset)
+    end = start + timedelta(days=6)
+    return start.isoformat(), end.isoformat()
+
+
+def _bounds_for_month_offset(today: date, month_offset: int) -> tuple[str, str]:
+    month_index = (today.year * 12 + today.month - 1) + month_offset
+    year = month_index // 12
+    month = (month_index % 12) + 1
+    start, end = _bounds_for_month(year, month)
+    if month_offset == 0:
+        end = today.isoformat()
+    return start, end
+
+
+def _resolve_relative_temporal_context(query: str, today: date) -> TemporalContext | None:
+    normalized_query = _normalize_text(query)
+
+    relative_days = (
+        ("그제", -2),
+        ("어제", -1),
+        ("오늘", 0),
+        ("내일", 1),
+        ("모레", 2),
+    )
+    for expression, offset in relative_days:
+        if expression in normalized_query:
+            target = today + timedelta(days=offset)
+            return _temporal_context(expression, target.isoformat(), target.isoformat(), today)
+
+    relative_weeks = (
+        ("지난주", -1),
+        ("전주", -1),
+        ("이번주", 0),
+        ("금주", 0),
+        ("다음주", 1),
+        ("차주", 1),
+    )
+    for expression, offset in relative_weeks:
+        if expression in normalized_query:
+            if offset == 0:
+                start, end = _bounds_for_current_week(today)
+            else:
+                start, end = _bounds_for_week_offset(today, offset)
+            return _temporal_context(expression, start, end, today)
+
+    relative_months = (
+        ("지난달", -1),
+        ("전월", -1),
+        ("이번달", 0),
+        ("이번월", 0),
+        ("금월", 0),
+        ("다음달", 1),
+        ("익월", 1),
+    )
+    for expression, offset in relative_months:
+        if expression in normalized_query:
+            start, end = _bounds_for_month_offset(today, offset)
+            return _temporal_context(expression, start, end, today)
+
+    return None
+
+
+def resolve_temporal_context(
+    query: str,
+    known_months: Iterable[str] = (),
+    *,
+    current_date: date | None = None,
+) -> TemporalContext | None:
+    """Resolve explicit or relative temporal expressions to concrete date bounds."""
+    today = current_date or date.today()
+
+    full_date_range_match = re.search(
+        "(?P<start_year>20\\d{2})\\s*(?:-|/|\\.|\\uB144)\\s*"
+        "(?P<start_month>1[0-2]|0?[1-9])\\s*(?:-|/|\\.|\\uC6D4)\\s*"
+        "(?P<start_day>3[01]|[12]\\d|0?[1-9])\\s*\\uC77C?\\s*"
+        "(?:~|-|\\uBD80\\uD130)\\s*"
+        "(?P<end_year>20\\d{2})\\s*(?:-|/|\\.|\\uB144)\\s*"
+        "(?P<end_month>1[0-2]|0?[1-9])\\s*(?:-|/|\\.|\\uC6D4)\\s*"
+        "(?P<end_day>3[01]|[12]\\d|0?[1-9])\\s*\\uC77C?",
+        query,
+    )
+    if full_date_range_match:
+        start = (
+            f"{int(full_date_range_match.group('start_year')):04d}-"
+            f"{int(full_date_range_match.group('start_month')):02d}-"
+            f"{int(full_date_range_match.group('start_day')):02d}"
+        )
+        end = (
+            f"{int(full_date_range_match.group('end_year')):04d}-"
+            f"{int(full_date_range_match.group('end_month')):02d}-"
+            f"{int(full_date_range_match.group('end_day')):02d}"
+        )
+        return _temporal_context("명시 날짜 범위", start, end, today)
+
+    same_month_date_range_match = re.search(
+        "(?P<year>20\\d{2})\\s*(?:-|/|\\.|\\uB144)\\s*"
+        "(?P<month>1[0-2]|0?[1-9])\\s*(?:-|/|\\.|\\uC6D4)\\s*"
+        "(?P<start_day>3[01]|[12]\\d|0?[1-9])\\s*\\uC77C?\\s*"
+        "(?:~|-|\\uBD80\\uD130)\\s*"
+        "(?P<end_day>3[01]|[12]\\d|0?[1-9])\\s*\\uC77C?",
+        query,
+    )
+    if same_month_date_range_match:
+        year = int(same_month_date_range_match.group("year"))
+        month = int(same_month_date_range_match.group("month"))
+        start = f"{year:04d}-{month:02d}-{int(same_month_date_range_match.group('start_day')):02d}"
+        end = f"{year:04d}-{month:02d}-{int(same_month_date_range_match.group('end_day')):02d}"
+        return _temporal_context("명시 날짜 범위", start, end, today)
+
     exact_match = re.search(
         "(?P<year>20\\d{2})\\s*(?:-|/|\\.|\\uB144)\\s*"
         "(?P<month>1[0-2]|0?[1-9])\\s*(?:-|/|\\.|\\uC6D4)\\s*"
@@ -107,7 +230,11 @@ def _infer_date_filters(query: str, known_months: Iterable[str]) -> SearchFilter
             f"{int(exact_match.group('month')):02d}-"
             f"{int(exact_match.group('day')):02d}"
         )
-        return _range_filters(report_date, report_date)
+        return _temporal_context("명시 날짜", report_date, report_date, today)
+
+    relative_context = _resolve_relative_temporal_context(query, today)
+    if relative_context:
+        return relative_context
 
     quarter_match = re.search(
         "(?P<year>20\\d{2})\\s*(?:\\uB144)?\\s*(?:Q|q|"
@@ -119,7 +246,7 @@ def _infer_date_filters(query: str, known_months: Iterable[str]) -> SearchFilter
         year = int(quarter_match.group("year") or quarter_match.group("year_alt"))
         quarter = int(quarter_match.group("quarter") or quarter_match.group("quarter_alt"))
         start, end = _bounds_for_quarter(year, quarter)
-        return _range_filters(start, end)
+        return _temporal_context(f"{year}년 {quarter}분기", start, end, today)
 
     year_month_match = re.search(
         "(?P<year>20\\d{2})\\s*(?:-|/|\\.|\\uB144)\\s*"
@@ -127,27 +254,51 @@ def _infer_date_filters(query: str, known_months: Iterable[str]) -> SearchFilter
         query,
     )
     if year_month_match:
-        start, end = _bounds_for_month(
-            int(year_month_match.group("year")),
-            int(year_month_match.group("month")),
-        )
-        return _range_filters(start, end)
+        year = int(year_month_match.group("year"))
+        month = int(year_month_match.group("month"))
+        start, end = _bounds_for_month(year, month)
+        return _temporal_context(f"{year}년 {month}월", start, end, today)
 
     year_match = re.search("(?<!\\d)(?P<year>20\\d{2})\\s*\\uB144(?!\\s*\\d)", query)
     if year_match:
-        start, end = _bounds_for_year(int(year_match.group("year")))
-        return _range_filters(start, end)
+        year = int(year_match.group("year"))
+        start, end = _bounds_for_year(year)
+        return _temporal_context(f"{year}년", start, end, today)
 
     month_match = re.search("(?<!\\d)(?P<month>1[0-2]|0?[1-9])\\s*\\uC6D4", query)
     if month_match:
         month = int(month_match.group("month"))
         report_month = _latest_known_month_matching(month, known_months)
         if report_month is None:
-            report_month = f"{date.today().year:04d}-{month:02d}"
+            report_month = f"{today.year:04d}-{month:02d}"
         start, end = _month_bounds(report_month)
-        return _range_filters(start, end)
+        return _temporal_context(f"{int(report_month[:4])}년 {month}월", start, end, today)
 
-    return {}
+    return None
+
+
+def _infer_date_filters(
+    query: str,
+    known_months: Iterable[str],
+    *,
+    current_date: date | None = None,
+) -> SearchFilters:
+    """Infer report_date bounds from explicit temporal expressions.
+
+    The returned filters are always normalized to an inclusive
+    ``report_date_start`` / ``report_date_end`` range, regardless of whether the
+    query used a full date, a year-month, a year, a quarter, or a month without a
+    year. If a month has no year, the latest matching year in local metadata is
+    used as the anchor.
+    """
+    context = resolve_temporal_context(
+        query,
+        known_months,
+        current_date=current_date,
+    )
+    if not context:
+        return {}
+    return _range_filters(context["report_date_start"], context["report_date_end"])
 
 
 @lru_cache(maxsize=1)
@@ -202,6 +353,8 @@ def get_metadata_candidates() -> dict[str, tuple[str, ...]]:
 def infer_search_filters(
     query: str,
     candidates: dict[str, Iterable[str]] | None = None,
+    *,
+    current_date: date | None = None,
 ) -> dict[str, str]:
     """Infer exact metadata filters from explicit names in a query.
 
@@ -212,7 +365,13 @@ def infer_search_filters(
     values = candidates or get_metadata_candidates()
     filters: SearchFilters = {}
 
-    filters.update(_infer_date_filters(query, values.get("report_month", ())))
+    filters.update(
+        _infer_date_filters(
+            query,
+            values.get("report_month", ()),
+            current_date=current_date,
+        )
+    )
 
     target = _pick_longest_mentioned(query, values.get("target_name", ()))
     if target:

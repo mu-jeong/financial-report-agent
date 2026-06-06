@@ -18,6 +18,9 @@ logger = get_logger(__name__)
 
 def rdb_sql_gen_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
+    temporal_context = state.get("temporal_context")
+    if temporal_context:
+        query = f"{query}\n\n[상대 날짜 해석]\n{temporal_context['description']}"
     llm = build_chat_model(temperature=0.0)
 
     prompt = PromptTemplate.from_template(RDB_SQL_GEN_PROMPT)
@@ -33,9 +36,17 @@ def sql_guardrail(func):
         try:
             parsed = sqlglot.parse_one(query, dialect="sqlite")
             allowed_tables = {"reports"}
+            cte_names = {
+                cte.alias.lower()
+                for cte in parsed.find_all(sqlglot.exp.CTE)
+                if cte.alias
+            }
 
             for table in parsed.find_all(sqlglot.exp.Table):
-                if table.name.lower() not in allowed_tables:
+                table_name = table.name.lower()
+                if table_name in cte_names:
+                    continue
+                if table_name not in allowed_tables:
                     logger.warning(f"[Guardrail] unauthorized table access attempt: {table.name}")
                     return f"Error: table access blocked by guardrail ({table.name})"
 
@@ -84,6 +95,10 @@ def rdb_execute_node(state: State) -> dict:
         }
 
     query = state.get("rewritten_query", state["question"])
+    temporal_context = state.get("temporal_context")
+    temporal_context_text = ""
+    if temporal_context:
+        temporal_context_text = f"\n[상대 날짜 해석]\n{temporal_context['description']}\n"
     answer_prompt = PromptTemplate.from_template(RDB_ANSWER_PROMPT)
     llm = build_chat_model(temperature=0.2).bind_tools(stock_price_tools)
 
@@ -94,6 +109,7 @@ def rdb_execute_node(state: State) -> dict:
             "최신 주가가 꼭 필요할 때만 `get_stock_price` 도구를 호출하세요.\n\n"
             f"사용자 원질문: {state['question']}\n"
             f"재작성 질의: {query}\n\n"
+            f"{temporal_context_text}"
             f"{answer_prompt.format(question=query, db_result=str(db_result))}"
         )
     )

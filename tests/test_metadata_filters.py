@@ -1,3 +1,5 @@
+from datetime import date
+
 from langchain_core.documents import Document
 import pytest
 
@@ -5,6 +7,7 @@ from src.core.metadata_filters import (
     filter_docs_with_scores,
     infer_search_filters,
     metadata_matches,
+    resolve_temporal_context,
 )
 
 
@@ -45,6 +48,8 @@ def test_infer_search_filters_detects_report_type_keywords():
         ("2026년 데이터에서 찾아줘", "2026-01-01", "2026-12-31"),
         ("2026년 2분기 데이터에서 찾아줘", "2026-04-01", "2026-06-30"),
         ("2026 Q2 데이터에서 찾아줘", "2026-04-01", "2026-06-30"),
+        ("2026년 6월 1일~5일 발간 리포트", "2026-06-01", "2026-06-05"),
+        ("2026-06-01~2026-06-05 발간 리포트", "2026-06-01", "2026-06-05"),
     ],
 )
 def test_infer_search_filters_normalizes_temporal_expressions(query, expected_start, expected_end):
@@ -78,6 +83,42 @@ def test_infer_search_filters_combines_date_range_with_other_metadata():
         "report_date_end": "2026-05-31",
         "target_name": "NAVER",
     }
+
+
+def test_infer_search_filters_detects_current_week():
+    filters = infer_search_filters(
+        "이번주 발간된 개별종목 리포트 알려줘",
+        {
+            "target_name": [],
+            "broker": [],
+            "report_month": ["2026-06", "2026-05"],
+        },
+        current_date=date(2026, 6, 6),
+    )
+
+    assert filters == {
+        "report_date_start": "2026-06-01",
+        "report_date_end": "2026-06-06",
+        "report_type": "company",
+    }
+
+
+def test_resolve_temporal_context_for_relative_dates():
+    today = date(2026, 6, 6)
+
+    assert resolve_temporal_context("오늘 발간된 리포트", current_date=today) == {
+        "expression": "오늘",
+        "report_date_start": "2026-06-06",
+        "report_date_end": "2026-06-06",
+        "current_date": "2026-06-06",
+        "description": "오늘=2026-06-06 (오늘 2026-06-06 기준)",
+    }
+    assert resolve_temporal_context("내일 발간 예정 리포트", current_date=today)[
+        "description"
+    ] == "내일=2026-06-07 (오늘 2026-06-06 기준)"
+    assert resolve_temporal_context("다음주 리포트", current_date=today)[
+        "description"
+    ] == "다음주=2026-06-08~2026-06-14 (오늘 2026-06-06 기준)"
 
 
 def test_metadata_matches_all_explicit_filters():

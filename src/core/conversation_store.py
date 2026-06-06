@@ -135,12 +135,12 @@ def append_message(
     role: str,
     content: str,
     metadata: dict[str, Any] | None = None,
-) -> None:
+) -> int:
     init_conversation_db()
     now = _utc_now()
     metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
     with get_connection() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO conversation_messages (thread_id, role, content, metadata, created_at)
             VALUES (?, ?, ?, ?, ?)
@@ -150,6 +150,38 @@ def append_message(
         conn.execute(
             "UPDATE conversation_threads SET updated_at = ? WHERE id = ?",
             (now, thread_id),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def update_message(
+    message_id: int,
+    content: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Update an existing conversation message and touch its parent thread."""
+    init_conversation_db()
+    now = _utc_now()
+    metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT thread_id FROM conversation_messages WHERE id = ?",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            """
+            UPDATE conversation_messages
+            SET content = ?, metadata = ?
+            WHERE id = ?
+            """,
+            (content, metadata_json, message_id),
+        )
+        conn.execute(
+            "UPDATE conversation_threads SET updated_at = ? WHERE id = ?",
+            (now, row["thread_id"]),
         )
         conn.commit()
 
@@ -172,7 +204,7 @@ def list_messages(thread_id: str) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT role, content, metadata, created_at
+            SELECT id, role, content, metadata, created_at
             FROM conversation_messages
             WHERE thread_id = ?
             ORDER BY id ASC
@@ -188,6 +220,7 @@ def list_messages(thread_id: str) -> list[dict[str, Any]]:
             metadata = {}
         messages.append(
             {
+                "id": row["id"],
                 "role": row["role"],
                 "content": row["content"],
                 "metadata": metadata,
@@ -199,6 +232,11 @@ def list_messages(thread_id: str) -> list[dict[str, Any]]:
 
 def get_chat_history(thread_id: str, limit: int | None = None) -> list[tuple[str, str]]:
     messages = list_messages(thread_id)
+    messages = [
+        message
+        for message in messages
+        if (message.get("metadata") or {}).get("status") not in {"running", "failed"}
+    ]
     if limit:
         messages = messages[-limit:]
     role_map = {"user": "사용자", "assistant": "AI"}
