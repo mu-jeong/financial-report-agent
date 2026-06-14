@@ -7,9 +7,13 @@ class State(TypedDict):
     chat_history: Annotated[list, operator.add]     # 이전 대화 기록 [(역할, 내용), ... ] 형태
     messages: Annotated[list[BaseMessage], operator.add]  # ToolNode I/O용 메시지 목록
     rewritten_query: str  # 재작성된 검색용 쿼리 (항상 실행되는 노드)
+    uses_chat_history: Optional[bool]  # query_rewrite가 이전 대화 맥락을 검색어에 반영했는지 여부
+    followup_scope_intent: Optional[bool]  # 현재 질문이 직전 검색 범위를 가리키는 후속 질문인지 여부
     route: str            # 'rdb' or 'vectordb' (항상 실행되는 노드)
     search_filters: Optional[dict]  # VectorDB 검색 시 적용할 메타데이터 필터 {'target_name': '...', 'broker': '...'}
     temporal_context: Optional[dict]  # 상대/명시 날짜 표현을 구체 날짜 범위로 해석한 정보
+    prior_search_scope: Optional[dict]  # 직전 답변의 검색 범위. 후속 질문에서 명시 조건이 없을 때 재사용
+    scope_source: Optional[str]  # search_filters가 이전 검색 범위에서 온 경우의 출처 표시
     
     # --- 아래 필드들은 라우팅 경로(분기)에 따라 값이 없을 수도 있으므로 Optional 처리 ---
     sql_query: Optional[str]        # RDB에서 사용된 SQL (RDB 경로)

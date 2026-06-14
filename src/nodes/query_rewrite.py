@@ -47,6 +47,23 @@ GENERIC_SEARCH_TERMS = (
     "해주세요",
 )
 
+FOLLOWUP_SCOPE_MARKERS = (
+    "주요 내용",
+    "위 내용",
+    "이 내용",
+    "해당 내용",
+    "방금",
+    "앞에서",
+    "앞서",
+)
+
+SUMMARY_FOLLOWUP_TERMS = (
+    "정리",
+    "요약",
+    "핵심",
+    "투자 포인트",
+)
+
 
 def _strip_temporal_phrases(text: str) -> str:
     stripped = str(text or "")
@@ -84,6 +101,17 @@ def has_explicit_search_topic(question: str) -> bool:
         normalized = normalized.replace(term, "")
     normalized = re.sub(r"[^\w가-힣]+", "", normalized)
     return len(normalized) >= 2
+
+
+def is_scope_followup(question: str) -> bool:
+    """Return whether the query points back to the prior retrieved answer scope."""
+    normalized = re.sub(r"\s+", "", str(question or ""))
+    if any(re.sub(r"\s+", "", keyword) in normalized for keyword in FOLLOWUP_SCOPE_MARKERS):
+        return True
+    return (
+        any(re.sub(r"\s+", "", keyword) in normalized for keyword in SUMMARY_FOLLOWUP_TERMS)
+        and not has_explicit_search_topic(question)
+    )
 
 
 def is_temporal_filter_followup(question: str) -> bool:
@@ -140,6 +168,9 @@ def should_rewrite_with_history(question: str, history: list[tuple[str, str]] | 
     if is_temporal_filter_followup(question):
         return True
 
+    if is_scope_followup(question):
+        return True
+
     if is_temporal_broad_search_with_topic(question):
         return False
 
@@ -154,13 +185,23 @@ def should_rewrite_with_history(question: str, history: list[tuple[str, str]] | 
 def query_rewrite_node(state: State) -> dict:
     history = state.get("chat_history", [])
     question = state["question"]
+    followup_scope_intent = is_scope_followup(question)
 
     if not history:
-        return {"rewritten_query": question}
+        return {
+            "rewritten_query": question,
+            "uses_chat_history": False,
+            "followup_scope_intent": followup_scope_intent,
+        }
 
-    if not should_rewrite_with_history(question, history):
+    uses_chat_history = should_rewrite_with_history(question, history)
+    if not uses_chat_history:
         logger.info("[AI] 📝 현재 질문이 독립적인 새 검색으로 판단되어 이전 대화 맥락을 검색어에 주입하지 않습니다.")
-        return {"rewritten_query": question}
+        return {
+            "rewritten_query": question,
+            "uses_chat_history": False,
+            "followup_scope_intent": followup_scope_intent,
+        }
 
     history_text = format_recent_history(history)
     llm = build_chat_model(temperature=0.0)
@@ -175,4 +216,8 @@ def query_rewrite_node(state: State) -> dict:
     else:
         rewritten = question
 
-    return {"rewritten_query": rewritten}
+    return {
+        "rewritten_query": rewritten,
+        "uses_chat_history": True,
+        "followup_scope_intent": followup_scope_intent,
+    }

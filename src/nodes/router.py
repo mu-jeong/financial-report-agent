@@ -44,8 +44,10 @@ class RouteDecision(BaseModel):
 
 def router_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
+    current_question_filters = infer_search_filters(state["question"])
+    current_temporal_context = resolve_temporal_context(state["question"])
     search_filters = infer_search_filters(query)
-    temporal_context = resolve_temporal_context(state["question"]) or resolve_temporal_context(query)
+    temporal_context = current_temporal_context or resolve_temporal_context(query)
     if temporal_context:
         search_filters.update(
             {
@@ -54,11 +56,40 @@ def router_node(state: State) -> dict:
             }
         )
 
-    if any(keyword in query for keyword in VECTORDB_INTENT_KEYWORDS):
+    scope_source = None
+    prior_search_scope = state.get("prior_search_scope") or {}
+    followup_scope_intent = bool(state.get("followup_scope_intent"))
+    if (
+        followup_scope_intent
+        and not current_temporal_context
+        and isinstance(prior_search_scope, dict)
+    ):
+        prior_filters = dict(prior_search_scope.get("search_filters") or {})
+        file_names = [
+            file_name
+            for file_name in prior_search_scope.get("file_names", [])
+            if file_name and file_name != "-"
+        ]
+        if file_names:
+            prior_filters["file_names"] = file_names
+        if prior_filters:
+            current_non_temporal_filters = {
+                key: value
+                for key, value in current_question_filters.items()
+                if key not in {"report_date_start", "report_date_end"}
+            }
+            prior_filters.update(current_non_temporal_filters)
+            search_filters = prior_filters
+            temporal_context = prior_search_scope.get("temporal_context")
+            scope_source = "prior_search_scope"
+
+    intent_text = f"{state['question']} {query}"
+    if any(keyword in intent_text for keyword in VECTORDB_INTENT_KEYWORDS):
         return {
             "route": "vectordb",
             "search_filters": search_filters,
             "temporal_context": temporal_context,
+            "scope_source": scope_source,
         }
 
     llm = build_chat_model(temperature=0.0).with_structured_output(RouteDecision)
@@ -76,4 +107,9 @@ def router_node(state: State) -> dict:
         )
         route = "vectordb"
 
-    return {"route": route, "search_filters": search_filters, "temporal_context": temporal_context}
+    return {
+        "route": route,
+        "search_filters": search_filters,
+        "temporal_context": temporal_context,
+        "scope_source": scope_source,
+    }

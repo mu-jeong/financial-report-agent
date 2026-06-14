@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 _CITATION_RE = re.compile(r"(?<!!)\[(\d{1,3})\](?!\()")
 _BRACKETED_SOURCE_LABEL_RE = re.compile(
@@ -20,6 +21,50 @@ def safe_anchor_prefix(value: str) -> str:
 def source_anchor_id(anchor_prefix: str, rank: int) -> str:
     """Build the source anchor id for a rendered source rank."""
     return f"{safe_anchor_prefix(anchor_prefix)}-source-{rank}"
+
+
+def source_rank(info: dict[str, Any], fallback_rank: int) -> int:
+    """Return a safe positive original retrieval rank for a source item."""
+    try:
+        rank = int(info.get("rank", fallback_rank))
+    except (TypeError, ValueError):
+        rank = fallback_rank
+    return max(rank, 1)
+
+
+def source_identity(info: dict[str, Any]) -> str:
+    """Return a stable document identity for grouping multiple chunks."""
+    file_name = str(info.get("file_name") or "").strip()
+    if file_name and file_name != "-":
+        return file_name
+    return "|".join(
+        str(info.get(key) or "").strip()
+        for key in ("target_name", "report_date", "broker", "title")
+    )
+
+
+def group_sources_by_document(rerank_info: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group retrieved chunk-level sources into document-level source entries."""
+    grouped: list[dict[str, Any]] = []
+    index_by_identity: dict[str, int] = {}
+    for index, info in enumerate(rerank_info):
+        rank = source_rank(info, index + 1)
+        identity = source_identity(info)
+        if identity in index_by_identity:
+            grouped[index_by_identity[identity]]["ranks"].append(rank)
+            continue
+        index_by_identity[identity] = len(grouped)
+        grouped.append({"info": info, "ranks": [rank]})
+    return grouped
+
+
+def document_rank_aliases(rerank_info: list[dict[str, Any]]) -> dict[int, int]:
+    """Map original chunk ranks to sequential document-level display ranks."""
+    aliases: dict[int, int] = {}
+    for display_rank, source_group in enumerate(group_sources_by_document(rerank_info), 1):
+        for rank in source_group["ranks"]:
+            aliases[rank] = display_rank
+    return aliases
 
 
 def remove_unavailable_citations(text: str, *, source_count: int) -> str:

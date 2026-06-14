@@ -172,15 +172,20 @@ GUI 대화 이력은 `data/conversations.db`에 저장됩니다. deprecated CLI�
 
 사이드바 캘린더는 임베딩 완료 날짜만 데이터 있음으로 표시하고, 선택한 업데이트 기간 중 이미 임베딩된 날은 건너뜁니다. 필요한 다운로드와 임베딩은 백그라운드 작업으로 실행됩니다.
 
+### 대화 후속 질문과 참고 문서 표시
+
+GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata에 저장합니다. 저장되는 범위에는 VectorDB 필터, 상대 날짜 해석 결과, 실제 답변에 사용된 참고 PDF 파일명이 포함됩니다. 사용자가 "주요 내용 정리", "방금 내용 요약", "위 내용 핵심"처럼 직전 답변을 가리키는 후속 질문을 하면 같은 문서 범위를 재사용해 답변이 다른 리포트로 새지 않도록 합니다. 다만 "5월 주요 내용"처럼 새 날짜 조건을 명시한 질문은 현재 질문의 조건을 우선합니다.
+
 ## 검색 및 답변 흐름
 
 1. `query_rewrite`: 질문을 검색 친화적으로 정리합니다.
+   - 후속 질문 여부를 판단해 `followup_scope_intent`를 상태에 남깁니다.
 2. `router`: RDB 질문인지 VectorDB 질문인지 판단합니다.
+   - `followup_scope_intent`가 켜져 있고 새 날짜 조건이 없으면 직전 VectorDB 답변의 검색 필터, 날짜 범위, 실제 참고 파일명을 `prior_search_scope`로 재사용합니다.
 3. RDB 검색: LLM이 SQL을 생성하고 guardrail을 통과한 read-only `SELECT`만 실행합니다.
-4. VectorDB 검색: FAISS 후보를 넉넉히 가져온 뒤 날짜/종목/증권사/리포트 유형 필터와 최신성 가중치를 적용합니다.
+4. VectorDB 검색: FAISS 후보를 넉넉히 가져온 뒤 날짜/종목/증권사/리포트 유형/파일명 필터와 최신성 가중치를 적용합니다.
 5. `USE_RERANKER=true`일 때 OpenRouter rerank를 추가로 적용합니다. 기본값은 비용을 고려해 false입니다.
 6. VectorDB 검색 결과가 없으면 해당 대화의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.
-7. 답변과 참고 문서 목록을 반환합니다. GUI에서는 답변의 `[숫자]` 참조가 참고 문서 목록의 해당 항목으로 이동하고, 참고 문서는 접힌 expander 안의 텍스트 목록과 `열기` 버튼으로 표시됩니다.
 
 ## PDF 추출 엔진 비교
 
@@ -199,7 +204,7 @@ python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marke
 python -m pytest -q
 ```
 
-현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter, query rewrite, OpenRouter embedding/rerank payload, conversation store, citation 링크 변환, Quick Start, 백그라운드 데이터 업데이트, VectorDB Top-K/최신성 및 no-result 재시도 로직을 검증합니다.
+현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter, query rewrite, 후속 질문 검색 범위 재사용, OpenRouter embedding/rerank payload, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB Top-K/최신성 및 no-result 재시도 로직을 검증합니다.
 
 ### 평가용 테스트셋
 

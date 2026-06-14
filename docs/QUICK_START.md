@@ -91,6 +91,16 @@ http://localhost:8501
 http://127.0.0.1:8501
 ```
 
+### `missing ScriptRunContext` 경고가 보여요
+
+`Thread 'MainThread': missing ScriptRunContext! This warning can be ignored when running in bare mode.` 경고는 Streamlit 앱 컨텍스트 없이 `st.*` 코드가 실행될 때 나옵니다. GUI는 아래처럼 Streamlit으로 실행해야 합니다.
+
+```bash
+streamlit run apps/gui/app.py
+```
+
+Quick Start 또는 위 명령으로 실행 중이고 화면이 정상 동작한다면 무시해도 되는 Streamlit 경고입니다. `python apps/gui/app.py`처럼 직접 실행했다면 위 명령으로 다시 실행하세요.
+
 ### 비용이 걱정돼요
 
 Quick Start는 기본적으로 rerank를 끈 상태(`USE_RERANKER=false`)로 실행합니다. 그래도 OpenRouter API를 사용하므로 소액의 비용이 발생할 수 있습니다. 사용량은 OpenRouter 대시보드에서 확인하세요.

@@ -393,6 +393,12 @@ def infer_search_filters(
 def metadata_matches(metadata: dict[str, Any], filters: SearchFilters) -> bool:
     """Return whether a document metadata dict satisfies all filters."""
     for key, expected in filters.items():
+        if key == "file_names":
+            expected_names = {str(name) for name in (expected or [])}
+            if metadata.get("file_name") not in expected_names:
+                return False
+            continue
+
         if key in {"report_date_start", "report_date_end"}:
             actual = metadata.get("report_date")
             if not actual:

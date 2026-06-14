@@ -36,6 +36,8 @@ link_citations_to_sources = citations.link_citations_to_sources
 extract_citation_ranks = citations.extract_citation_ranks
 normalize_citation_ranks = citations.normalize_citation_ranks
 remove_unavailable_citations = citations.remove_unavailable_citations
+document_rank_aliases = citations.document_rank_aliases
+group_sources_by_document = citations.group_sources_by_document
 source_anchor_id = citations.source_anchor_id
 from src.graphs.main_graph import graph_app
 
@@ -128,6 +130,47 @@ def _show_queued_chat_job_toasts() -> None:
         st.toast(event.get("message", "답변 작업 상태가 변경되었습니다."), icon=icon)
 
 
+def _search_scope_from_graph_state(final_state: dict) -> dict | None:
+    """Build a reusable retrieval scope from the completed graph state."""
+    search_filters = dict(final_state.get("search_filters") or {})
+    temporal_context = final_state.get("temporal_context")
+    rerank_info = final_state.get("rerank_info") or []
+    file_names = []
+    seen_file_names = set()
+    for info in rerank_info:
+        file_name = (info or {}).get("file_name")
+        if file_name and file_name != "-" and file_name not in seen_file_names:
+            seen_file_names.add(file_name)
+            file_names.append(file_name)
+
+    if not search_filters and not temporal_context and not file_names:
+        return None
+
+    scope = {
+        "route": final_state.get("route"),
+        "search_filters": search_filters,
+        "temporal_context": temporal_context,
+        "scope_source": final_state.get("scope_source"),
+    }
+    if file_names:
+        scope["file_names"] = file_names
+    return scope
+
+
+def _latest_search_scope(messages: list[dict]) -> dict | None:
+    """Return the latest successful assistant search scope in the current thread."""
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        metadata = message.get("metadata") or {}
+        if metadata.get("status") in {"running", "failed"}:
+            continue
+        scope = metadata.get("search_scope")
+        if isinstance(scope, dict):
+            return scope
+    return None
+
+
 def _thread_has_running_job(messages: list[dict]) -> bool:
     return any(
         message.get("role") == "assistant"
@@ -150,27 +193,35 @@ def _run_chat_response_job(
     assistant_message_id: int,
     user_query: str,
     prior_history: list[tuple[str, str]],
+    prior_search_scope: dict | None,
     registry: dict,
 ) -> None:
     try:
         config = {"configurable": {"thread_id": thread_id}}
+        graph_input = {"question": user_query, "chat_history": prior_history}
+        if prior_search_scope:
+            graph_input["prior_search_scope"] = prior_search_scope
         with registry["graph_lock"]:
             final_state = graph_app.invoke(
-                {"question": user_query, "chat_history": prior_history},
+                graph_input,
                 config=config,
             )
         answer = final_state.get("generation", "응답을 생성하지 못했습니다.")
         if "Error" in answer or "차단" in answer:
             answer = f"주의: {answer}"
         rerank_info = final_state.get("rerank_info", []) if final_state.get("route") == "vectordb" else []
+        search_scope = _search_scope_from_graph_state(final_state)
+        metadata = {
+            "status": "succeeded",
+            "job_id": job_id,
+            "rerank_info": rerank_info,
+        }
+        if search_scope:
+            metadata["search_scope"] = search_scope
         update_message(
             assistant_message_id,
             answer,
-            {
-                "status": "succeeded",
-                "job_id": job_id,
-                "rerank_info": rerank_info,
-            },
+            metadata,
         )
         _record_chat_job_event(
             {
@@ -213,6 +264,7 @@ def _start_chat_response_job(
     thread_name: str,
     user_query: str,
     prior_history: list[tuple[str, str]],
+    prior_search_scope: dict | None = None,
 ) -> int:
     job_id = str(uuid.uuid4())
     assistant_message_id = append_message(
@@ -233,6 +285,7 @@ def _start_chat_response_job(
             "assistant_message_id": assistant_message_id,
             "user_query": user_query,
             "prior_history": prior_history,
+            "prior_search_scope": prior_search_scope,
             "registry": registry,
         },
         name=f"chat-response-{job_id[:8]}",
@@ -707,50 +760,6 @@ def _render_data_update_controls(db_status: dict) -> None:
     _render_update_progress()
 
 
-def _source_rank(info: dict, fallback_rank: int) -> int:
-    try:
-        rank = int(info.get("rank", fallback_rank))
-    except (TypeError, ValueError):
-        rank = fallback_rank
-    return max(rank, 1)
-
-
-def _source_identity(info: dict) -> str:
-    file_name = str(info.get("file_name") or "").strip()
-    if file_name and file_name != "-":
-        return file_name
-    return "|".join(
-        str(info.get(key) or "").strip()
-        for key in ("target_name", "report_date", "broker", "title")
-    )
-
-
-def _group_sources_by_document(rerank_info: list[dict]) -> list[dict]:
-    grouped: list[dict] = []
-    index_by_identity: dict[str, int] = {}
-    for index, info in enumerate(rerank_info):
-        rank = _source_rank(info, index + 1)
-        identity = _source_identity(info)
-        if identity in index_by_identity:
-            grouped[index_by_identity[identity]]["ranks"].append(rank)
-            continue
-        index_by_identity[identity] = len(grouped)
-        grouped.append({"info": info, "ranks": [rank]})
-    return grouped
-
-
-def _source_rank_aliases(rerank_info: list[dict]) -> dict[int, int]:
-    aliases: dict[int, int] = {}
-    for source_group in _group_sources_by_document(rerank_info):
-        ranks = sorted(source_group["ranks"])
-        if not ranks:
-            continue
-        representative_rank = ranks[0]
-        for rank in ranks:
-            aliases[rank] = representative_rank
-    return aliases
-
-
 def _render_sources(
     rerank_info: list[dict] | None,
     *,
@@ -761,20 +770,24 @@ def _render_sources(
 ) -> None:
     if not rerank_info:
         return
-    grouped_sources = _group_sources_by_document(rerank_info)
+    grouped_sources = group_sources_by_document(rerank_info)
+    indexed_sources = [
+        {**source_group, "display_rank": display_rank}
+        for display_rank, source_group in enumerate(grouped_sources, 1)
+    ]
     if used_ranks is not None:
-        grouped_sources = [
+        indexed_sources = [
             source_group
-            for source_group in grouped_sources
-            if any(rank in used_ranks for rank in source_group["ranks"])
+            for source_group in indexed_sources
+            if source_group["display_rank"] in used_ranks
         ]
-        if not grouped_sources:
+        if not indexed_sources:
             return
-    with st.expander(f"참고한 문서 ({len(grouped_sources)}개)", expanded=expanded):
-        for index, source_group in enumerate(grouped_sources):
+    with st.expander(f"참고한 문서 ({len(indexed_sources)}개)", expanded=expanded):
+        for index, source_group in enumerate(indexed_sources):
             info = source_group["info"]
-            ranks = source_group["ranks"]
-            rank_label = f"[{min(ranks)}]"
+            display_rank = source_group["display_rank"]
+            rank_label = f"[{display_rank}]"
             file_name = info.get("file_name", "-")
             title = info.get("title") or "-"
             display_text = (
@@ -782,10 +795,9 @@ def _render_sources(
                 f"- {info.get('broker', '-')} - {title} - {file_name}"
             )
             st.markdown(
-                "".join(
-                    f"<div id='{source_anchor_id(anchor_prefix, rank)}' "
+                (
+                    f"<div id='{source_anchor_id(anchor_prefix, display_rank)}' "
                     "style='scroll-margin-top: 96px; height: 0; visibility: hidden;'></div>"
-                    for rank in source_group["ranks"]
                 ),
                 unsafe_allow_html=True,
             )
@@ -817,23 +829,28 @@ def _render_message(message: dict, *, index: int) -> None:
                 st.error(message["content"])
                 return
             rerank_info = metadata.get("rerank_info") or []
+            source_count = len(group_sources_by_document(rerank_info))
             display_content = remove_unavailable_citations(
                 message["content"],
                 source_count=len(rerank_info),
             )
             display_content = normalize_citation_ranks(
                 display_content,
-                _source_rank_aliases(rerank_info),
+                document_rank_aliases(rerank_info),
+            )
+            display_content = remove_unavailable_citations(
+                display_content,
+                source_count=source_count,
             )
             used_ranks = extract_citation_ranks(
                 display_content,
-                source_count=len(rerank_info),
+                source_count=source_count,
             )
             anchor_prefix = f"message_{index}"
             linked_content = link_citations_to_sources(
                 display_content,
                 anchor_prefix=anchor_prefix,
-                source_count=len(rerank_info),
+                source_count=source_count,
             )
             st.markdown(linked_content)
             _render_sources(
@@ -969,12 +986,14 @@ def render_chat(current_id: str, current_thread: dict) -> None:
             thread_name = current_thread["name"]
 
         prior_history = get_chat_history(current_id)
+        prior_search_scope = _latest_search_scope(messages)
         append_message(current_id, "user", user_query)
         assistant_message_id = _start_chat_response_job(
             thread_id=current_id,
             thread_name=thread_name,
             user_query=user_query,
             prior_history=prior_history,
+            prior_search_scope=prior_search_scope,
         )
 
         with st.chat_message("user"):

@@ -9,6 +9,12 @@ from src.core.metadata_filters import (
     metadata_matches,
     resolve_temporal_context,
 )
+from src.nodes import query_rewrite, router
+from src.utils.citations import (
+    document_rank_aliases,
+    group_sources_by_document,
+    normalize_citation_ranks,
+)
 
 
 def test_infer_search_filters_from_known_metadata_values():
@@ -155,3 +161,156 @@ def test_filter_docs_with_scores_keeps_matching_documents_only():
 
     assert len(filtered) == 1
     assert filtered[0][0].page_content == "a"
+
+
+def test_filter_docs_with_scores_supports_file_name_scope():
+    docs = [
+        (
+            Document(
+                page_content="weekly",
+                metadata={"file_name": "weekly-a.pdf", "report_date": "2026-06-10"},
+            ),
+            0.1,
+        ),
+        (
+            Document(
+                page_content="older",
+                metadata={"file_name": "older.pdf", "report_date": "2026-05-10"},
+            ),
+            0.2,
+        ),
+    ]
+
+    filtered = filter_docs_with_scores(
+        docs,
+        {
+            "report_date_start": "2026-06-08",
+            "report_date_end": "2026-06-14",
+            "file_names": ["weekly-a.pdf"],
+        },
+    )
+
+    assert len(filtered) == 1
+    assert filtered[0][0].page_content == "weekly"
+
+
+def test_document_source_aliases_are_sequential_after_deduplication():
+    rerank_info = [
+        {"rank": 1, "file_name": "naver-a.pdf", "title": "NAVER A"},
+        {"rank": 2, "file_name": "naver-b.pdf", "title": "NAVER B"},
+        {"rank": 4, "file_name": "naver-c.pdf", "title": "NAVER C"},
+        {"rank": 5, "file_name": "naver-d.pdf", "title": "NAVER D"},
+        {"rank": 6, "file_name": "naver-e.pdf", "title": "NAVER E"},
+        {"rank": 13, "file_name": "naver-f.pdf", "title": "NAVER F"},
+        {"rank": 14, "file_name": "naver-f.pdf", "title": "NAVER F duplicate chunk"},
+    ]
+
+    grouped_sources = group_sources_by_document(rerank_info)
+    aliases = document_rank_aliases(rerank_info)
+
+    assert len(grouped_sources) == 6
+    assert aliases[1] == 1
+    assert aliases[2] == 2
+    assert aliases[4] == 3
+    assert aliases[5] == 4
+    assert aliases[6] == 5
+    assert aliases[13] == 6
+    assert aliases[14] == 6
+    assert normalize_citation_ranks("근거 [1][2][4][5][6][13][14]", aliases) == (
+        "근거 [1][2][3][4][5][6]"
+    )
+
+
+def test_query_rewrite_marks_prior_scope_followup_for_router():
+    result = query_rewrite.query_rewrite_node(
+        {
+            "question": "주요 내용을 정리해줘",
+            "chat_history": [],
+        }
+    )
+
+    assert result == {
+        "rewritten_query": "주요 내용을 정리해줘",
+        "uses_chat_history": False,
+        "followup_scope_intent": True,
+    }
+
+
+def test_router_reuses_prior_search_scope_for_summary_followup(monkeypatch):
+    def fail_if_llm_router_is_called(*args, **kwargs):
+        raise AssertionError("summary follow-up should route deterministically")
+
+    monkeypatch.setattr(router, "build_chat_model", fail_if_llm_router_is_called)
+
+    prior_scope = {
+        "search_filters": {
+            "report_date_start": "2026-06-08",
+            "report_date_end": "2026-06-14",
+        },
+        "temporal_context": {
+            "expression": "이번 주",
+            "report_date_start": "2026-06-08",
+            "report_date_end": "2026-06-14",
+        },
+        "file_names": ["weekly-a.pdf", "weekly-b.pdf"],
+    }
+
+    result = router.router_node(
+        {
+            "question": "주요 내용을 정리해줘",
+            "rewritten_query": "주요 내용을 정리해줘",
+            "chat_history": [],
+            "prior_search_scope": prior_scope,
+            "followup_scope_intent": True,
+        }
+    )
+
+    assert result["route"] == "vectordb"
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["temporal_context"] == prior_scope["temporal_context"]
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-08",
+        "report_date_end": "2026-06-14",
+        "file_names": ["weekly-a.pdf", "weekly-b.pdf"],
+    }
+
+
+def test_router_keeps_explicit_current_filters_over_prior_scope(monkeypatch):
+    def fake_infer_search_filters(query):
+        return {
+            "report_date_start": "2026-05-01",
+            "report_date_end": "2026-05-31",
+        }
+
+    def fake_resolve_temporal_context(query):
+        return {
+            "expression": "5월",
+            "report_date_start": "2026-05-01",
+            "report_date_end": "2026-05-31",
+        }
+
+    monkeypatch.setattr(router, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(router, "resolve_temporal_context", fake_resolve_temporal_context)
+
+    result = router.router_node(
+        {
+            "question": "5월 주요 내용을 정리해줘",
+            "rewritten_query": "5월 주요 내용을 정리해줘",
+            "chat_history": [],
+            "followup_scope_intent": True,
+            "prior_search_scope": {
+                "search_filters": {
+                    "report_date_start": "2026-06-08",
+                    "report_date_end": "2026-06-14",
+                },
+                "file_names": ["weekly-a.pdf"],
+            },
+        }
+    )
+
+    assert result["route"] == "vectordb"
+    assert result["scope_source"] is None
+    assert result["search_filters"] == {
+        "report_date_start": "2026-05-01",
+        "report_date_end": "2026-05-31",
+    }
