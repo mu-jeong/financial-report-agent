@@ -36,11 +36,11 @@ def _format_mapping(title: str, values: dict[str, Any]) -> list[str]:
 
 def _format_issue_report_text(report: dict[str, Any]) -> str:
     context = report.get("context") or {}
-    recent_messages = context.get("recent_messages") or []
+    conversation_messages = context.get("conversation_messages") or context.get("recent_messages") or []
     context_summary = {
         key: value
         for key, value in context.items()
-        if key != "recent_messages"
+        if key not in {"conversation_messages", "recent_messages"}
     }
 
     lines = [
@@ -56,12 +56,12 @@ def _format_issue_report_text(report: dict[str, Any]) -> str:
         "",
         *_format_mapping("Context", context_summary),
         "",
-        "Recent Messages:",
+        "Conversation Messages:",
     ]
 
-    if not recent_messages:
-        lines.append("- 첨부된 최근 대화 없음")
-    for index, message in enumerate(recent_messages, 1):
+    if not conversation_messages:
+        lines.append("- 첨부된 대화 없음")
+    for index, message in enumerate(conversation_messages, 1):
         metadata = message.get("metadata") or {}
         lines.extend(
             [
@@ -86,6 +86,48 @@ def _format_issue_report_text(report: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _compact_report_metadata(metadata: dict | None) -> dict:
+    """Keep debugging signals useful without dumping bulky retrieval payloads."""
+    metadata = metadata or {}
+    compact = {
+        key: metadata.get(key)
+        for key in ["status", "job_id", "error", "route", "scope_source"]
+        if metadata.get(key) is not None
+    }
+    if metadata.get("search_scope"):
+        compact["search_scope"] = metadata.get("search_scope")
+    if isinstance(metadata.get("rerank_info"), list):
+        compact["rerank_count"] = len(metadata["rerank_info"])
+    return compact
+
+
+def build_issue_report_context(
+    *,
+    thread: dict[str, Any],
+    messages: list[dict[str, Any]],
+    include_conversation: bool,
+) -> dict[str, Any]:
+    """Build report context while preserving the full selected conversation text."""
+    context: dict[str, Any] = {
+        "thread_id": thread["id"],
+        "thread_name": thread["name"],
+        "submitted_from": "streamlit_chat",
+        "conversation_message_count": len(messages) if include_conversation else 0,
+    }
+    if include_conversation:
+        context["conversation_messages"] = [
+            {
+                "id": message.get("id"),
+                "role": message.get("role"),
+                "created_at": message.get("created_at"),
+                "content": message.get("content", "") or "",
+                "metadata": _compact_report_metadata(message.get("metadata")),
+            }
+            for message in messages
+        ]
+    return context
 
 
 def create_issue_report(
