@@ -27,7 +27,13 @@ API_KEY_PLACEHOLDERS = {
     "sk-or-v1-your-key",
     "sk-or-v1-your-key-here",
 }
-QUICKSTART_PROGRESS_STEPS = 9
+QUICKSTART_PROGRESS_STEPS = 10
+RUNTIME_DIRS = [
+    ROOT / "logs",
+    ROOT / "data",
+    ROOT / "data" / "downloaded",
+    ROOT / "reports",
+]
 
 
 def _configure_console() -> None:
@@ -92,6 +98,15 @@ def ensure_virtualenv(progress: ProgressTracker | None = None) -> None:
         description="가상환경(.venv) 생성",
         progress=progress,
     )
+
+
+def ensure_runtime_directories(progress: ProgressTracker | None = None) -> None:
+    """Create runtime output directories used by Quick Start commands."""
+    for directory in RUNTIME_DIRS:
+        directory.mkdir(parents=True, exist_ok=True)
+    print_step("Quick Start runtime folders are ready.")
+    if progress is not None:
+        progress.advance("Runtime folders ready")
 
 
 def install_dependencies(progress: ProgressTracker | None = None) -> None:
@@ -247,6 +262,7 @@ def main() -> int:
         ensure_python_version(progress)
         ensure_env(progress)
         ensure_virtualenv(progress)
+        ensure_runtime_directories(progress)
         install_dependencies(progress)
         prepare_data(progress)
         launch_gui(progress)

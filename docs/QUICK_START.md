@@ -25,12 +25,13 @@ API 키가 없다면 아래 문서를 먼저 따라 발급받으세요.
 1. Python 버전 확인
 2. `.env` 파일 생성 또는 업데이트와 OpenRouter API 키 저장
 3. `.venv` 가상환경 생성 또는 확인
-4. pip 업데이트
-5. `requirements.txt` 패키지 설치 또는 확인
-6. 실행일 포함 이전 7일 범위의 리포트 수집
-7. 수집된 전체 리포트 임베딩과 FAISS 검색 인덱스 생성
-8. 데이터 상태 출력
-9. Streamlit GUI 실행
+4. 실행 산출물 폴더 생성 또는 확인 (`logs/`, `data/`, `data/downloaded/`, `reports/`)
+5. pip 업데이트
+6. `requirements.txt` 패키지 설치 또는 확인
+7. 실행일 포함 이전 7일 범위의 리포트 수집
+8. 수집된 전체 리포트 임베딩과 FAISS 검색 인덱스 생성
+9. 데이터 상태 출력
+10. Streamlit GUI 실행
 
 ## 4. 데이터 준비 기준
 

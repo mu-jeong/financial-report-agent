@@ -12,6 +12,7 @@ Finance LLM은 증권사 PDF 리포트를 수집, 추출, 색인하고 질문에
 | 메타데이터 저장 | SQLite `data/reports.db` |
 | 대화 저장 | SQLite `data/conversations.db` |
 | 임베딩 색인 | FAISS `data/vector_db` |
+| 문제 신고 저장 | 텍스트 파일 `debug/issue_report_*.txt` |
 | 생성 모델 | OpenRouter `deepseek/deepseek-v4-flash` |
 | 임베딩 모델 | OpenRouter `baai/bge-m3` |
 | Rerank | 기본 비활성화, 필요 시 OpenRouter `cohere/rerank-v3.5` |
@@ -119,7 +120,17 @@ RERANK_MODEL=cohere/rerank-v3.5
 - assistant 메시지는 참고 문서와 rerank 정보를 metadata로 함께 저장할 수 있습니다.
 - GUI assistant 메시지는 성공 시 `search_scope` metadata를 추가로 저장합니다. 값에는 `route`, `search_filters`, `temporal_context`, `scope_source`, `file_names`가 포함될 수 있으며, 이후 같은 thread의 후속 질문에서 가장 최근 성공 답변의 scope를 재사용합니다.
 
-## 9. 참고 문서 네비게이션과 PDF 위치 이동 한계
+## 9. 문제 신고
+
+`src/core/issue_report_store.py`는 GUI의 `⚠ 신고` 버튼에서 제출된 문제 내용을
+읽기 쉬운 텍스트 파일로 저장합니다. 기본 저장 위치는 `debug/`이며 파일명은
+`issue_report_*.txt` 형식입니다.
+
+- 신고 내용에는 문제 유형, 사용자가 작성한 설명, thread 정보, 선택 시 대화 전문과 축약된 metadata가 포함됩니다.
+- `debug/*`는 Git에 포함하지 않고 `debug/.gitkeep`만 폴더 유지용으로 추적합니다.
+- 신고 파일은 사용자가 내용을 확인한 뒤 복사하거나 `.txt` 파일로 전달하는 로컬 디버깅 산출물입니다.
+
+## 10. 참고 문서 네비게이션과 PDF 위치 이동 한계
 
 현재 GUI는 답변 안의 `[숫자]` 참조를 참고 문서 expander의 해당 항목으로
 이동하는 내부 anchor 링크로 변환합니다. Streamlit 상단 바에 가려지지 않도록
@@ -136,14 +147,14 @@ anchor에는 scroll margin을 둡니다.
 text offset 같은 위치 metadata를 함께 저장해야 합니다. 현재 구조에서는 해당
 정밀 위치 이동까지는 제공하지 않으며, 별도 개선 과제로 남겨두는 것이 좋습니다.
 
-## 10. 데이터 상태와 캘린더
+## 11. 데이터 상태와 캘린더
 
 `src/core/status.py`는 DB/FAISS/설정 상태를 읽기 전용으로 요약합니다. GUI의
 리포트 캘린더는 `reports.is_embedded=1`인 날짜만 데이터 있음으로 표시하므로,
 다운로드만 끝난 PDF가 아니라 실제 검색 가능한 임베딩 완료 리포트 기준으로
 초록색 상태가 표시됩니다.
 
-## 11. 검증
+## 12. 검증
 
 주요 검증 명령은 다음과 같습니다.
 

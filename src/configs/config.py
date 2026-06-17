@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -56,6 +57,14 @@ USE_PARENT_CHILD = get_config_value("USE_PARENT_CHILD")
 # 4. 로깅 설정 (Logging)
 # ==============================================================================
 LOG_FILE = LOG_FILE_DEFAULT()
+
+
+def _ensure_log_parent(log_file: str) -> None:
+    """Create the log directory before configuring FileHandler."""
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+
+
+_ensure_log_parent(LOG_FILE)
 
 logging.basicConfig(
     level=logging.INFO,

@@ -4,12 +4,12 @@
 !.env.example
 
 # ── 다운로드된 PDF 파일 및 DB 데이터 (대용량, 개인 데이터) ──
-data/
+data/*
 !data/.gitkeep
 reports/
 
 # ── 로그 파일 ──
-logs/
+logs/*
 !logs/.gitkeep
 
 # ── Python ───────────────────────────────────────────────────────────────────
@@ -40,3 +40,6 @@ Thumbs.db
 
 .omx/
 tests/
+# ── 사용자 문제 신고 / 디버그 산출물 ─────────────────────────────────────────
+debug/*
+!debug/.gitkeep

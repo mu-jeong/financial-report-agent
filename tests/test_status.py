@@ -1,5 +1,6 @@
 import sqlite3
 
+from src.core import issue_report_store
 from src.core.status import assess_readiness, format_readiness_text, format_status_text, get_data_status
 
 
@@ -127,3 +128,51 @@ def test_assess_readiness_warns_for_partial_embedding_and_pickle_index():
     assert readiness["label"] == "주의 필요"
     assert any("임베딩되지 않은 리포트" in message for message in readiness["messages"])
     assert any("pickle 기반" in message for message in readiness["messages"])
+
+
+def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch):
+    debug_dir = tmp_path / "debug"
+    monkeypatch.setattr(issue_report_store, "DEBUG_REPORT_DIR", debug_dir)
+    long_content = "앞부분" + ("가" * 1500) + "끝부분"
+    messages = [
+        {
+            "id": index,
+            "role": "user" if index % 2 else "assistant",
+            "created_at": f"2026-06-17T00:{index:02d}:00+00:00",
+            "content": long_content if index == 1 else f"메시지 {index}",
+            "metadata": {"rerank_info": [{"rank": index}]},
+        }
+        for index in range(1, 11)
+    ]
+    context = issue_report_store.build_issue_report_context(
+        thread={"id": "thread-1", "name": "테스트 대화"},
+        messages=messages,
+        include_conversation=True,
+    )
+
+    report_result = issue_report_store.create_issue_report(
+        "thread-1",
+        "답변 품질 문제",
+        "출처와 답변이 맞지 않습니다.",
+        context,
+    )
+
+    report_files = list(debug_dir.glob("issue_report_*.txt"))
+    assert len(report_files) == 1
+    assert report_result["file_path"] == str(report_files[0])
+
+    saved_report = report_files[0].read_text(encoding="utf-8")
+    assert f"Report ID: {report_result['id']}" in saved_report
+    assert "Thread ID: thread-1" in saved_report
+    assert "Category: 답변 품질 문제" in saved_report
+    assert "출처와 답변이 맞지 않습니다." in saved_report
+    assert "conversation_message_count: 10" in saved_report
+    assert "앞부분" in saved_report
+    assert "끝부분" in saved_report
+    assert "--- Message 10 ---" in saved_report
+    assert '"rerank_count": 1' in saved_report
+    assert "파일 내용을 복사하거나 .txt 파일을 이메일에 첨부" in saved_report
+
+    reports = issue_report_store.list_issue_reports("thread-1")
+    assert reports[0]["id"] == report_result["id"]
+    assert reports[0]["file_path"].endswith(".txt")

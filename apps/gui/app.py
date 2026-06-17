@@ -14,14 +14,18 @@ import streamlit.components.v1 as components
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from src.configs.config import SAVE_DIR
+from src.configs.config import REPORT_PDF_DIR
 from src.core import data_update_jobs
 from src.core import conversation_store
+from src.core import issue_report_store
 
 data_update_jobs = importlib.reload(data_update_jobs)
 conversation_store = importlib.reload(conversation_store)
+issue_report_store = importlib.reload(issue_report_store)
 append_message = conversation_store.append_message
 create_thread = conversation_store.create_thread
+create_issue_report = issue_report_store.create_issue_report
+build_issue_report_context = issue_report_store.build_issue_report_context
 delete_thread = conversation_store.delete_thread
 get_chat_history = conversation_store.get_chat_history
 list_messages = conversation_store.list_messages
@@ -41,7 +45,6 @@ group_sources_by_document = citations.group_sources_by_document
 source_anchor_id = citations.source_anchor_id
 from src.graphs.main_graph import graph_app
 
-REPORT_PDF_DIR = os.getenv("REPORT_PDF_DIR", SAVE_DIR)
 WEEKDAY_LABELS = ["월", "화", "수", "목", "금"]
 
 st.set_page_config(
@@ -74,6 +77,26 @@ def _inject_ui_styles() -> None:
             line-height: 0.9rem;
         }
         [data-testid="stSidebar"] .stButton > button p {
+            white-space: nowrap;
+            font-size: inherit;
+            line-height: inherit;
+        }
+        .st-key-issue_report_control {
+            margin-top: 0.2rem;
+            padding-bottom: 0.25rem;
+        }
+        .st-key-issue_report_control .stButton {
+            display: flex;
+            justify-content: flex-end;
+        }
+        .st-key-issue_report_control .stButton > button {
+            min-height: 1.55rem;
+            padding: 0.08rem 0.38rem;
+            border-radius: 0.55rem;
+            font-size: 0.72rem;
+            line-height: 0.85rem;
+        }
+        .st-key-issue_report_control .stButton > button p {
             white-space: nowrap;
             font-size: inherit;
             line-height: inherit;
@@ -177,6 +200,81 @@ def _thread_has_running_job(messages: list[dict]) -> bool:
         and (message.get("metadata") or {}).get("status") == "running"
         for message in messages
     )
+
+
+def _render_issue_report_control(
+    *,
+    current_thread: dict,
+    messages: list[dict],
+) -> None:
+    if report_result := st.session_state.pop("issue_report_success", None):
+        st.success(
+            "문제 신고 텍스트 파일을 저장했습니다. 아래 경로의 파일 내용을 복사하여 "
+            "내용을 이메일에 작성해주세요."
+        )
+        st.code(report_result["file_path"], language="text")
+        st.toast(f"이슈 리포트가 저장되었습니다. (#{report_result['id']})", icon="✅")
+
+    with st.container(key="issue_report_control"):
+        _, report_col = st.columns([0.88, 0.12], gap="small", vertical_alignment="center")
+        if report_col.button(
+            "⚠ 신고",
+            key=f"toggle_issue_report_{current_thread['id']}",
+            help="현재 대화에서 발생한 문제를 개발자가 확인할 수 있도록 저장합니다.",
+            use_container_width=True,
+        ):
+            st.session_state.show_issue_report_form = not st.session_state.get("show_issue_report_form", False)
+
+        if not st.session_state.get("show_issue_report_form"):
+            return
+
+        with st.form(f"issue_report_form_{current_thread['id']}", clear_on_submit=True):
+            category = st.selectbox(
+                "문제 유형",
+                [
+                    "답변 품질 문제",
+                    "검색/출처 문제",
+                    "응답 지연/멈춤",
+                    "화면/사용성 문제",
+                    "기타",
+                ],
+                key=f"issue_report_category_{current_thread['id']}",
+            )
+            description = st.text_area(
+                "무슨 문제가 있었나요?",
+                placeholder="예: 질문 의도와 다른 리포트를 참고했어요 / 답변이 너무 오래 걸렸어요 / 출처 링크가 열리지 않아요",
+                height=110,
+                key=f"issue_report_description_{current_thread['id']}",
+            )
+            include_conversation = st.checkbox(
+                "전체 대화 내용을 함께 첨부",
+                value=True,
+                help="민감한 내용이 있으면 체크를 해제하고 설명만 제출하세요.",
+                key=f"issue_report_include_context_{current_thread['id']}",
+            )
+            submitted = st.form_submit_button(
+                "신고 제출",
+                use_container_width=True,
+            )
+
+        if submitted:
+            clean_description = description.strip()
+            if not clean_description:
+                st.warning("문제 내용을 한 줄 이상 입력해 주세요.")
+                return
+            report_result = create_issue_report(
+                current_thread["id"],
+                category,
+                clean_description,
+                build_issue_report_context(
+                    thread=current_thread,
+                    messages=messages,
+                    include_conversation=include_conversation,
+                ),
+            )
+            st.session_state.show_issue_report_form = False
+            st.session_state.issue_report_success = report_result
+            _app_rerun()
 
 
 def _chat_message_anchor_id(message_id: int | str | None, fallback_index: int) -> str:
@@ -868,6 +966,7 @@ def _set_current_thread(thread_id: str) -> None:
     if st.session_state.current_thread_id != thread_id:
         st.session_state.current_thread_id = thread_id
         st.session_state.editing_thread_id = None
+        st.session_state.show_issue_report_form = False
         _app_rerun()
 
 
@@ -975,10 +1074,18 @@ def render_chat(current_id: str, current_thread: dict) -> None:
     if has_running_job:
         st.caption("이 대화의 답변을 백그라운드에서 생성 중입니다. 다른 대화로 이동해도 작업은 계속됩니다.")
 
-    if user_query := st.chat_input(
-        "질문을 입력해 주세요... (ex: 최근 발행된 현대차 리포트 요약해줘)",
-        disabled=has_running_job,
-    ):
+    with st.container(key="chat_entry_area"):
+        user_query = st.chat_input(
+            "질문을 입력해 주세요... (ex: 최근 발행된 현대차 리포트 요약해줘)",
+            disabled=has_running_job,
+        )
+
+        _render_issue_report_control(
+            current_thread=current_thread,
+            messages=messages,
+        )
+
+    if user_query:
         if not messages and (current_thread["name"] == "새로운 대화" or current_thread["name"].startswith("대화 ")):
             thread_name = user_query[:15] + "..."
             rename_thread(current_id, thread_name)
