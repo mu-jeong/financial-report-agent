@@ -238,7 +238,7 @@ def print_runtime_status(progress: ProgressTracker | None = None) -> None:
 def launch_gui(progress: ProgressTracker | None = None) -> None:
     print("\n" + "=" * 70)
     print("브라우저가 열리면 질문을 입력하세요.")
-    print("예시 질문: 최근 7일 리포트에서 긍정적으로 평가된 기업은?")
+    print("예시 질문: 최근 리포트의 주요 투자 아이디어를 요약해줘.")
     print("종료하려면 이 창에서 Ctrl+C를 누르세요.")
     print("=" * 70 + "\n")
     if progress is not None:

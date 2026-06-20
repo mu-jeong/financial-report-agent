@@ -2,14 +2,16 @@
 
 ## Quick Start: 간편하게 실행하기
 
-Windows에서 `RUN_QUICKSTART.bat`을 더블클릭하면 설치, OpenRouter API 키 설정, 실행일 포함 이전 7일 범위(총 최대 8일)의 리포트 수집, 임베딩 생성, 웹 화면 실행까지 자동으로 진행됩니다.
+Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면 설치, OpenRouter API 키 설정, 실행일 포함 이전 7일 범위(총 최대 8일)의 리포트 수집, 임베딩 생성, 웹 화면 실행까지 자동으로 진행됩니다.
 
 1. [OpenRouter API 키 발급 방법](docs/OPENROUTER_API_KEY.md)을 따라 API 키와 크레딧을 준비합니다.
 2. 프로젝트 폴더에서 `RUN_QUICKSTART.bat`을 더블클릭합니다.
 3. 처음 실행 시 API 키를 붙여넣고 Enter를 누릅니다.
 4. 브라우저가 열리면 바로 질문을 입력합니다.
 
-Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
+초기 준비가 끝난 뒤 앱만 다시 열 때는 `RUN_APP.bat`을 사용하세요. `RUN_APP.bat`은 `.venv`와 `.env`가 있는지 확인한 뒤 Streamlit GUI만 실행하므로, 매번 패키지 설치·리포트 수집·임베딩을 반복하지 않습니다.
+
+Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법과 `RUN_APP.bat` 사용 구분은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
 
 ---
 
