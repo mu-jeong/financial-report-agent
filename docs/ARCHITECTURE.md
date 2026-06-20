@@ -155,6 +155,13 @@ text offset 같은 위치 metadata를 함께 저장해야 합니다. 현재 구�
 다운로드만 끝난 PDF가 아니라 실제 검색 가능한 임베딩 완료 리포트 기준으로
 초록색 상태가 표시됩니다.
 
+업데이트 대상 계산은 날짜만 보지 않고 `reports.report_date + reports.report_type`
+집계를 함께 봅니다. 예를 들어 특정 날짜에 `company`는 임베딩되어 있지만
+`industry`가 없으면, 사용자가 `industry`를 선택했을 때 해당 날짜는 다시
+수집/임베딩 대상으로 포함됩니다. 이 판단은 기존 `reports` 테이블의
+`report_date`, `report_type`, `is_embedded` 컬럼으로 계산하므로 별도 스키마
+마이그레이션이 필요하지 않습니다.
+
 ## 12. 검증
 
 주요 검증 명령은 다음과 같습니다.

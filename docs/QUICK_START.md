@@ -13,6 +13,8 @@
 
 이후 일상적으로 앱만 실행할 때는 같은 폴더에서 `RUN_APP.bat`을 더블클릭합니다. `.venv` 또는 `.env`가 없다는 안내가 나오면 먼저 `RUN_QUICKSTART.bat`을 실행해 초기 준비를 완료하세요.
 
+앱 실행 후 사이드바의 데이터 업데이트 영역에서는 업데이트할 카테고리(`company`, `industry`, `economy`)를 선택할 수 있습니다. 이미 `company` 데이터가 있는 날짜라도 `industry`를 선택하면 해당 날짜의 산업 리포트를 추가로 확인하고 임베딩할 수 있습니다.
+
 ## 2. OpenRouter API 키 준비
 
 Finance LLM은 답변 생성과 임베딩에 OpenRouter API를 사용합니다.

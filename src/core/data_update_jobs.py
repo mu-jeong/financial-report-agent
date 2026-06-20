@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.configs.settings import BASE_DIR
+from src.core.report_crawler import normalize_report_categories
 
 JOB_DIR = BASE_DIR / "logs" / "data_update_jobs"
 STATUS_PATH = JOB_DIR / "status.json"
@@ -64,6 +65,54 @@ def group_consecutive_dates(values: list[str] | tuple[str, ...]) -> list[tuple[s
     return ranges
 
 
+def normalize_update_categories(categories: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    """Normalize report categories for GUI-triggered update jobs."""
+    return normalize_report_categories(categories)
+
+
+def _coerce_date(value: str | date) -> date:
+    return parse_date(value) if isinstance(value, str) else value
+
+
+def iter_weekdays(start_date: str | date, end_date: str | date, today: date | None = None) -> list[date]:
+    """Return weekdays in an inclusive range, capped at today by default."""
+    start = _coerce_date(start_date)
+    end = min(_coerce_date(end_date), today or _today())
+    if start > end:
+        start, end = end, start
+
+    days: list[date] = []
+    cursor = start
+    while cursor <= end:
+        if cursor.weekday() < 5:
+            days.append(cursor)
+        cursor = date.fromordinal(cursor.toordinal() + 1)
+    return days
+
+
+def missing_update_dates_by_category(
+    start_date: str | date,
+    end_date: str | date,
+    date_type_counts: dict[str, dict[str, int]],
+    categories: str | list[str] | tuple[str, ...],
+    *,
+    today: date | None = None,
+) -> list[str]:
+    """Return weekdays where at least one selected report category is missing.
+
+    Existing status data is derived from embedded rows, so this intentionally
+    treats a missing date/category pair as work to try. The crawler may still
+    find zero reports for that category on that day.
+    """
+    selected_categories = normalize_update_categories(categories)
+    missing_dates = []
+    for day in iter_weekdays(start_date, end_date, today=today):
+        counts_for_day = date_type_counts.get(day.isoformat(), {})
+        if any(int(counts_for_day.get(category, 0) or 0) == 0 for category in selected_categories):
+            missing_dates.append(day.isoformat())
+    return normalize_date_list(missing_dates)
+
+
 def build_update_range(*, last_date: str | None, today: date | None = None) -> tuple[str, str] | None:
     """Return the missing inclusive update range after the latest data date."""
     if not last_date:
@@ -76,7 +125,12 @@ def build_update_range(*, last_date: str | None, today: date | None = None) -> t
     return date.fromordinal(missing_start).isoformat(), run_today.isoformat()
 
 
-def build_crawler_env(start_date: str, end_date: str, base_env: dict[str, str] | None = None) -> dict[str, str]:
+def build_crawler_env(
+    start_date: str,
+    end_date: str,
+    base_env: dict[str, str] | None = None,
+    categories: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, str]:
     """Build env overrides for crawling an inclusive date range."""
     start = parse_date(start_date)
     end = parse_date(end_date)
@@ -94,6 +148,8 @@ def build_crawler_env(start_date: str, end_date: str, base_env: dict[str, str] |
             "CRAWLER_TARGET_COUNT": "0",
         }
     )
+    if categories is not None:
+        env["CRAWLER_CATEGORIES"] = ",".join(normalize_update_categories(categories))
     return env
 
 
@@ -213,9 +269,11 @@ def start_update_job(
     start_date: str | None = None,
     end_date: str | None = None,
     selected_dates: list[str] | tuple[str, ...] | None = None,
+    categories: str | list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Start a detached update job and return the initial status."""
     selected_dates = normalize_date_list(selected_dates)
+    selected_categories = normalize_update_categories(categories)
     if selected_dates:
         start_date = selected_dates[0]
         end_date = selected_dates[-1]
@@ -239,6 +297,7 @@ def start_update_job(
     ]
     if selected_dates:
         command.extend(["--dates", *selected_dates])
+    command.extend(["--categories", ",".join(selected_categories)])
     parent_pid = os.getpid()
     command.extend(["--parent-pid", str(parent_pid)])
     process = subprocess.Popen(
@@ -258,6 +317,7 @@ def start_update_job(
         "start_date": start_date,
         "end_date": end_date,
         "selected_dates": selected_dates,
+        "categories": selected_categories,
         "log_path": str(LOG_PATH),
         "parent_pid": parent_pid,
     }
@@ -338,11 +398,13 @@ def run_update_job(
     end_date: str | None,
     label: str,
     selected_dates: list[str] | tuple[str, ...] | None = None,
+    categories: str | list[str] | tuple[str, ...] | None = None,
     parent_pid: int | None = None,
 ) -> int:
     """Run crawler then embedding pipeline, updating status as each phase completes."""
     try:
         normalized_dates = normalize_date_list(selected_dates)
+        selected_categories = normalize_update_categories(categories)
         if normalized_dates:
             start_date = normalized_dates[0]
             end_date = normalized_dates[-1]
@@ -370,12 +432,13 @@ def run_update_job(
                     "start_date": start_date,
                     "end_date": end_date,
                     "selected_dates": normalized_dates,
+                    "categories": selected_categories,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
                     "parent_pid": parent_pid,
                 }
             )
-            crawler_env = build_crawler_env(range_start, range_end)
+            crawler_env = build_crawler_env(range_start, range_end, categories=selected_categories)
             code, output = _run_subprocess(
                 [sys.executable, "-m", "src.core.report_crawler"],
                 env=crawler_env,
@@ -396,6 +459,7 @@ def run_update_job(
                     "start_date": start_date,
                     "end_date": end_date,
                     "selected_dates": normalized_dates,
+                    "categories": selected_categories,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
                     "parent_pid": parent_pid,
@@ -413,6 +477,7 @@ def run_update_job(
                 "start_date": start_date,
                 "end_date": end_date,
                 "selected_dates": normalized_dates,
+                "categories": selected_categories,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -436,6 +501,7 @@ def run_update_job(
                     "start_date": start_date,
                     "end_date": end_date,
                     "selected_dates": normalized_dates,
+                    "categories": selected_categories,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
                     "embedding_current": current,
@@ -463,6 +529,7 @@ def run_update_job(
                 "start_date": start_date,
                 "end_date": end_date,
                 "selected_dates": normalized_dates,
+                "categories": selected_categories,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -480,6 +547,7 @@ def run_update_job(
                 "start_date": start_date,
                 "end_date": end_date,
                 "selected_dates": normalize_date_list(selected_dates),
+                "categories": normalize_update_categories(categories),
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -497,6 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--end-date", required=True)
     run_parser.add_argument("--label", required=True)
     run_parser.add_argument("--dates", nargs="*")
+    run_parser.add_argument("--categories", default="")
     run_parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)
 
@@ -506,6 +575,7 @@ def main(argv: list[str] | None = None) -> int:
             end_date=args.end_date,
             label=args.label,
             selected_dates=args.dates,
+            categories=args.categories or None,
             parent_pid=args.parent_pid,
         )
     return 1

@@ -67,6 +67,7 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
         "min_report_date": None,
         "max_report_date": None,
         "report_date_counts": {},
+        "report_date_type_counts": {},
         "report_types": {},
         "error": None,
     }
@@ -126,6 +127,27 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
                 row["report_date"]: int(row["count"])
                 for row in report_dates
             }
+
+            report_date_types = conn.execute(
+                """
+                SELECT
+                    SUBSTR(TRIM(report_date), 1, 10) AS report_date,
+                    TRIM(report_type) AS report_type,
+                    COUNT(*) AS count
+                FROM reports
+                WHERE report_date IS NOT NULL AND TRIM(report_date) != ''
+                  AND report_type IS NOT NULL AND TRIM(report_type) != ''
+                  AND is_embedded = 1
+                GROUP BY SUBSTR(TRIM(report_date), 1, 10), TRIM(report_type)
+                ORDER BY SUBSTR(TRIM(report_date), 1, 10), TRIM(report_type)
+                """
+            ).fetchall()
+            date_type_counts: dict[str, dict[str, int]] = {}
+            for row in report_date_types:
+                date_key = row["report_date"]
+                type_key = row["report_type"]
+                date_type_counts.setdefault(date_key, {})[type_key] = int(row["count"])
+            info["report_date_type_counts"] = date_type_counts
     except sqlite3.Error as exc:
         info["error"] = str(exc)
 

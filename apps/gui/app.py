@@ -14,7 +14,7 @@ import streamlit.components.v1 as components
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from src.configs.config import REPORT_PDF_DIR
+from src.configs.config import CRAWLER_CATEGORIES, REPORT_PDF_DIR
 from src.core import data_update_jobs
 from src.core import conversation_store
 from src.core import issue_report_store
@@ -766,25 +766,7 @@ def _render_update_progress() -> None:
 
 
 def _iter_weekdays(start_date: date, end_date: date) -> list[date]:
-    if start_date > end_date:
-        start_date, end_date = end_date, start_date
-    days: list[date] = []
-    cursor = start_date
-    while cursor <= end_date:
-        if cursor.weekday() < 5:
-            days.append(cursor)
-        cursor = date.fromordinal(cursor.toordinal() + 1)
-    return days
-
-
-def _missing_update_dates(start_date: date, end_date: date, date_counts: dict[str, int]) -> list[str]:
-    today = date.today()
-    missing_dates = [
-        day.isoformat()
-        for day in _iter_weekdays(start_date, min(end_date, today))
-        if int(date_counts.get(day.isoformat(), 0) or 0) == 0
-    ]
-    return data_update_jobs.normalize_date_list(missing_dates)
+    return data_update_jobs.iter_weekdays(start_date, end_date)
 
 
 def _default_update_range(db_status: dict) -> tuple[date, date]:
@@ -809,12 +791,33 @@ def _render_data_update_controls(db_status: dict) -> None:
     job_active = _is_update_job_active(status)
     today = date.today()
     latest_range = data_update_jobs.build_update_range(last_date=db_status.get("max_report_date"), today=today)
-    date_counts = {
-        str(day).strip()[:10]: int(count)
-        for day, count in (db_status.get("report_date_counts") or {}).items()
+    date_type_counts = {
+        str(day).strip()[:10]: {
+            str(report_type): int(count)
+            for report_type, count in (counts or {}).items()
+        }
+        for day, counts in (db_status.get("report_date_type_counts") or {}).items()
     }
 
     st.subheader("데이터 업데이트")
+    category_options = data_update_jobs.normalize_update_categories("all")
+    default_categories = [
+        category
+        for category in data_update_jobs.normalize_update_categories(CRAWLER_CATEGORIES)
+        if category in category_options
+    ] or ["company"]
+    selected_categories = st.multiselect(
+        "업데이트 카테고리",
+        category_options,
+        default=default_categories,
+        format_func=lambda value: {
+            "company": "기업(company)",
+            "industry": "산업(industry)",
+            "economy": "경제(economy)",
+        }.get(value, value),
+        key="update_categories",
+        help="선택한 카테고리 중 하나라도 비어 있는 날짜를 업데이트 대상으로 포함합니다.",
+    )
     default_start, default_end = _default_update_range(db_status)
     min_update_date = _update_min_date(db_status)
     selected_range = st.date_input(
@@ -823,18 +826,29 @@ def _render_data_update_controls(db_status: dict) -> None:
         min_value=min_update_date,
         max_value=today,
         key="update_date_range",
-        help="선택 기간 중 이미 데이터가 있는 평일은 다운로드부터 제외됩니다.",
+        help="선택 기간 중 선택 카테고리가 모두 임베딩 완료된 평일은 다운로드부터 제외됩니다.",
     )
 
     if isinstance(selected_range, tuple) and len(selected_range) == 2:
         range_start, range_end = selected_range
-        target_dates = _missing_update_dates(range_start, range_end, date_counts)
-        skipped_count = len(_iter_weekdays(range_start, min(range_end, today))) - len(target_dates)
-        st.caption(
-            f"작업 대상: 임베딩 미완료 평일 {len(target_dates)}일"
-            + (f" · 임베딩 완료 {skipped_count}일 제외" if skipped_count > 0 else "")
-        )
-        if target_dates:
+        if not selected_categories:
+            target_dates = []
+            st.caption("업데이트할 카테고리를 하나 이상 선택해 주세요.")
+        else:
+            target_dates = data_update_jobs.missing_update_dates_by_category(
+                range_start,
+                range_end,
+                date_type_counts,
+                selected_categories,
+                today=today,
+            )
+            skipped_count = len(_iter_weekdays(range_start, min(range_end, today))) - len(target_dates)
+            category_label = ", ".join(selected_categories)
+            st.caption(
+                f"작업 대상: {category_label} 미완료 평일 {len(target_dates)}일"
+                + (f" · 선택 카테고리 임베딩 완료 {skipped_count}일 제외" if skipped_count > 0 else "")
+            )
+        if selected_categories and target_dates:
             if st.button(
                 "선택 기간 업데이트",
                 key="update_selected_range",
@@ -843,10 +857,11 @@ def _render_data_update_controls(db_status: dict) -> None:
             ):
                 data_update_jobs.start_update_job(
                     selected_dates=target_dates,
-                    label=f"선택 기간 {len(target_dates)}일",
+                    categories=selected_categories,
+                    label=f"선택 기간 {len(target_dates)}일 ({', '.join(selected_categories)})",
                 )
                 _sidebar_rerun()
-        else:
+        elif selected_categories:
             st.caption("선택 기간 내 업데이트할 임베딩 미완료 평일이 없습니다.")
     else:
         st.caption("업데이트할 시작일과 종료일을 선택해 주세요.")
