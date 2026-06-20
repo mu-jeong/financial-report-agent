@@ -1,6 +1,6 @@
-# Finance LLM
+﻿# Finance LLM
 
-## Quick Start: 개발을 몰라도 한 번에 실행하기
+## Quick Start: 간편하게 실행하기
 
 Windows에서 `RUN_QUICKSTART.bat`을 더블클릭하면 설치, OpenRouter API 키 설정, 실행일 포함 이전 7일 범위(총 최대 8일)의 리포트 수집, 임베딩 생성, 웹 화면 실행까지 자동으로 진행됩니다.
 
@@ -31,7 +31,7 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 - `report_date` 기준 날짜/월/분기/연도 필터링과 최신성 가중치(`RECENCY_WEIGHT`) 지원
 - VectorDB 검색 실패 시 short-term memory 영향을 제거하고 원질문으로 재검색
 - 답변의 `[숫자]` citation과 참고 문서 목록 연동
-- Streamlit GUI 대화 기록 저장, 대화 이름 변경/삭제, 참고 PDF 열기
+- Streamlit GUI 대화 기록 저장, 백그라운드 답변 생성, 대화 이름 변경/삭제, 참고 PDF 열기
 - FinanceDataReader 기반 주가 조회 tool calling
 - Streamlit GUI 실행 (CLI는 유지보수 전용 deprecated 모드)
 
@@ -168,6 +168,8 @@ python apps/cli/app.py --status
 
 GUI 대화 이력은 `data/conversations.db`에 저장됩니다. deprecated CLI도 기존 호환성을 위해 같은 저장소를 사용합니다. Streamlit 사이드바의 대화 목록에서 각 대화 오른쪽의 연필 버튼으로 이름을 변경하고 `×` 버튼으로 삭제할 수 있습니다. 삭제 후에는 다음 대화가 자동 선택되고, 삭제 UI가 화면에 남지 않도록 즉시 rerun합니다. 이 파일은 로컬 상태 파일이며 일반적으로 Git에 포함하지 않습니다.
 
+GUI 답변 생성은 백그라운드 thread에서 실행됩니다. 답변 생성 중인 대화는 입력창이 잠기고, 다른 대화로 이동해도 작업은 계속되며 완료/실패 상태가 toast와 대화 목록 배지로 표시됩니다.
+
 채팅 입력창 아래의 `⚠ 신고` 버튼은 현재 대화에서 발생한 문제를 텍스트 파일로 저장합니다. 신고 파일은 기본적으로 `debug/issue_report_*.txt`에 생성되며, `debug/` 폴더 내용은 Git에 포함하지 않습니다(`debug/.gitkeep`만 폴더 유지용). 민감정보가 포함될 수 있으므로 외부로 전달하기 전에 내용을 확인하세요.
 
 참고 문서의 `열기` 버튼은 브라우저 링크가 아니라 Streamlit 서버가 실행 중인 PC에서 PDF를 직접 엽니다. 파일은 `REPORT_PDF_DIR` 환경 변수의 폴더와 참고 문서의 파일명을 조합해 찾습니다. `REPORT_PDF_DIR`은 임베딩 파이프라인이 문서 폴더의 절대경로를 기준으로 `.env`에 자동 생성하거나 기존 값만 갱신합니다. 로컬 사용에는 적합하지만, 원격 서버에 배포한 경우에는 서버 PC에서 파일이 열립니다.
@@ -206,7 +208,7 @@ python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marke
 python -m pytest -q
 ```
 
-현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter, query rewrite, 후속 질문 검색 범위 재사용, OpenRouter embedding/rerank payload, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB Top-K/최신성 및 no-result 재시도 로직을 검증합니다.
+현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, OpenRouter embedding/rerank payload, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다.
 
 ### 평가용 테스트셋
 

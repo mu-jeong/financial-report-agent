@@ -171,7 +171,7 @@ def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch
     assert "끝부분" in saved_report
     assert "--- Message 10 ---" in saved_report
     assert '"rerank_count": 1' in saved_report
-    assert "파일 내용을 복사하거나 .txt 파일을 이메일에 첨부" in saved_report
+    assert "파일 내용을 복사하여 이메일의 내용에 첨부" in saved_report
 
     reports = issue_report_store.list_issue_reports("thread-1")
     assert reports[0]["id"] == report_result["id"]

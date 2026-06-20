@@ -18,7 +18,7 @@ Finance LLM은 증권사 PDF 리포트를 수집, 추출, 색인하고 질문에
 | Rerank | 기본 비활성화, 필요 시 OpenRouter `cohere/rerank-v3.5` |
 | 검색/답변 그래프 | LangGraph nodes in `src/nodes/` |
 | 답변 참조 링크 | `src/utils/citations.py` |
-| UI | Streamlit `apps/gui/app.py` 중심. CLI `apps/cli/app.py`는 deprecated 호환 모드 |
+| UI | Streamlit `apps/gui/app.py` 중심. GUI 답변 생성은 백그라운드 thread로 실행. CLI `apps/cli/app.py`는 deprecated 호환 모드 |
 
 ## 2. 데이터 흐름
 
@@ -116,6 +116,7 @@ RERANK_MODEL=cohere/rerank-v3.5
 `src/core/conversation_store.py`는 SQLite `data/conversations.db`에 thread와 message를 저장합니다.
 
 - GUI는 저장된 thread와 메시지를 불러와 화면에 표시합니다.
+- GUI 답변 생성은 백그라운드 thread에서 실행되고, assistant 메시지는 먼저 `status=running`으로 저장된 뒤 완료 시 `status=succeeded`, 실패 시 `status=failed` metadata로 갱신됩니다.
 - deprecated CLI는 기존 호환성을 위해 기본 thread를 계속 사용하지만 신규 기능 개발 대상이 아닙니다.
 - assistant 메시지는 참고 문서와 rerank 정보를 metadata로 함께 저장할 수 있습니다.
 - GUI assistant 메시지는 성공 시 `search_scope` metadata를 추가로 저장합니다. 값에는 `route`, `search_filters`, `temporal_context`, `scope_source`, `file_names`가 포함될 수 있으며, 이후 같은 thread의 후속 질문에서 가장 최근 성공 답변의 scope를 재사용합니다.
