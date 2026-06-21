@@ -1,4 +1,4 @@
-﻿"""Persistent conversation storage for CLI and Streamlit sessions."""
+"""Persistent conversation storage for CLI and Streamlit sessions."""
 
 from __future__ import annotations
 
@@ -60,11 +60,20 @@ def init_conversation_db(db_path: str | None = None) -> None:
             CREATE TABLE IF NOT EXISTS conversation_threads (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        thread_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(conversation_threads)").fetchall()
+        }
+        if "pinned" not in thread_columns:
+            conn.execute(
+                "ALTER TABLE conversation_threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_messages (
@@ -89,8 +98,8 @@ def create_thread(name: str = "새로운 대화", thread_id: str | None = None) 
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO conversation_threads (id, name, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT OR IGNORE INTO conversation_threads (id, name, pinned, created_at, updated_at)
+            VALUES (?, ?, 0, ?, ?)
             """,
             (new_id, name, now, now),
         )
@@ -127,6 +136,17 @@ def delete_all_threads() -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM conversation_messages")
         conn.execute("DELETE FROM conversation_threads")
+        conn.commit()
+
+
+def set_thread_pinned(thread_id: str, pinned: bool) -> None:
+    """Pin or unpin a conversation thread in the sidebar ordering."""
+    init_conversation_db()
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE conversation_threads SET pinned = ?, updated_at = ? WHERE id = ?",
+            (1 if pinned else 0, _utc_now(), thread_id),
+        )
         conn.commit()
 
 
@@ -253,12 +273,18 @@ def list_threads() -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT id, name, created_at, updated_at
+            SELECT id, name, pinned, created_at, updated_at
             FROM conversation_threads
-            ORDER BY updated_at DESC
+            ORDER BY pinned DESC, updated_at DESC
             """
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [
+        {
+            **dict(row),
+            "pinned": bool(row["pinned"]),
+        }
+        for row in rows
+    ]
 
 
 def list_messages(thread_id: str) -> list[dict[str, Any]]:

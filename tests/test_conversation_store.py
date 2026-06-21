@@ -145,3 +145,22 @@ def test_conversation_store_repairs_legacy_question_mark_thread_name(tmp_path, m
 
     assert conversation_store.list_threads()[0]["id"] == thread_id
     assert conversation_store.list_threads()[0]["name"] == "새로운 대화"
+
+def test_conversation_store_pins_threads_before_recent_unpinned_threads(tmp_path, monkeypatch):
+    db_path = tmp_path / "conversations.db"
+    monkeypatch.setattr(conversation_store, "CONVERSATION_DB_PATH", str(db_path))
+
+    pinned_id = conversation_store.create_thread("고정 대화")
+    recent_id = conversation_store.create_thread("최근 대화")
+    conversation_store.set_thread_pinned(pinned_id, True)
+
+    threads = conversation_store.list_threads()
+
+    assert [thread["id"] for thread in threads] == [pinned_id, recent_id]
+    assert threads[0]["pinned"] is True
+    assert threads[1]["pinned"] is False
+
+    conversation_store.set_thread_pinned(pinned_id, False)
+
+    assert all(thread["pinned"] is False for thread in conversation_store.list_threads())
+

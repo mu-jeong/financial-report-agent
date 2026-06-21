@@ -22,6 +22,12 @@ from src.core import issue_report_store
 from src.core import monitoring
 from src.core import pdf_extraction
 from src.core import compare_pdf_extractors
+from src.core.chat_ux import (
+    build_clipboard_copy_html,
+    build_no_result_suggestions,
+    build_scope_notice,
+    build_thread_title,
+)
 
 data_update_jobs = importlib.reload(data_update_jobs)
 conversation_store = importlib.reload(conversation_store)
@@ -44,6 +50,7 @@ list_messages = conversation_store.list_messages
 list_threads = conversation_store.list_threads
 mark_interrupted_running_messages_failed = conversation_store.mark_interrupted_running_messages_failed
 rename_thread = conversation_store.rename_thread
+set_thread_pinned = conversation_store.set_thread_pinned
 summarize_chat_messages = monitoring.summarize_chat_messages
 summarize_evaluation_dataset = monitoring.summarize_evaluation_dataset
 update_message = conversation_store.update_message
@@ -236,6 +243,15 @@ def _render_issue_report_control(
             "내용을 이메일에 작성해주세요."
         )
         st.code(report_result["file_path"], language="text")
+        try:
+            report_text = Path(report_result["file_path"]).read_text(encoding="utf-8")
+        except OSError:
+            report_text = ""
+        if report_text:
+            components.html(
+                build_clipboard_copy_html(report_text, button_label="신고 내용 복사"),
+                height=48,
+            )
         st.toast(f"이슈 리포트가 저장되었습니다. (#{report_result['id']})", icon="✅")
 
     with st.container(key="issue_report_control"):
@@ -340,6 +356,8 @@ def _run_chat_response_job(
         metadata = {
             "status": "succeeded",
             "job_id": job_id,
+            "question": user_query,
+            "no_vector_results": bool(final_state.get("no_vector_results")),
             "rerank_info": rerank_info,
         }
         metadata.update(
@@ -351,6 +369,8 @@ def _run_chat_response_job(
         )
         if search_scope:
             metadata["search_scope"] = search_scope
+        if scope_notice := build_scope_notice(final_state):
+            metadata["scope_notice"] = scope_notice
         update_message(
             assistant_message_id,
             answer,
@@ -512,7 +532,10 @@ def _resolve_report_pdf(file_name: str) -> Path | None:
 def _open_report_pdf(file_name: str) -> tuple[bool, str | None]:
     pdf_path = _resolve_report_pdf(file_name)
     if pdf_path is None:
-        return False, "PDF 파일을 찾을 수 없습니다. REPORT_PDF_DIR 설정과 파일명을 확인해 주세요."
+        return (
+            False,
+            "PDF 파일을 찾을 수 없습니다. 데이터 업데이트를 다시 실행하거나 REPORT_PDF_DIR 설정을 확인해 주세요.",
+        )
     try:
         if sys.platform.startswith("win"):
             os.startfile(str(pdf_path))  # type: ignore[attr-defined]
@@ -837,6 +860,8 @@ def _render_data_update_controls(db_status: dict) -> None:
     }
 
     st.subheader("데이터 업데이트")
+    if st.session_state.pop("show_data_update_hint", False):
+        st.info("아래에서 기간과 카테고리를 선택한 뒤 데이터 업데이트를 실행하세요.")
     category_options = data_update_jobs.normalize_update_categories("all")
     default_categories = [
         category
@@ -959,6 +984,31 @@ def _render_sources(
                     st.warning(error_message)
 
 
+def _render_no_result_actions(message: dict, *, index: int) -> None:
+    metadata = message.get("metadata") or {}
+    if not metadata.get("no_vector_results"):
+        return
+    suggestions = build_no_result_suggestions(
+        metadata.get("question") or message.get("content", ""),
+        metadata.get("search_filters") or {},
+    )
+    if not suggestions:
+        return
+    st.caption("검색 조건을 바꿔 다시 시도할 수 있습니다.")
+    columns = st.columns(len(suggestions), gap="small")
+    for suggestion, column in zip(suggestions, columns):
+        if column.button(
+            suggestion["label"],
+            key=f"no_result_suggestion_{message.get('id', index)}_{suggestion['label']}",
+            use_container_width=True,
+        ):
+            if suggestion["query"] == "__open_data_update__":
+                st.session_state.show_data_update_hint = True
+            else:
+                st.session_state.pending_suggested_query = suggestion["query"]
+            _app_rerun()
+
+
 def _render_message(message: dict, *, index: int) -> None:
     message_anchor_id = _chat_message_anchor_id(message.get("id"), index)
     st.markdown(
@@ -978,6 +1028,8 @@ def _render_message(message: dict, *, index: int) -> None:
             if status == "failed":
                 st.error(message["content"])
                 return
+            if scope_notice := metadata.get("scope_notice"):
+                st.caption(scope_notice)
             rerank_info = metadata.get("rerank_info") or []
             source_count = len(group_sources_by_document(rerank_info))
             display_content = remove_unavailable_citations(
@@ -1011,6 +1063,7 @@ def _render_message(message: dict, *, index: int) -> None:
                 used_ranks=source_filter_ranks,
                 expanded=bool(used_ranks) and linked_content != display_content,
             )
+            _render_no_result_actions(message, index=index)
         else:
             st.markdown(message["content"])
 
@@ -1074,8 +1127,14 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
 
     badge = _thread_status_badge(thread_id)
     status_prefix = f"{badge} " if badge else ""
-    label = f"> {status_prefix}{thread['name']}" if selected else f"- {status_prefix}{thread['name']}"
-    thread_col, edit_col, delete_col = st.columns([0.72, 0.14, 0.14], gap="small", vertical_alignment="center")
+    pin_prefix = "★ " if thread.get("pinned") else ""
+    label = f"> {status_prefix}{pin_prefix}{thread['name']}" if selected else f"- {status_prefix}{pin_prefix}{thread['name']}"
+    pin_col, thread_col, edit_col, delete_col = st.columns([0.12, 0.60, 0.14, 0.14], gap="small", vertical_alignment="center")
+    pin_label = "★" if thread.get("pinned") else "☆"
+    pin_help = "고정 해제" if thread.get("pinned") else "대화 고정"
+    if pin_col.button(pin_label, key=f"pin_thread_{thread_id}", use_container_width=True, help=pin_help):
+        set_thread_pinned(thread_id, not bool(thread.get("pinned")))
+        _sidebar_rerun()
     if thread_col.button(label, key=f"thread_{thread_id}", use_container_width=True):
         _set_current_thread(thread_id)
     if edit_col.button("✎", key=f"edit_thread_{thread_id}", use_container_width=True, help="이름 변경"):
@@ -1140,9 +1199,13 @@ def render_chat(current_id: str, current_thread: dict) -> None:
             messages=messages,
         )
 
+    suggested_query = st.session_state.pop("pending_suggested_query", None)
+    if suggested_query and not has_running_job:
+        user_query = suggested_query
+
     if user_query:
         if not messages and (current_thread["name"] == "새로운 대화" or current_thread["name"].startswith("대화 ")):
-            thread_name = user_query[:15] + "..."
+            thread_name = build_thread_title(user_query)
             rename_thread(current_id, thread_name)
         else:
             thread_name = current_thread["name"]
