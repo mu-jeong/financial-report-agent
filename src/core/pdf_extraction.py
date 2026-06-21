@@ -19,6 +19,7 @@ SUPPORTED_EXTRACTION_ENGINES = {
     "pymupdf",
     "marker",
     "opendataloader",
+    "docling",
     "pdf-to-markdown",
 }
 ENGINE_ALIASES = {
@@ -30,6 +31,11 @@ ENGINE_ALIASES = {
 }
 
 _MARKER_MODELS = None
+_MARKER_TABLE_PROCESSORS = {
+    "TableProcessor",
+    "LLMTableProcessor",
+    "LLMTableMergeProcessor",
+}
 _PLAIN_TABLE_HEADING_RE = re.compile(
     r"(?i)\b("
     r"consensus\s*data|financial\s*data|financial\s*summary|earnings\s*forecast|"
@@ -388,6 +394,8 @@ def _extract_pdf_text(pdf_path: Path, engine: str) -> str:
         return _extract_marker_markdown(pdf_path)
     if engine == "opendataloader":
         return _extract_opendataloader_markdown(pdf_path)
+    if engine == "docling":
+        return _extract_docling_markdown(pdf_path)
     if engine == "pdf-to-markdown":
         return _extract_pspdfkit_pdf_to_markdown(pdf_path)
     return _extract_pymupdf_text(pdf_path)
@@ -403,17 +411,55 @@ def _extract_marker_markdown(pdf_path: Path) -> str:
         "force_ocr": False,
     }
     config_parser = ConfigParser(config_dict)
+    processor_list = (
+        config_parser.get_processors()
+        or _marker_processor_list_without_table_processors(PdfConverter)
+    )
 
     converter = PdfConverter(
         config=config_parser.generate_config_dict(),
         artifact_dict=get_marker_models(),
-        processor_list=config_parser.get_processors(),
+        processor_list=processor_list,
         renderer=config_parser.get_renderer(),
         llm_service=config_parser.get_llm_service(),
     )
 
     rendered = converter(str(pdf_path))
     return rendered.markdown
+
+
+def _marker_processor_list_without_table_processors(pdf_converter_cls) -> list[str]:
+    """Use Marker's processor override hook while omitting table processors."""
+    return [
+        f"{processor.__module__}.{processor.__name__}"
+        for processor in getattr(pdf_converter_cls, "default_processors", ())
+        if processor.__name__ not in _MARKER_TABLE_PROCESSORS
+    ]
+
+
+def _extract_docling_markdown(pdf_path: Path) -> str:
+    try:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter
+        from docling.document_converter import PdfFormatOption
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "docling is not installed. Install the optional parser with `pip install docling`."
+        ) from exc
+
+    # Docling's PDF pipeline has a first-class table-structure option. Keep it
+    # disabled so this engine does not spend work reconstructing tables before
+    # the shared cross-engine table scrubber removes table-shaped output.
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_table_structure = False
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+        }
+    )
+    result = converter.convert(str(pdf_path))
+    return result.document.export_to_markdown()
 
 
 def _extract_pspdfkit_pdf_to_markdown(pdf_path: Path) -> str:
@@ -509,6 +555,57 @@ def _get_windows_env(name: str, target: str) -> str | None:
 def _extract_pymupdf_text(pdf_path: Path) -> str:
     doc = fitz.open(str(pdf_path))
     try:
-        return "\n\n".join(page.get_text("text") for page in doc)
+        page_texts: list[str] = []
+        for page in doc:
+            table_bboxes = _find_pymupdf_table_bboxes(page)
+            if not table_bboxes:
+                page_texts.append(page.get_text("text"))
+                continue
+
+            non_table_blocks = []
+            for block in page.get_text("blocks", sort=True):
+                block_text = str(block[4] or "").strip()
+                if not block_text:
+                    continue
+                block_bbox = fitz.Rect(block[:4])
+                if _intersects_any(block_bbox, table_bboxes):
+                    continue
+                non_table_blocks.append(block_text)
+            page_texts.append("\n\n".join(non_table_blocks))
+
+        return "\n\n".join(page_texts)
     finally:
         doc.close()
+
+
+def _find_pymupdf_table_bboxes(page) -> list[fitz.Rect]:
+    """Detect PyMuPDF table regions so normal text extraction can skip them."""
+    table_bboxes: list[fitz.Rect] = []
+    seen: set[tuple[float, float, float, float]] = set()
+
+    # PyMuPDF supports both line-based and text-position based table detection.
+    # Run both so borderless financial tables are also excluded when possible.
+    for kwargs in ({}, {"strategy": "text"}):
+        try:
+            finder = page.find_tables(**kwargs)
+        except Exception as exc:
+            logger.debug("  PyMuPDF table detection failed with %s: %s", kwargs, exc)
+            continue
+
+        for table in getattr(finder, "tables", []) or []:
+            bbox = getattr(table, "bbox", None)
+            if bbox is None:
+                continue
+
+            rect = fitz.Rect(bbox)
+            key = tuple(round(value, 2) for value in rect)
+            if key in seen:
+                continue
+            seen.add(key)
+            table_bboxes.append(rect)
+
+    return table_bboxes
+
+
+def _intersects_any(rect: fitz.Rect, bboxes: list[fitz.Rect]) -> bool:
+    return any(rect.intersects(bbox) for bbox in bboxes)

@@ -66,7 +66,7 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | `CHILD_CHUNK_SIZE` | child chunk 크기 |
 | `CHUNK_SIZE` | parent-child 미사용 시 fallback/general chunk 크기 |
 | `CHUNK_OVERLAP` | fallback/general chunk overlap |
-| `EXTRACTION_ENGINE` | PDF 추출 엔진. `pymupdf`, `opendataloader`, `marker` 중 선택 |
+| `EXTRACTION_ENGINE` | PDF 추출 엔진. `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 선택 |
 
 ## 크롤러 설정
 

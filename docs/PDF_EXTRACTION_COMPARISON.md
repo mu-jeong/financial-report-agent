@@ -1,14 +1,18 @@
 # PDF 추출 엔진 비교
 
-Finance LLM은 PDF에서 텍스트 또는 Markdown을 추출하기 위해 여러 엔진을 지원합니다. 기본 엔진은 `pymupdf`이며, 필요에 따라 `opendataloader` 또는 `marker`를 비교해 사용할 수 있습니다.
+Finance LLM은 PDF에서 텍스트 또는 Markdown을 추출하기 위해 여러 엔진을 지원합니다. 기본 엔진은 `pymupdf`입니다. 선택형 엔진은 로컬 런타임 요구사항이 다르므로 비교 도구로 먼저 샘플 품질과 속도를 확인한 뒤 production 설정에 반영하세요.
 
 ## 지원 엔진
 
 | 엔진 | 특징 | 주의사항 |
 | --- | --- | --- |
-| `pymupdf` | 빠르고 설치 부담이 낮은 기본 추출 엔진 | 표/레이아웃이 복잡한 일부 PDF에서는 구조 보존이 약할 수 있음 |
-| `opendataloader` | Markdown 형태 추출을 목표로 하는 LangChain OpenDataLoader 연동 | Java 11+와 `PATH`, `JAVA_HOME`, `JDK_HOME`, `JRE_HOME` 환경 설정이 필요할 수 있음 |
-| `marker` | 품질 높은 Markdown 추출을 목표로 함 | CPU 환경에서는 무겁고 느릴 수 있으며 의존성이 큼 |
+| `pymupdf` | 빠르고 설치 부담이 낮은 기본 추출 엔진 | PyMuPDF `find_tables()`로 표 영역을 찾아 겹치는 텍스트 block을 제외한 뒤 일반 텍스트를 추출합니다. |
+| `opendataloader` | LangChain OpenDataLoader PDF 연동. JSON 출력에서 table node를 제거한 뒤 텍스트화합니다. | Java 11+와 `PATH`, `JAVA_HOME`, `JDK_HOME`, `JRE_HOME` 환경 설정이 필요할 수 있습니다. |
+| `marker` | 시각 구조 기반 Markdown 추출을 목표로 하는 Marker 연동 | CPU 환경에서는 무겁고 느릴 수 있습니다. table 관련 Marker processor는 제외하고 실행합니다. |
+| `docling` | Docling PDF pipeline 기반 Markdown 추출 | 기본 requirements에는 포함하지 않는 선택형 엔진입니다. 사용 전 `pip install docling`이 필요하고, 코드에서는 `do_table_structure=False`로 표 구조 인식을 끕니다. |
+| `pdf-to-markdown` | Nutrient/PSPDFKit `pdf-to-markdown` CLI stdout을 사용 | Python 패키지가 아니라 CLI가 `PATH`에 있어야 합니다. 예: `npm install -g @pspdfkit/pdf-to-markdown`. |
+
+지원 alias: `datalab-marker`, `marker-pdf` → `marker`; `pspdfkit`, `nutrient`, `nutrient-pdf-to-markdown` → `pdf-to-markdown`.
 
 ## production 엔진 설정
 
@@ -18,25 +22,37 @@ Finance LLM은 PDF에서 텍스트 또는 Markdown을 추출하기 위해 여러
 EXTRACTION_ENGINE=pymupdf
 ```
 
-기본값은 `src/configs/settings.py`에 정의되어 있고, `src/configs/config.py`를 통해 기존 코드와 호환됩니다. `opendataloader`나 `marker`는 로컬 런타임 요구사항을 확인한 뒤 사용하세요.
+기본값과 설명은 `src/configs/settings.py`에 정의되어 있고, 실제 실행값은 `src/configs/config.py`를 통해 로드됩니다. `marker`, `opendataloader`, `docling`, `pdf-to-markdown`는 선택형 엔진이므로 로컬 런타임 요구사항을 확인한 뒤 사용하세요.
+
+## 표 제거 계약
+
+현재 색인 파이프라인은 모든 PDF 추출 옵션에서 표가 downstream으로 들어가지 않도록 처리합니다.
+
+1. `pymupdf`: `page.find_tables()`의 기본 line 기반 전략과 `strategy="text"`를 모두 시도해 table bbox를 수집하고, bbox와 겹치는 텍스트 block을 제외합니다.
+2. `marker`: Marker의 processor override hook을 사용해 `TableProcessor`, `LLMTableProcessor`, `LLMTableMergeProcessor`를 제외합니다.
+3. `opendataloader`: `format="json"`으로 받은 구조에서 `table`, `table row`, `table cell` 및 연결된 table caption을 건너뜁니다.
+4. `docling`: `PdfPipelineOptions.do_table_structure=False`로 표 구조 인식을 비활성화합니다.
+5. `pdf-to-markdown`: CLI 자체에 table-off 옵션이 없으므로 공통 후처리에서 Markdown/HTML/plain-text table block을 제거합니다.
+
+그 후 모든 엔진 출력은 `drop_markdown_tables()`와 `clean_extracted_text()`를 통과합니다. `--raw` 비교 모드에서도 table 제거는 유지되고, 금융 리포트 cleanup filter만 생략됩니다.
 
 ## downstream 처리 계약
 
 추출 엔진이 달라도 embedding pipeline의 downstream 흐름은 동일합니다.
 
 1. PDF에서 텍스트 또는 Markdown 추출
-2. 금융 리포트 cleanup filter 적용
+2. 표 제거 및 금융 리포트 cleanup filter 적용
 3. Markdown header 기준 1차 분할
 4. `USE_PARENT_CHILD=true`이면 parent-child chunking 적용
 5. `USE_PARENT_CHILD=false`이면 recursive chunking 사용
 6. OpenRouter 임베딩 모델로 벡터 생성
 7. FAISS와 SQLite에 저장
 
-`marker` 또는 `opendataloader`가 production 추출 중 실패하면 pipeline은 PyMuPDF로 fallback합니다.
+선택한 production 엔진이 실패하면 `allow_fallback=True` 기본값에 따라 PyMuPDF로 fallback합니다. `pymupdf` 자체가 실패하거나 비교 CLI에서 `allow_fallback=False`를 사용하는 경우에는 오류로 기록됩니다.
 
 ## 엔진 비교 실행
 
-가벼운 비교:
+가벼운 비교(기본 비교 엔진은 `pymupdf`, `opendataloader`):
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10
@@ -48,10 +64,16 @@ python -m src.core.compare_pdf_extractors --limit 10
 python -m src.core.compare_pdf_extractors data/downloaded --limit 20
 ```
 
-Marker까지 포함:
+설치 부담이 낮은 엔진 위주 비교:
 
 ```bash
 python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker --limit 5
+```
+
+선택형 엔진까지 모두 비교하려면 `docling` 패키지와 `pdf-to-markdown` CLI를 먼저 준비한 뒤 실행합니다.
+
+```bash
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker docling pdf-to-markdown --limit 5
 ```
 
 cleanup filter 적용 전 raw 출력 비교:
@@ -70,16 +92,23 @@ python -m src.core.compare_pdf_extractors --limit 1 --sample-dir reports/pdf_sam
 
 ## 출력 파일
 
-비교 결과는 기본적으로 `reports/` 아래에 저장됩니다.
+CLI 비교 결과는 기본적으로 다음 파일에 저장됩니다.
 
 - `reports/pdf_extraction_compare.csv`
 - `reports/pdf_extraction_compare.json`
+
+Streamlit Monitoring Mode의 Parsing engine evaluation은 `run_id`별 파일을 `reports/pdf_extraction/` 아래에 저장합니다.
+
+- `reports/pdf_extraction/<run_id>.csv`
+- `reports/pdf_extraction/<run_id>.json`
+- `reports/pdf_extraction/<run_id>_samples/` (sample 저장을 켠 경우)
 
 ## 주요 지표
 
 비교 프로세스는 다음 정보를 기록합니다.
 
 - 추출 성공/실패 상태
+- 실제 사용 엔진과 fallback 여부
 - 소요 시간
 - 문자 수
 - token 추정치
@@ -93,7 +122,7 @@ JSON summary로 엔진별 경향을 먼저 보고, CSV row로 특정 PDF의 이�
 
 ## 인덱스 재생성
 
-추출 엔진, 임베딩 모델, chunk 전략을 바꾸면 chunk 텍스트가 달라질 수 있습니다. production 인덱스를 깨끗하게 다시 만들려면 기존 FAISS와 임베딩 상태를 초기화한 뒤 재실행하세요.
+추출 엔진, 임베딩 모델, chunk 전략을 바꾸면 chunk 텍스트와 벡터가 달라질 수 있습니다. production 인덱스를 깨끗하게 다시 만들려면 기존 FAISS와 임베딩 상태를 초기화한 뒤 재색인하세요.
 
 ```powershell
 Remove-Item -Recurse -Force data\vector_db

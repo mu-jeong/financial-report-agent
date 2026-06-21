@@ -1,4 +1,4 @@
-# Finance LLM
+﻿# Finance LLM
 
 ## Quick Start: 간편하게 실행하기
 
@@ -24,7 +24,7 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 - 증권사 리포트 PDF 다운로드 및 파일명 기반 메타데이터 파싱
 - `company`, `industry`, `economy` 카테고리별 리포트 수집
 - SQLite `reports` 테이블과 FAISS 벡터 인덱스 동기화
-- PyMuPDF, OpenDataLoader, Marker 중 선택 가능한 PDF 텍스트 추출 엔진
+- PyMuPDF, OpenDataLoader, Marker, Docling, pdf-to-markdown 중 선택 가능한 PDF 텍스트 추출 엔진
 - Parent-Child Chunking 기반 문맥 확장 검색
 - LangGraph 기반 query rewrite, routing, RDB 검색, VectorDB 검색, 답변 생성
 - SQL guardrail: `SELECT`와 `reports` 테이블 중심의 read-only SQLite 접근
@@ -195,11 +195,13 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## PDF 추출 엔진 비교
 
-`EXTRACTION_ENGINE` can be set to one of `pymupdf`, `marker`, `opendataloader`, or `pdf-to-markdown`.
+`EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있습니다. `pymupdf`가 기본값이고, `docling`과 `pdf-to-markdown`은 각각 별도 설치/CLI가 필요한 선택형 엔진입니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다.
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10
-python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker pdf-to-markdown --limit 5
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker --limit 5
+# 선택형 엔진까지 비교하려면 런타임 요구사항을 설치한 뒤 실행합니다.
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker docling pdf-to-markdown --limit 5
 ```
 
 자세한 내용은 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.
@@ -210,7 +212,7 @@ python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marke
 python -m pytest -q
 ```
 
-현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, OpenRouter embedding/rerank payload, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다.
+현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, OpenRouter embedding/rerank payload, PDF 추출 엔진/표 제거 계약, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다.
 
 ### 평가용 테스트셋
 
@@ -232,9 +234,9 @@ python -m pytest tests/test_evaluation_dataset.py -q
 - FAISS의 `index.pkl`은 pickle 역직렬화를 사용하므로 신뢰할 수 없는 파일을 로드하지 마세요.
 - 로컬 GUI에서 PDF `열기` 기능은 Streamlit 서버가 실행 중인 PC 기준으로 동작합니다. 원격 서버에 배포하면 서버 PC에서 파일을 열려고 시도합니다.
 
-## Monitoring Mode 계획 및 TODO
+## Monitoring Mode
 
-Monitoring Mode는 이름 그대로 성능개선을 위한 지표 모니터링 모드입니다. 일반 사용자 화면을 복잡하게 만들지 않으면서 parsing, chunking, retrieval/rerank, 모델 변경에 따른 답변 변화 최소화, latency/비용 같은 개선 지표를 별도 대시보드에서 추적합니다. 일반 GUI에서는 검색 준비 상태, 상세 인덱스 상태, latency breakdown, rerank 점수 같은 관측 정보를 숨기고, Monitoring Mode 화면에서만 노출하는 방향으로 개발합니다.
+Monitoring Mode는 성능 개선과 회귀 확인을 위한 개발자용 지표 모니터링 모드입니다. 일반 채팅 UX와 분리된 `Monitoring` 탭에서 데이터/설정 상태, 고정 평가 테스트셋 커버리지, 대화별 route/source/latency metadata, PDF parsing engine 비교 결과를 확인합니다. 일반 GUI에서는 이 진단 정보를 숨기고, `.env`에서 명시적으로 켰을 때만 노출합니다.
 
 ### 실행 방법
 
@@ -250,7 +252,7 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 상단에 `Chat` / `Monitoring` 탭이 생기고, `Monitoring` 탭에서 데이터/설정 상태, 고정 평가 테스트셋 커버리지, 현재 대화의 route/source/latency 지표를 확인할 수 있습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 상단에 `Chat` / `Monitoring` 탭이 생기고, `Monitoring` 탭에서 데이터/설정 상태, 고정 평가 테스트셋 커버리지, PDF parsing engine 비교 실행/결과, 현재 대화의 route/source/latency 지표를 확인할 수 있습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
 
 ### 테스트 방법
 
@@ -267,12 +269,18 @@ python -m pytest -q
 - API 비용, latency, Top-K 품질, 필터 적용 결과를 한 화면에서 추적
 - 일반 사용자 UX와 개발자 진단 UX를 분리
 
+### 현재 구현된 화면
+
+- Data status: 다운로드 PDF, DB row, 임베딩 완료/대기, FAISS 파일, 주요 설정 상태
+- Evaluation dataset: 고정 평가셋 case 수, route coverage, monitoring dimension 분포
+- Parsing engine evaluation: 선택한 PDF/폴더를 여러 엔진으로 추출해 latency, 문자 수, block 수, table-like line 등 지표를 CSV/JSON/sample로 저장
+- Conversation metrics: 현재 대화의 route, source 수, latency, monitoring metadata 요약
+
 ### TODO
 
-- [ ] 일반 사용자 UX와 분리된 Monitoring Mode의 진입 방식과 노출 범위를 정합니다.
-- [ ] 데이터 준비 상태와 검색 가능 여부를 한눈에 파악할 수 있는 대시보드 방향을 잡습니다.
-- [ ] 질문 처리 흐름을 추적해 검색 실패, 라우팅 오류, 답변 품질 저하 원인을 확인할 수 있게 합니다.
+- [x] 일반 사용자 UX와 분리된 Monitoring Mode의 진입 방식과 노출 범위를 정합니다.
+- [x] 데이터 준비 상태와 검색 가능 여부를 한눈에 파악할 수 있는 대시보드 방향을 잡습니다.
+- [x] 질문 처리 흐름을 추적해 검색 실패, 라우팅 오류, 답변 품질 저하 원인을 확인할 수 있게 합니다.
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
-- [ ] 디버깅 결과를 안전하게 공유할 수 있도록 민감정보를 제외한 export 방식을 검토합니다.
-- [ ] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.
+- [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.

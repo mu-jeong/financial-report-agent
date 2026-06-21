@@ -8,7 +8,7 @@ Finance LLM은 증권사 PDF 리포트를 수집, 추출, 색인하고 질문에
 | --- | --- |
 | 데이터 수집 | `src/core/report_crawler.py` |
 | GUI 백그라운드 업데이트 | `src/core/data_update_jobs.py` |
-| PDF 추출 | `src/core/pdf_extraction.py`, `src/core/compare_pdf_extractors.py` |
+| PDF 추출 | `src/core/pdf_extraction.py`, `src/core/compare_pdf_extractors.py` (`pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown`) |
 | 메타데이터 저장 | SQLite `data/reports.db` |
 | 대화 저장 | SQLite `data/conversations.db` |
 | 임베딩 색인 | FAISS `data/vector_db` |
@@ -54,13 +54,16 @@ Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 �
 `src/core/embed_pipeline.py`는 미처리 PDF를 가져와 다음 순서로 처리합니다.
 
 1. `extract_pdf_text()`로 PDF 텍스트 또는 Markdown을 추출합니다.
+   - 지원 엔진은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown`입니다.
+   - 선택 엔진이 실패하면 기본 설정에서는 PyMuPDF fallback을 사용합니다.
+   - 모든 엔진 출력은 색인 전에 표 제거 계약을 통과합니다. PyMuPDF는 `find_tables()` bbox를 제외하고, Marker는 table processor를 빼며, OpenDataLoader JSON table node와 Docling table structure는 비활성/제거합니다. 별도 off 옵션이 없는 CLI 출력은 공통 Markdown/HTML/plain-text table 제거 후처리를 거칩니다.
 2. `MarkdownHeaderTextSplitter`와 `RecursiveCharacterTextSplitter`로 문서를 chunk로 나눕니다.
 3. `USE_PARENT_CHILD=true`이면 parent chunk는 SQLite `parent_chunks`에 저장하고 child chunk를 FAISS 검색 대상으로 사용합니다.
 4. `build_embeddings_model()`이 OpenRouter 임베딩 모델을 생성합니다.
 5. FAISS 인덱스를 새로 만들거나 기존 인덱스에 추가합니다.
 6. `reports.is_embedded=1`로 처리 완료 표시합니다.
 
-임베딩 모델이나 chunk 전략을 바꿀 때는 FAISS 인덱스를 초기화하고 재색인해야 합니다.
+추출 엔진, 임베딩 모델, chunk 전략을 바꿀 때는 FAISS 인덱스를 초기화하고 재색인해야 합니다.
 
 ## 5. 검색 계층
 

@@ -1237,8 +1237,8 @@ def _render_parsing_engine_evaluation() -> None:
             default=default_engines,
             help=(
                 "Optional parsers are opt-in: opendataloader requires Java, "
-                "marker can be heavy, and pdf-to-markdown requires the "
-                "@pspdfkit/pdf-to-markdown CLI on PATH."
+                "docling requires `pip install docling`, marker can be heavy, "
+                "and pdf-to-markdown requires the @pspdfkit/pdf-to-markdown CLI on PATH."
             ),
         )
         col1, col2, col3 = st.columns(3)

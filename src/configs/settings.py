@@ -294,7 +294,7 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 name="EXTRACTION_ENGINE",
                 default="pymupdf",
                 parser=as_lower_str,
-                description="PDF extraction engine: pymupdf, marker, or opendataloader.",
+                description="PDF extraction engine: pymupdf, marker, opendataloader, docling, or pdf-to-markdown.",
                 section="Embedding",
             ),
         ),

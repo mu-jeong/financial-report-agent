@@ -54,6 +54,7 @@ def test_summarize_groups_success_and_errors_by_engine():
 
 def test_normalize_engine_accepts_opendataloader():
     assert normalize_engine(" OpenDataLoader ") == "opendataloader"
+    assert normalize_engine(" docling ") == "docling"
     assert normalize_engine("pdf-to-markdown") == "pdf-to-markdown"
     assert normalize_engine("PSPDFKit") == "pdf-to-markdown"
     assert normalize_engine("nutrient") == "pdf-to-markdown"
@@ -62,6 +63,125 @@ def test_normalize_engine_accepts_opendataloader():
 
 def test_compare_config_engine_accepts_pdf_to_markdown_alias():
     assert compare_pdf_extractors.config_engine("pspdfkit") == "pdf-to-markdown"
+
+
+def test_marker_processor_list_omits_table_processors():
+    class TextProcessor:
+        __module__ = "marker.processors.text"
+
+    class TableProcessor:
+        __module__ = "marker.processors.table"
+
+    class LLMTableProcessor:
+        __module__ = "marker.processors.llm.llm_table"
+
+    class LLMTableMergeProcessor:
+        __module__ = "marker.processors.llm.llm_table_merge"
+
+    class FakePdfConverter:
+        default_processors = (
+            TextProcessor,
+            TableProcessor,
+            LLMTableProcessor,
+            LLMTableMergeProcessor,
+        )
+
+    processors = pdf_extraction._marker_processor_list_without_table_processors(
+        FakePdfConverter
+    )
+
+    assert processors == ["marker.processors.text.TextProcessor"]
+
+
+def test_docling_extraction_uses_document_converter(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    captured = {}
+
+    class FakeInputFormat:
+        PDF = "pdf"
+
+    class FakePdfPipelineOptions:
+        def __init__(self):
+            self.do_table_structure = True
+
+    class FakePdfFormatOption:
+        def __init__(self, *, pipeline_options):
+            self.pipeline_options = pipeline_options
+
+    class FakeDocument:
+        def export_to_markdown(self):
+            return "Docling markdown"
+
+    class FakeResult:
+        document = FakeDocument()
+
+    class FakeConverter:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def convert(self, source):
+            assert source == str(pdf_path)
+            return FakeResult()
+
+    fake_package = types.ModuleType("docling")
+    fake_datamodel = types.ModuleType("docling.datamodel")
+    fake_base_models = types.ModuleType("docling.datamodel.base_models")
+    fake_base_models.InputFormat = FakeInputFormat
+    fake_pipeline_options = types.ModuleType("docling.datamodel.pipeline_options")
+    fake_pipeline_options.PdfPipelineOptions = FakePdfPipelineOptions
+    fake_module = types.ModuleType("docling.document_converter")
+    fake_module.DocumentConverter = FakeConverter
+    fake_module.PdfFormatOption = FakePdfFormatOption
+    monkeypatch.setitem(sys.modules, "docling", fake_package)
+    monkeypatch.setitem(sys.modules, "docling.datamodel", fake_datamodel)
+    monkeypatch.setitem(sys.modules, "docling.datamodel.base_models", fake_base_models)
+    monkeypatch.setitem(sys.modules, "docling.datamodel.pipeline_options", fake_pipeline_options)
+    monkeypatch.setitem(sys.modules, "docling.document_converter", fake_module)
+
+    assert pdf_extraction._extract_docling_markdown(pdf_path) == "Docling markdown"
+    pdf_options = captured["kwargs"]["format_options"][FakeInputFormat.PDF].pipeline_options
+    assert pdf_options.do_table_structure is False
+
+
+def test_pymupdf_extraction_skips_detected_table_blocks(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    class FakeTable:
+        bbox = (0, 20, 200, 80)
+
+    class FakeFinder:
+        tables = [FakeTable()]
+
+    class FakePage:
+        def find_tables(self, **kwargs):
+            return FakeFinder()
+
+        def get_text(self, mode, **kwargs):
+            if mode == "blocks":
+                assert kwargs == {"sort": True}
+                return [
+                    (0, 0, 200, 10, "narrative before", 0, 0),
+                    (0, 20, 200, 80, "table value 2026 100", 1, 0),
+                    (0, 90, 200, 110, "narrative after", 2, 0),
+                ]
+            raise AssertionError(f"unexpected get_text mode: {mode}")
+
+    class FakeDocument:
+        def __iter__(self):
+            return iter([FakePage()])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pdf_extraction.fitz, "open", lambda source: FakeDocument())
+
+    text = pdf_extraction._extract_pymupdf_text(pdf_path)
+
+    assert "narrative before" in text
+    assert "narrative after" in text
+    assert "table value" not in text
 
 
 def test_pdf_to_markdown_cli_extraction_uses_stdout(tmp_path, monkeypatch):
