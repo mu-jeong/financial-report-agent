@@ -72,18 +72,28 @@ def test_vectordb_no_result_retries_once_without_memory():
     )
 
 
-def test_clear_short_term_memory_retry_resets_search_inputs():
+def test_clear_short_term_memory_retry_keeps_metadata_filters():
     result = main_graph.clear_short_term_memory_retry_node(
         {
             "question": "삼성전자 최근 리포트 요약",
             "rewritten_query": "이전 대화 맥락이 섞인 검색어",
-            "search_filters": {"target_name": "현대차"},
+            "search_filters": {
+                "report_date_start": "2026-06-15",
+                "report_date_end": "2026-06-21",
+                "target_name": "현대차",
+                "report_type": "company",
+            },
+            "temporal_context": {
+                "report_date_start": "2026-06-15",
+                "report_date_end": "2026-06-21",
+            },
             "generation": "지정된 조건에 맞는 임베딩 완료 리포트를 찾지 못했습니다.",
         }
     )
 
     assert result["rewritten_query"] == "삼성전자 최근 리포트 요약"
-    assert result["search_filters"] is None
+    assert "search_filters" not in result
+    assert "temporal_context" not in result
     assert result["generation"] is None
     assert result["no_vector_results"] is False
     assert result["memory_retry_attempted"] is True

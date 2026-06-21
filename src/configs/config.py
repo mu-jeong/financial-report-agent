@@ -23,6 +23,7 @@ REPORT_PDF_DIR = get_config_value("REPORT_PDF_DIR")
 DB_PATH = DB_PATH_DEFAULT()
 FAISS_DIR = FAISS_DIR_DEFAULT()
 CONVERSATION_DB_PATH = CONVERSATION_DB_PATH_DEFAULT()
+MONITORING_MODE = get_config_value("MONITORING_MODE")
 
 # ==============================================================================
 # 2. API 키 및 인증

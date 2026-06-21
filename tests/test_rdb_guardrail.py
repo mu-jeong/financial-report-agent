@@ -111,3 +111,70 @@ def test_execute_sql_blocks_unauthorized_tables_inside_cte():
 
     assert isinstance(result, str)
     assert result.startswith("Error:")
+
+
+def test_extract_sources_from_rdb_result_uses_file_name_rows():
+    result = {
+        "columns": ["report_type", "report_date", "target_name", "broker", "title", "file_name"],
+        "rows": [
+            (
+                "company",
+                "2026-06-16",
+                "현대차",
+                "유안타증권",
+                "속성이 다른 이익에 기반한 밸류에이션 할증",
+                "yuanta.pdf",
+            ),
+            (
+                "company",
+                "2026-06-18",
+                "현대차",
+                "한화투자증권",
+                "기대감에서 실적으로",
+                "hanwha.pdf",
+            ),
+        ],
+    }
+
+    sources = rdb.extract_sources_from_rdb_result(result)
+
+    assert [source["file_name"] for source in sources] == ["yuanta.pdf", "hanwha.pdf"]
+    assert [source["rank"] for source in sources] == [1, 2]
+    assert sources[0]["broker"] == "유안타증권"
+
+
+def test_extract_sources_from_rdb_result_ignores_aggregate_rows_without_file_name():
+    assert rdb.extract_sources_from_rdb_result(
+        {"columns": ["count"], "rows": [(2,)]}
+    ) == []
+
+
+def test_summarize_rdb_result_counts_rows_and_groups():
+    result = {
+        "columns": ["report_date", "report_type", "target_name", "broker", "file_name"],
+        "rows": [
+            ("2026-06-15", "company", "A", "broker-a", "a.pdf"),
+            ("2026-06-15", "company", "B", "broker-a", "b.pdf"),
+            ("2026-06-16", "industry", "sector", "broker-b", "c.pdf"),
+        ],
+    }
+
+    summary = rdb.summarize_rdb_result(result)
+
+    assert summary["row_count"] == 3
+    assert summary["column_count"] == 5
+    assert summary["by_report_date"] == {"2026-06-15": 2, "2026-06-16": 1}
+    assert summary["by_report_type"] == {"company": 2, "industry": 1}
+    assert summary["by_broker"] == {"broker-a": 2, "broker-b": 1}
+    assert summary["by_target_name"] == {"A": 1, "B": 1, "sector": 1}
+
+
+def test_format_rdb_result_for_answer_puts_summary_before_raw_rows():
+    result = {"columns": ["report_date"], "rows": [("2026-06-15",)]}
+    summary = {"row_count": 1}
+
+    formatted = rdb.format_rdb_result_for_answer(result, summary)
+
+    assert formatted.startswith("[DB_RESULT_SUMMARY]")
+    assert "'row_count': 1" in formatted
+    assert "[RAW_DB_RESULT]" in formatted

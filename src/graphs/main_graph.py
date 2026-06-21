@@ -6,6 +6,8 @@ from src.graphs.state import State
 from src.nodes.query_rewrite import query_rewrite_node
 from src.nodes.rdb import rdb_execute_node, rdb_sql_gen_node
 from src.nodes.router import router_node
+from src.nodes.scope_selection import scope_selection_node
+from src.nodes.search_scope import search_scope_node
 from src.nodes.stock_price import stock_price_tool_node
 from src.nodes.vectordb import vectordb_node
 
@@ -16,10 +18,16 @@ def should_retry_vectordb_without_memory(state: State) -> bool:
 
 
 def clear_short_term_memory_retry_node(state: State) -> dict:
-    """Prepare a one-time VectorDB retry that ignores conversation short-term memory."""
+    """Prepare a one-time VectorDB retry that ignores only rewritten memory.
+
+    The retry should remove conversation-expanded query text, but it must keep
+    deterministic metadata constraints such as report_date_start/end,
+    target_name, broker, report_type, and top-target selection context. Dropping
+    those filters can turn a scoped query like "이번 주" into an all-period
+    VectorDB search and mix unrelated reports into the answer.
+    """
     return {
         "rewritten_query": state["question"],
-        "search_filters": None,
         "generation": None,
         "rerank_info": None,
         "faiss_context": None,
@@ -73,6 +81,8 @@ def build_graph():
     workflow = StateGraph(State)
 
     workflow.add_node("query_rewrite", query_rewrite_node)
+    workflow.add_node("search_scope", search_scope_node)
+    workflow.add_node("scope_selection", scope_selection_node)
     workflow.add_node("router", router_node)
     workflow.add_node("rdb_sql_gen_node", rdb_sql_gen_node)
     workflow.add_node("rdb_execute_node", rdb_execute_node)
@@ -82,7 +92,22 @@ def build_graph():
     workflow.add_node("final_response_node", final_response_node)
 
     workflow.add_edge(START, "query_rewrite")
-    workflow.add_edge("query_rewrite", "router")
+    workflow.add_edge("query_rewrite", "search_scope")
+
+    def after_search_scope(state: State) -> str:
+        if state.get("scope_selection_request"):
+            return "scope_selection"
+        return "router"
+
+    workflow.add_conditional_edges(
+        "search_scope",
+        after_search_scope,
+        {
+            "scope_selection": "scope_selection",
+            "router": "router",
+        },
+    )
+    workflow.add_edge("scope_selection", "router")
 
     def decide_next(state: State) -> str:
         if state["route"] == "rdb":

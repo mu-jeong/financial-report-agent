@@ -48,6 +48,21 @@ GENERIC_SEARCH_TERMS = (
 )
 
 FOLLOWUP_SCOPE_MARKERS = (
+    # Unicode escape strings are used here so Korean markers remain stable
+    # across Windows consoles/editors with inconsistent source display encodings.
+    "\uac00\uc7a5 \ub9ce\uc774",  # "가장 많이" - most frequent
+    "\ucd5c\ub2e4",  # "최다" - top/most
+    "\uc804\uccb4 \uae30\uac04",  # "전체 기간" - full period
+    "\uc804\uccb4\uae30\uac04",  # "전체기간" - full period without spacing
+    "\uae30\uc5c5\ubd84\uc11d",  # "기업분석" - company analysis
+    "\uc0b0\uc5c5\ubd84\uc11d",  # "산업분석" - industry analysis
+    "\uacbd\uc81c\ubd84\uc11d",  # "경제분석" - economy analysis
+    "\uc704\uc5d0\uc11c",  # "위에서" - above/from above
+    "\uc704\uc5d0",  # "위에" - above
+    "\uc55e\uc11c",  # "앞서" - previously
+    "\uc55e\uc5d0\uc11c",  # "앞에서" - earlier/from before
+    "\ud574\ub2f9 \ub9ac\ud3ec\ud2b8",  # "해당 리포트" - that report
+    "\uc704 \ub9ac\ud3ec\ud2b8",  # "위 리포트" - above report
     "주요 내용",
     "위 내용",
     "이 내용",
@@ -68,7 +83,10 @@ SUMMARY_FOLLOWUP_TERMS = (
 def _strip_temporal_phrases(text: str) -> str:
     stripped = str(text or "")
     stripped = re.sub(r"20\d{2}\s*(?:년|[-/.])?\s*(?:1[0-2]|0?[1-9])?\s*월?", "", stripped)
+    stripped = re.sub(r"(?:1[0-2]|0?[1-9])\s*(?:[-/.]|월)\s*(?:3[01]|[12]\d|0?[1-9])\s*일?", "", stripped)
     stripped = re.sub(r"(?:1[0-2]|0?[1-9])\s*월", "", stripped)
+    stripped = re.sub(r"[()（）]\s*(?:월|화|수|목|금|토|일)\s*(?:요일)?\s*[()（）]", "", stripped)
+    stripped = re.sub(r"(?<![가-힣])(?:월|화|수|목|금|토|일)요일(?![가-힣])", "", stripped)
     for phrase in (
         "오늘",
         "내일",
@@ -185,7 +203,7 @@ def should_rewrite_with_history(question: str, history: list[tuple[str, str]] | 
 def query_rewrite_node(state: State) -> dict:
     history = state.get("chat_history", [])
     question = state["question"]
-    followup_scope_intent = is_scope_followup(question)
+    followup_scope_intent = is_scope_followup(question) or is_temporal_filter_followup(question)
 
     if not history:
         return {

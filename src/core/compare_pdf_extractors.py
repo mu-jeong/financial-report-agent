@@ -7,15 +7,22 @@ import re
 import hashlib
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from statistics import mean
 from typing import Iterable
 
 from src.configs import config
-from src.core.pdf_extraction import SUPPORTED_EXTRACTION_ENGINES, extract_pdf_text
+from src.core import pdf_extraction
+
+SUPPORTED_EXTRACTION_ENGINES = pdf_extraction.SUPPORTED_EXTRACTION_ENGINES
+ENGINE_ALIASES = getattr(pdf_extraction, "ENGINE_ALIASES", {})
+extract_pdf_text = pdf_extraction.extract_pdf_text
+normalize_engine = pdf_extraction.normalize_engine
 
 NUMERIC_TOKEN_RE = re.compile(r"^[+-]?\d[\d,]*(?:\.\d+)?%?$")
 KOREAN_RE = re.compile(r"[\uac00-\ud7a3]")
+DEFAULT_OUTPUT_DIR = Path("reports") / "pdf_extraction"
 
 
 def collect_pdf_files(paths: list[str], limit: int) -> list[Path]:
@@ -174,6 +181,67 @@ def write_json(rows: list[dict[str, object]], output_path: Path) -> None:
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def run_pdf_extraction_comparison(
+    paths: list[str],
+    engines: list[str],
+    *,
+    limit: int = 10,
+    raw: bool = False,
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
+    run_id: str | None = None,
+    write_samples: bool = False,
+    sample_chars: int = 4000,
+) -> dict[str, object]:
+    """Run and persist a PDF extraction-engine comparison.
+
+    This wraps the CLI primitives so Monitoring Mode can run the same
+    evaluation without shelling out. The returned payload is intentionally small
+    enough to store in Streamlit session state while still linking to the
+    persisted CSV/JSON/sample artifacts.
+    """
+    normalized_engines = [config_engine(engine) for engine in engines]
+    files = collect_pdf_files(paths, limit)
+    if not files:
+        raise ValueError("No PDF files found for comparison.")
+
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+    sample_dir = output_root / f"{run_id}_samples" if write_samples else None
+
+    rows = compare_extractors(
+        files,
+        normalized_engines,
+        raw=raw,
+        sample_dir=sample_dir,
+        sample_chars=sample_chars,
+    )
+    csv_path = output_root / f"{run_id}.csv"
+    json_path = output_root / f"{run_id}.json"
+    write_csv(rows, csv_path)
+    write_json(rows, json_path)
+
+    return {
+        "run_id": run_id,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "paths": paths,
+        "engines": normalized_engines,
+        "limit": limit,
+        "raw": raw,
+        "file_count": len(files),
+        "csv_path": str(csv_path),
+        "json_path": str(json_path),
+        "sample_dir": str(sample_dir) if sample_dir is not None else "",
+        "summary": summarize(rows),
+        "rows": rows,
+    }
+
+
+def config_engine(engine: str) -> str:
+    """Normalize an engine name for comparison configuration."""
+    return normalize_engine(engine)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare PDF extraction engines.")
     parser.add_argument(
@@ -185,8 +253,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--engines",
         nargs="+",
         default=["pymupdf", "opendataloader"],
-        choices=sorted(SUPPORTED_EXTRACTION_ENGINES),
-        help="Extraction engines to compare. Marker is intentionally opt-in.",
+        help=(
+            "Extraction engines to compare. Supported: "
+            f"{', '.join(sorted(SUPPORTED_EXTRACTION_ENGINES))}. "
+            f"Aliases: {', '.join(f'{alias}->{target}' for alias, target in sorted(ENGINE_ALIASES.items()))}. "
+            "Optional engines are intentionally opt-in."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -229,10 +301,11 @@ def main(argv: list[str] | None = None) -> None:
     if not files:
         raise SystemExit("No PDF files found for comparison.")
 
+    engines = [config_engine(engine) for engine in args.engines]
     sample_dir = Path(args.sample_dir) if args.sample_dir else None
     rows = compare_extractors(
         files,
-        args.engines,
+        engines,
         raw=args.raw,
         sample_dir=sample_dir,
         sample_chars=args.sample_chars,

@@ -9,7 +9,7 @@ from src.core.metadata_filters import (
     metadata_matches,
     resolve_temporal_context,
 )
-from src.nodes import query_rewrite, router
+from src.nodes import query_rewrite, router, search_scope, scope_selection
 from src.utils.citations import (
     document_rank_aliases,
     group_sources_by_document,
@@ -56,6 +56,7 @@ def test_infer_search_filters_detects_report_type_keywords():
         ("2026 Q2 데이터에서 찾아줘", "2026-04-01", "2026-06-30"),
         ("2026년 6월 1일~5일 발간 리포트", "2026-06-01", "2026-06-05"),
         ("2026-06-01~2026-06-05 발간 리포트", "2026-06-01", "2026-06-05"),
+        ("6/15(월)", "2026-06-15", "2026-06-15"),
     ],
 )
 def test_infer_search_filters_normalizes_temporal_expressions(query, expected_start, expected_end):
@@ -64,7 +65,7 @@ def test_infer_search_filters_normalizes_temporal_expressions(query, expected_st
         {
             "target_name": [],
             "broker": [],
-            "report_month": ["2026-05", "2025-05", "2026-02"],
+            "report_month": ["2026-06", "2026-05", "2025-05", "2026-02"],
         },
     )
 
@@ -236,12 +237,49 @@ def test_query_rewrite_marks_prior_scope_followup_for_router():
     }
 
 
-def test_router_reuses_prior_search_scope_for_summary_followup(monkeypatch):
-    def fail_if_llm_router_is_called(*args, **kwargs):
-        raise AssertionError("summary follow-up should route deterministically")
+def test_query_rewrite_marks_date_only_followup_for_router():
+    question = "6/15(월)"
 
-    monkeypatch.setattr(router, "build_chat_model", fail_if_llm_router_is_called)
+    result = query_rewrite.query_rewrite_node(
+        {
+            "question": question,
+            "chat_history": [],
+        }
+    )
 
+    assert result == {
+        "rewritten_query": question,
+        "uses_chat_history": False,
+        "followup_scope_intent": True,
+    }
+    assert not query_rewrite.has_explicit_search_topic(question)
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_report_type"),
+    [
+        ("\uae30\uc5c5\ubd84\uc11d", "company"),
+        ("\uacbd\uc81c\ubd84\uc11d", "economy"),
+        ("\uc0b0\uc5c5\ubd84\uc11d", "industry"),
+    ],
+)
+def test_query_rewrite_marks_report_type_only_followup_for_router(question, expected_report_type):
+    result = query_rewrite.query_rewrite_node(
+        {
+            "question": question,
+            "chat_history": [],
+        }
+    )
+
+    assert result == {
+        "rewritten_query": question,
+        "uses_chat_history": False,
+        "followup_scope_intent": True,
+    }
+    assert infer_search_filters(question)["report_type"] == expected_report_type
+
+
+def test_search_scope_reuses_prior_search_scope_for_summary_followup():
     prior_scope = {
         "search_filters": {
             "report_date_start": "2026-06-08",
@@ -255,7 +293,7 @@ def test_router_reuses_prior_search_scope_for_summary_followup(monkeypatch):
         "file_names": ["weekly-a.pdf", "weekly-b.pdf"],
     }
 
-    result = router.router_node(
+    result = search_scope.search_scope_node(
         {
             "question": "주요 내용을 정리해줘",
             "rewritten_query": "주요 내용을 정리해줘",
@@ -265,7 +303,7 @@ def test_router_reuses_prior_search_scope_for_summary_followup(monkeypatch):
         }
     )
 
-    assert result["route"] == "vectordb"
+    assert result["routing_context"]["has_vector_intent"] is True
     assert result["scope_source"] == "prior_search_scope"
     assert result["temporal_context"] == prior_scope["temporal_context"]
     assert result["search_filters"] == {
@@ -275,7 +313,81 @@ def test_router_reuses_prior_search_scope_for_summary_followup(monkeypatch):
     }
 
 
-def test_router_keeps_explicit_current_filters_over_prior_scope(monkeypatch):
+@pytest.mark.parametrize(
+    ("question", "expected_report_type"),
+    [
+        ("\uae30\uc5c5\ubd84\uc11d", "company"),
+        ("\uacbd\uc81c\ubd84\uc11d", "economy"),
+        ("\uc0b0\uc5c5\ubd84\uc11d", "industry"),
+    ],
+)
+def test_search_scope_reuses_prior_dates_for_report_type_only_followup(
+    question,
+    expected_report_type,
+):
+    prior_scope = {
+        "search_filters": {
+            "report_date_start": "2026-06-15",
+            "report_date_end": "2026-06-21",
+        },
+        "temporal_context": {
+            "expression": "current week",
+            "report_date_start": "2026-06-15",
+            "report_date_end": "2026-06-21",
+        },
+        "file_names": ["weekly-a.pdf", "weekly-b.pdf"],
+    }
+
+    result = search_scope.search_scope_node(
+        {
+            "question": question,
+            "rewritten_query": question,
+            "chat_history": [],
+            "prior_search_scope": prior_scope,
+            "followup_scope_intent": True,
+        }
+    )
+
+    assert result["routing_context"]["route_hint"] == "rdb"
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-15",
+        "report_date_end": "2026-06-21",
+        "report_type": expected_report_type,
+    }
+
+
+def test_search_scope_reuses_prior_non_temporal_filters_for_date_only_followup():
+    result = search_scope.search_scope_node(
+        {
+            "question": "6/15(월)",
+            "rewritten_query": "6/15(월)",
+            "chat_history": [],
+            "followup_scope_intent": True,
+            "prior_search_scope": {
+                "route": "rdb",
+                "search_filters": {
+                    "report_date_start": "2026-06-15",
+                    "report_date_end": "2026-06-21",
+                    "report_type": "industry",
+                },
+                "file_names": ["weekly-industry-a.pdf", "weekly-industry-b.pdf"],
+            },
+        }
+    )
+
+    assert result["routing_context"]["route_hint"] == "rdb"
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-15",
+        "report_date_end": "2026-06-15",
+        "report_type": "industry",
+    }
+    assert result["temporal_context"]["report_date_start"] == "2026-06-15"
+    assert result["temporal_context"]["report_date_end"] == "2026-06-15"
+
+
+def test_search_scope_keeps_explicit_current_filters_over_prior_scope(monkeypatch):
     def fake_infer_search_filters(query):
         return {
             "report_date_start": "2026-05-01",
@@ -289,10 +401,10 @@ def test_router_keeps_explicit_current_filters_over_prior_scope(monkeypatch):
             "report_date_end": "2026-05-31",
         }
 
-    monkeypatch.setattr(router, "infer_search_filters", fake_infer_search_filters)
-    monkeypatch.setattr(router, "resolve_temporal_context", fake_resolve_temporal_context)
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", fake_resolve_temporal_context)
 
-    result = router.router_node(
+    result = search_scope.search_scope_node(
         {
             "question": "5월 주요 내용을 정리해줘",
             "rewritten_query": "5월 주요 내용을 정리해줘",
@@ -308,9 +420,116 @@ def test_router_keeps_explicit_current_filters_over_prior_scope(monkeypatch):
         }
     )
 
-    assert result["route"] == "vectordb"
+    assert result["routing_context"]["has_vector_intent"] is True
     assert result["scope_source"] is None
     assert result["search_filters"] == {
         "report_date_start": "2026-05-01",
         "report_date_end": "2026-05-31",
+    }
+
+
+def test_search_scope_requests_top_company_selection_from_prior_week_scope(monkeypatch):
+    monkeypatch.setattr(scope_selection, "_top_company_target_from_filters", lambda filters: ("top-company", 3))
+
+    state = {
+        "question": "top target report summary",
+        "rewritten_query": "top target report summary",
+        "chat_history": [],
+        "followup_scope_intent": True,
+        "prior_search_scope": {
+            "search_filters": {
+                "report_date_start": "2026-06-15",
+                "report_date_end": "2026-06-21",
+            },
+            "file_names": ["weekly-a.pdf", "weekly-b.pdf"],
+        },
+    }
+
+    scope_result = search_scope.search_scope_node(state)
+
+    assert scope_result["routing_context"]["has_vector_intent"] is True
+    assert scope_result["scope_selection_request"] == {
+        "type": "top_company_target_by_report_count",
+        "filters": {
+            "report_date_start": "2026-06-15",
+            "report_date_end": "2026-06-21",
+        },
+    }
+
+    result = scope_selection.scope_selection_node({**state, **scope_result})
+
+    assert result["scope_source"] == "top_target_from_rdb"
+    assert result["selection_context"] == {
+        "strategy": "top_company_target_by_report_count",
+        "target_name": "top-company",
+        "report_count": 3,
+    }
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-15",
+        "report_date_end": "2026-06-21",
+        "target_name": "top-company",
+        "report_type": "company",
+    }
+    assert result["rewritten_query"].startswith("top target report summary ")
+    assert "top-company" in result["rewritten_query"]
+
+
+def test_scope_selection_sanitizes_polluted_rewrite_after_top_company_selection(monkeypatch):
+    monkeypatch.setattr(scope_selection, "_top_company_target_from_filters", lambda filters: ("DL E&C", 2))
+
+    state = {
+        "question": "summarize reports for the most published target company",
+        "rewritten_query": "top target company report summary (Samsung, SK Square, Hyundai, DL E&C)",
+        "chat_history": [],
+        "followup_scope_intent": True,
+        "prior_search_scope": {
+            "search_filters": {
+                "report_date_start": "2026-06-15",
+                "report_date_end": "2026-06-19",
+            },
+        },
+    }
+    scope_result = search_scope.search_scope_node(state)
+
+    result = scope_selection.scope_selection_node({**state, **scope_result})
+
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-15",
+        "report_date_end": "2026-06-19",
+        "target_name": "DL E&C",
+        "report_type": "company",
+    }
+    assert result["rewritten_query"].startswith(
+        "summarize reports for the most published target company "
+    )
+    assert "DL E&C" in result["rewritten_query"]
+    assert "Samsung" not in result["rewritten_query"]
+    assert "SK Square" not in result["rewritten_query"]
+
+def test_search_scope_full_period_followup_keeps_prior_target_and_drops_dates():
+    result = search_scope.search_scope_node(
+        {
+            "question": "full period",
+            "rewritten_query": "full period",
+            "chat_history": [],
+            "followup_scope_intent": True,
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-15",
+                    "report_date_end": "2026-06-21",
+                    "target_name": "top-company",
+                    "report_type": "company",
+                },
+                "file_names": ["weekly-a.pdf"],
+            },
+        }
+    )
+
+    assert result["routing_context"]["route_hint"] == "vectordb"
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["temporal_context"] is None
+    assert result["search_filters"] == {
+        "target_name": "top-company",
+        "report_type": "company",
     }

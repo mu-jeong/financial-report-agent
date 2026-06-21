@@ -4,6 +4,7 @@ import subprocess
 import calendar
 import importlib
 import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta
 from html import escape
@@ -14,23 +15,36 @@ import streamlit.components.v1 as components
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from src.configs.config import CRAWLER_CATEGORIES, REPORT_PDF_DIR
+from src.configs.config import CRAWLER_CATEGORIES, MONITORING_MODE, REPORT_PDF_DIR
 from src.core import data_update_jobs
 from src.core import conversation_store
 from src.core import issue_report_store
+from src.core import monitoring
+from src.core import pdf_extraction
+from src.core import compare_pdf_extractors
 
 data_update_jobs = importlib.reload(data_update_jobs)
 conversation_store = importlib.reload(conversation_store)
 issue_report_store = importlib.reload(issue_report_store)
+monitoring = importlib.reload(monitoring)
+pdf_extraction = importlib.reload(pdf_extraction)
+compare_pdf_extractors = importlib.reload(compare_pdf_extractors)
 append_message = conversation_store.append_message
 create_thread = conversation_store.create_thread
 create_issue_report = issue_report_store.create_issue_report
 build_issue_report_context = issue_report_store.build_issue_report_context
+build_message_monitoring_rows = monitoring.build_message_monitoring_rows
+compact_graph_monitoring_metadata = monitoring.compact_graph_monitoring_metadata
+run_pdf_extraction_comparison = compare_pdf_extractors.run_pdf_extraction_comparison
+SUPPORTED_EXTRACTION_ENGINES = compare_pdf_extractors.SUPPORTED_EXTRACTION_ENGINES
 delete_thread = conversation_store.delete_thread
 get_chat_history = conversation_store.get_chat_history
+load_evaluation_dataset = monitoring.load_evaluation_dataset
 list_messages = conversation_store.list_messages
 list_threads = conversation_store.list_threads
 rename_thread = conversation_store.rename_thread
+summarize_chat_messages = monitoring.summarize_chat_messages
+summarize_evaluation_dataset = monitoring.summarize_evaluation_dataset
 update_message = conversation_store.update_message
 from src.core.status import get_data_status
 from src.utils import citations
@@ -157,7 +171,7 @@ def _search_scope_from_graph_state(final_state: dict) -> dict | None:
     """Build a reusable retrieval scope from the completed graph state."""
     search_filters = dict(final_state.get("search_filters") or {})
     temporal_context = final_state.get("temporal_context")
-    rerank_info = final_state.get("rerank_info") or []
+    rerank_info = final_state.get("rerank_info") or final_state.get("rdb_sources") or []
     file_names = []
     seen_file_names = set()
     for info in rerank_info:
@@ -294,6 +308,7 @@ def _run_chat_response_job(
     prior_search_scope: dict | None,
     registry: dict,
 ) -> None:
+    started_at = time.perf_counter()
     try:
         config = {"configurable": {"thread_id": thread_id}}
         graph_input = {"question": user_query, "chat_history": prior_history}
@@ -307,13 +322,24 @@ def _run_chat_response_job(
         answer = final_state.get("generation", "응답을 생성하지 못했습니다.")
         if "Error" in answer or "차단" in answer:
             answer = f"주의: {answer}"
-        rerank_info = final_state.get("rerank_info", []) if final_state.get("route") == "vectordb" else []
+        rerank_info = (
+            final_state.get("rerank_info", [])
+            if final_state.get("route") == "vectordb"
+            else final_state.get("rdb_sources", [])
+        )
         search_scope = _search_scope_from_graph_state(final_state)
         metadata = {
             "status": "succeeded",
             "job_id": job_id,
             "rerank_info": rerank_info,
         }
+        metadata.update(
+            compact_graph_monitoring_metadata(
+                final_state=final_state,
+                latency_seconds=time.perf_counter() - started_at,
+                rerank_info=rerank_info,
+            )
+        )
         if search_scope:
             metadata["search_scope"] = search_scope
         update_message(
@@ -339,6 +365,7 @@ def _run_chat_response_job(
                 "status": "failed",
                 "job_id": job_id,
                 "error": str(exc),
+                "latency_seconds": round(time.perf_counter() - started_at, 3),
             },
         )
         _record_chat_job_event(
@@ -959,6 +986,7 @@ def _render_message(message: dict, *, index: int) -> None:
                 display_content,
                 source_count=source_count,
             )
+            source_filter_ranks = used_ranks or None
             anchor_prefix = f"message_{index}"
             linked_content = link_citations_to_sources(
                 display_content,
@@ -970,8 +998,8 @@ def _render_message(message: dict, *, index: int) -> None:
                 rerank_info,
                 key_prefix=f"message_{index}",
                 anchor_prefix=anchor_prefix,
-                used_ranks=used_ranks,
-                expanded=linked_content != display_content,
+                used_ranks=source_filter_ranks,
+                expanded=bool(used_ranks) and linked_content != display_content,
             )
         else:
             st.markdown(message["content"])
@@ -1051,6 +1079,8 @@ def render_sidebar(current_id: str) -> None:
     threads = _load_threads()
 
     st.title("Finance Report Agent")
+    if MONITORING_MODE:
+        st.caption("Monitoring Mode ON")
 
     if st.button("새 대화 시작", use_container_width=True):
         st.session_state.current_thread_id = create_thread(f"대화 {len(threads) + 1}")
@@ -1136,6 +1166,329 @@ def render_chat(current_id: str, current_thread: dict) -> None:
         _app_rerun()
 
 
+def _dimension_rows(summary: dict) -> list[dict]:
+    return [
+        {"dimension": key, "case_count": value}
+        for key, value in sorted(
+            (summary.get("monitoring_dimensions") or {}).items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+
+def _case_type_rows(summary: dict) -> list[dict]:
+    return [
+        {"case_type": key, "case_count": value}
+        for key, value in sorted((summary.get("case_types") or {}).items())
+    ]
+
+
+def _parse_monitoring_paths(raw_paths: str) -> list[str]:
+    """Parse comma/newline-separated paths from the Monitoring UI."""
+    paths: list[str] = []
+    for part in raw_paths.replace(",", "\n").splitlines():
+        cleaned = part.strip().strip('"')
+        if cleaned:
+            paths.append(cleaned)
+    return paths
+
+
+def _engine_summary_rows(summary: dict) -> list[dict]:
+    return [
+        {
+            "engine": engine,
+            "files": values.get("files"),
+            "success": values.get("success"),
+            "errors": values.get("errors"),
+            "avg_elapsed_sec": values.get("avg_elapsed_sec"),
+            "avg_char_count": values.get("avg_char_count"),
+            "avg_block_count": values.get("avg_block_count"),
+            "avg_numeric_line_ratio": values.get("avg_numeric_line_ratio"),
+            "avg_korean_line_ratio": values.get("avg_korean_line_ratio"),
+            "fallbacks": values.get("fallbacks"),
+        }
+        for engine, values in sorted((summary or {}).items())
+    ]
+
+
+def _render_parsing_engine_evaluation() -> None:
+    st.subheader("Parsing engine evaluation")
+    st.caption(
+        "Run the same PDF sample through multiple parsing engines and compare extraction quality metrics. "
+        "Marker is opt-in because it can be heavy on CPU-only machines."
+    )
+
+    default_path = str(Path(REPORT_PDF_DIR).expanduser())
+    with st.form("parsing_engine_evaluation_form"):
+        path_text = st.text_area(
+            "PDF file or directory paths",
+            value=default_path,
+            help="Use one path per line, or comma-separated paths. Directories are sampled for *.pdf files.",
+            height=72,
+        )
+        default_engines = [
+            engine
+            for engine in ["pymupdf", "opendataloader"]
+            if engine in SUPPORTED_EXTRACTION_ENGINES
+        ]
+        engines = st.multiselect(
+            "Engines",
+            options=sorted(SUPPORTED_EXTRACTION_ENGINES),
+            default=default_engines,
+            help=(
+                "Optional parsers are opt-in: opendataloader requires Java, "
+                "marker can be heavy, and pdf-to-markdown requires the "
+                "@pspdfkit/pdf-to-markdown CLI on PATH."
+            ),
+        )
+        col1, col2, col3 = st.columns(3)
+        limit = col1.number_input(
+            "Sample limit",
+            min_value=0,
+            max_value=500,
+            value=5,
+            help="0 means all matching PDFs.",
+        )
+        raw = col2.checkbox(
+            "Raw output",
+            value=False,
+            help="Compare raw extractor output before finance-report cleanup filters.",
+        )
+        write_samples = col3.checkbox(
+            "Save samples",
+            value=True,
+            help="Persist per-engine extracted text samples for manual inspection.",
+        )
+        sample_chars = st.number_input(
+            "Sample characters",
+            min_value=0,
+            max_value=200_000,
+            value=4000,
+            step=500,
+            help="0 saves full extracted text when samples are enabled.",
+        )
+        submitted = st.form_submit_button("Run parsing evaluation", use_container_width=True)
+
+    if submitted:
+        paths = _parse_monitoring_paths(path_text)
+        if not paths:
+            st.warning("PDF path를 하나 이상 입력해 주세요.")
+        elif not engines:
+            st.warning("비교할 parsing engine을 하나 이상 선택해 주세요.")
+        else:
+            with st.spinner("Parsing engines are running..."):
+                try:
+                    result = run_pdf_extraction_comparison(
+                        paths,
+                        engines,
+                        limit=int(limit),
+                        raw=raw,
+                        write_samples=write_samples,
+                        sample_chars=int(sample_chars),
+                    )
+                except Exception as exc:
+                    st.error(f"Parsing evaluation failed: {exc}")
+                else:
+                    st.session_state.latest_parsing_evaluation = result
+                    st.success("Parsing evaluation completed.")
+
+    result = st.session_state.get("latest_parsing_evaluation")
+    if not result:
+        st.caption("아직 실행된 parsing evaluation 결과가 없습니다.")
+        return
+
+    st.markdown("#### Latest run")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Run ID", str(result.get("run_id")))
+    col2.metric("Files", result.get("file_count", 0))
+    col3.metric("Engines", len(result.get("engines") or []))
+    col4.metric("Raw", "yes" if result.get("raw") else "no")
+
+    st.markdown("#### Engine summary")
+    st.dataframe(
+        _engine_summary_rows(result.get("summary") or {}),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("#### Output artifacts")
+    st.json(
+        {
+            "csv_path": result.get("csv_path"),
+            "json_path": result.get("json_path"),
+            "sample_dir": result.get("sample_dir"),
+        }
+    )
+
+    rows = result.get("rows") or []
+    st.markdown("#### Per-PDF rows")
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        error_rows = [row for row in rows if row.get("status") != "ok"]
+        if error_rows:
+            with st.expander(f"Errors ({len(error_rows)})", expanded=True):
+                st.dataframe(error_rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No row data.")
+
+
+def render_monitoring_mode(current_id: str, current_thread: dict) -> None:
+    """Render Monitoring Mode UI. Only called when MONITORING_MODE=true."""
+    st.header("Monitoring Mode")
+    st.caption(
+        "성능개선을 위한 지표 모니터링 화면입니다. parsing, chunking, retrieval/rerank, "
+        "모델 변경에 따른 답변 안정성, latency/비용을 같은 기준선으로 비교하기 위한 정보를 모읍니다."
+    )
+
+    status = get_data_status()
+    db_status = status["db"]
+    vector_status = status["vector_db"]
+    config = status["config"]
+
+    data_tab, eval_tab, parsing_tab, conversation_tab = st.tabs(
+        ["데이터/설정", "고정 테스트셋", "Parsing engines", "현재 대화 지표"]
+    )
+
+    with data_tab:
+        st.subheader("데이터 준비 상태")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("리포트", f"{db_status['total_reports']}건")
+        col2.metric("임베딩 완료", f"{db_status['embedded_reports']}건")
+        col3.metric("미완료", f"{db_status['pending_reports']}건")
+        col4.metric("검색 커버리지", f"{status['search_coverage_ratio'] * 100:.1f}%")
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("FAISS", "있음" if vector_status["has_faiss_index"] else "없음")
+        col2.metric("Vector files", f"{vector_status['file_count']}개")
+        col3.metric("Parent chunks", f"{db_status['parent_chunks']}건")
+        col4.metric("PDF", f"{status['downloaded_pdfs']}개")
+
+        st.subheader("현재 파이프라인 설정")
+        st.json(
+            {
+                "generation_model": config["generation_model"],
+                "embedding_model": config["embedding_model"],
+                "extraction_engine": config["extraction_engine"],
+                "use_parent_child": config["use_parent_child"],
+                "use_reranker": config["use_reranker"],
+                "search_top_k": config["search_top_k"],
+                "test_limit": config["test_limit"],
+            }
+        )
+
+        st.subheader("날짜별 데이터 캘린더 원천")
+        date_counts = [
+            {
+                "report_date": report_date,
+                "embedded_count": count,
+                **(db_status.get("report_date_type_counts") or {}).get(report_date, {}),
+            }
+            for report_date, count in (db_status.get("report_date_counts") or {}).items()
+        ]
+        st.dataframe(date_counts, use_container_width=True, hide_index=True)
+
+    with eval_tab:
+        st.subheader("고정 평가 테스트셋")
+        try:
+            dataset = load_evaluation_dataset()
+            summary = summarize_evaluation_dataset(dataset)
+        except FileNotFoundError:
+            st.warning("평가셋 fixture를 찾지 못했습니다: tests/fixtures/evaluation_dataset.json")
+            return
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Version", summary["version"])
+        col2.metric("Cases", summary["case_count"])
+        col3.metric("Expected sources", summary["expected_source_count"])
+        col4.metric("Snapshot", summary["snapshot_date"] or "-")
+
+        stability_policy = summary.get("stability_policy") or {}
+        st.info(
+            "테스트셋은 변경 사유가 생기기 전까지 고정합니다. "
+            f"정책: `{stability_policy.get('policy', '-')}`"
+        )
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown("#### Route case coverage")
+            st.dataframe(_case_type_rows(summary), use_container_width=True, hide_index=True)
+        with right:
+            st.markdown("#### Monitoring dimensions")
+            st.dataframe(_dimension_rows(summary), use_container_width=True, hide_index=True)
+
+        with st.expander("변경 허용 사유"):
+            st.write(stability_policy.get("allowed_change_reasons") or [])
+        with st.expander("평가 케이스 목록"):
+            st.dataframe(
+                [
+                    {
+                        "id": case.get("id"),
+                        "type": case.get("type"),
+                        "route": case.get("expected_route"),
+                        "dimensions": ", ".join(case.get("monitoring_dimensions", [])),
+                        "question": case.get("question"),
+                    }
+                    for case in dataset.get("cases", [])
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with parsing_tab:
+        _render_parsing_engine_evaluation()
+
+    with conversation_tab:
+        st.subheader("현재 대화 응답 지표")
+        messages = list_messages(current_id)
+        summary = summarize_chat_messages(messages)
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Messages", summary["message_count"])
+        col2.metric("Assistant", summary["assistant_message_count"])
+        col3.metric("Avg sources", f"{summary['avg_rerank_source_count']:.1f}")
+        latency = summary["avg_latency_seconds"]
+        col4.metric("Avg latency", "-" if latency is None else f"{latency:.2f}s")
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown("#### Status counts")
+            st.json(summary["statuses"])
+        with right:
+            st.markdown("#### Route counts")
+            st.json(summary["routes"])
+
+        st.markdown("#### Assistant response rows")
+        rows = build_message_monitoring_rows(messages)
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+        else:
+            st.caption("아직 모니터링할 assistant 응답이 없습니다.")
+
+        st.markdown("#### 최근 응답 상세")
+        latest = next(
+            (
+                message
+                for message in reversed(messages)
+                if message.get("role") == "assistant"
+                and (message.get("metadata") or {}).get("status") == "succeeded"
+            ),
+            None,
+        )
+        if latest:
+            metadata = latest.get("metadata") or {}
+            st.json(
+                {
+                    "route": metadata.get("route"),
+                    "latency_seconds": metadata.get("latency_seconds"),
+                    "search_filters": metadata.get("search_filters"),
+                    "temporal_context": metadata.get("temporal_context"),
+                    "monitoring": metadata.get("monitoring"),
+                }
+            )
+        else:
+            st.caption("성공한 assistant 응답이 아직 없습니다.")
+
+
 threads = _load_threads()
 _ensure_current_thread(threads)
 current_id = st.session_state.current_thread_id
@@ -1147,4 +1500,11 @@ _render_chat_job_notifications(current_id)
 with st.sidebar:
     render_sidebar(current_id)
 
-render_chat(current_id, current_thread)
+if MONITORING_MODE:
+    chat_tab, monitoring_tab = st.tabs(["Chat", "Monitoring"])
+    with chat_tab:
+        render_chat(current_id, current_thread)
+    with monitoring_tab:
+        render_monitoring_mode(current_id, current_thread)
+else:
+    render_chat(current_id, current_thread)

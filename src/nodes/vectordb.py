@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 from datetime import datetime
 
 from langchain_community.vectorstores import FAISS
@@ -117,7 +118,99 @@ def apply_recency_weight(passages: list[dict], weight: float = RECENCY_WEIGHT) -
     return sorted(weighted, key=lambda item: item["final_score"], reverse=True)
 
 
-def select_top_passages(query: str, docs_with_scores: list[tuple]) -> list[dict]:
+def _file_name_for_passage(passage: dict) -> str | None:
+    file_name = (passage.get("meta") or {}).get("file_name")
+    if not file_name or file_name == "-":
+        return None
+    return str(file_name)
+
+
+def ensure_document_coverage(
+    selected_passages: list[dict],
+    docs_with_scores: list[tuple],
+    *,
+    max_passages: int = SEARCH_TOP_K,
+    required_file_names: list[str] | tuple[str, ...] | str | None = None,
+) -> list[dict]:
+    """Keep at least one passage per filtered document when the set is small.
+
+    A list-style query such as "이번 주 현대차 리포트" often has only a few
+    matching files but many chunks per file. Pure rerank/recency ordering can
+    fill the final context with chunks from one file, which makes the answer and
+    source metadata drop the other matching report. When all distinct documents
+    fit within SEARCH_TOP_K, preserve one best available passage per file.
+    """
+    if not selected_passages or max_passages <= 0:
+        return selected_passages
+
+    all_passages = _build_passages(docs_with_scores)
+    best_by_file: dict[str, dict] = {}
+    for passage in all_passages:
+        file_name = _file_name_for_passage(passage)
+        if file_name and file_name not in best_by_file:
+            best_by_file[file_name] = passage
+
+    if not best_by_file:
+        return selected_passages[:max_passages]
+
+    if isinstance(required_file_names, str):
+        required_file_names = [required_file_names]
+
+    required_files = [
+        str(file_name)
+        for file_name in (required_file_names or [])
+        if file_name and file_name != "-" and str(file_name) in best_by_file
+    ]
+    if not required_files:
+        required_files = list(best_by_file)
+
+    if len(required_files) > max_passages:
+        return selected_passages[:max_passages]
+
+    covered = {
+        file_name
+        for passage in selected_passages
+        if (file_name := _file_name_for_passage(passage))
+    }
+    missing = [file_name for file_name in required_files if file_name not in covered]
+    if not missing:
+        return selected_passages[:max_passages]
+
+    result = list(selected_passages[:max_passages])
+    file_counts = Counter(
+        file_name
+        for passage in result
+        if (file_name := _file_name_for_passage(passage))
+    )
+
+    for file_name in missing:
+        candidate = best_by_file[file_name]
+        if len(result) < max_passages:
+            result.append(candidate)
+            file_counts[file_name] += 1
+            continue
+
+        replace_index = None
+        for index in range(len(result) - 1, -1, -1):
+            existing_file_name = _file_name_for_passage(result[index])
+            if existing_file_name and file_counts[existing_file_name] > 1:
+                replace_index = index
+                file_counts[existing_file_name] -= 1
+                break
+        if replace_index is None:
+            continue
+        result[replace_index] = candidate
+        file_counts[file_name] += 1
+
+    return result[:max_passages]
+
+
+def select_top_passages(
+    query: str,
+    docs_with_scores: list[tuple],
+    *,
+    required_file_names: list[str] | tuple[str, ...] | str | None = None,
+) -> list[dict]:
     """Build passages and select final context entries using SEARCH_TOP_K."""
     passages = _build_passages(docs_with_scores)
     candidate_count = min(
@@ -128,7 +221,13 @@ def select_top_passages(query: str, docs_with_scores: list[tuple]) -> list[dict]
         ranked = get_ranker().rerank(query, passages, candidate_count)
     else:
         ranked = passages[:candidate_count]
-    return apply_recency_weight(ranked, RECENCY_WEIGHT)[:SEARCH_TOP_K]
+    ranked = apply_recency_weight(ranked, RECENCY_WEIGHT)[:SEARCH_TOP_K]
+    return ensure_document_coverage(
+        ranked,
+        docs_with_scores,
+        max_passages=SEARCH_TOP_K,
+        required_file_names=required_file_names,
+    )
 
 
 def vectordb_node(state: State) -> dict:
@@ -138,6 +237,9 @@ def vectordb_node(state: State) -> dict:
     temporal_context_text = ""
     if temporal_context:
         temporal_context_text = f"\n[상대 날짜 해석]\n{temporal_context['description']}\n"
+    selection_context = state.get("selection_context")
+    if selection_context:
+        temporal_context_text += f"\n[검색 대상 선정 근거]\n{selection_context}\n"
     if not os.path.exists(FAISS_DIR):
         msg = "faiss_db/ 폴더가 없어 검색을 진행할 수 없습니다. 먼저 임베딩 파이프라인을 실행해 주세요."
         logger.warning(msg)
@@ -152,7 +254,16 @@ def vectordb_node(state: State) -> dict:
 
     fetch_k = _metadata_aware_fetch_k(faiss_store, search_filters)
     docs_with_scores = faiss_store.similarity_search_with_score(query, k=fetch_k)
+    candidate_count_before_filter = len(docs_with_scores)
     docs_with_scores = filter_docs_with_scores(docs_with_scores, search_filters)
+    candidate_count_after_filter = len(docs_with_scores)
+    retrieval_metrics = {
+        "fetch_k": fetch_k,
+        "candidate_count_before_filter": candidate_count_before_filter,
+        "candidate_count_after_filter": candidate_count_after_filter,
+        "search_top_k": SEARCH_TOP_K,
+        "use_reranker": USE_RERANKER,
+    }
     if not docs_with_scores:
         if search_filters:
             filter_text = ", ".join(f"{key}={value}" for key, value in search_filters.items())
@@ -169,9 +280,23 @@ def vectordb_node(state: State) -> dict:
             "generation": msg,
             "no_vector_results": True,
             "search_filters": search_filters,
+            "monitoring_metrics": {"retrieval": retrieval_metrics},
         }
 
-    top_passages = select_top_passages(query, docs_with_scores)
+    required_file_names = search_filters.get("file_names") if isinstance(search_filters, dict) else None
+    top_passages = select_top_passages(
+        query,
+        docs_with_scores,
+        required_file_names=required_file_names,
+    )
+    retrieval_metrics["selected_source_count"] = len(top_passages)
+    retrieval_metrics["selected_file_names"] = sorted(
+        {
+            file_name
+            for passage in top_passages
+            if (file_name := _file_name_for_passage(passage))
+        }
+    )
 
     context_parts = []
     rerank_info = []
@@ -223,6 +348,7 @@ def vectordb_node(state: State) -> dict:
             "search_filters": search_filters,
             "no_vector_results": False,
             "messages": [tool_context_message, ai_msg],
+            "monitoring_metrics": {"retrieval": retrieval_metrics},
         }
 
     answer = ai_msg.content
@@ -240,4 +366,5 @@ def vectordb_node(state: State) -> dict:
         "search_filters": search_filters,
         "no_vector_results": False,
         "messages": [tool_context_message, ai_msg],
+        "monitoring_metrics": {"retrieval": retrieval_metrics},
     }

@@ -380,6 +380,16 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 env_example="",
             ),
         ),
+        (
+            "MONITORING_MODE",
+            ConfigSpec(
+                name="MONITORING_MODE",
+                default=False,
+                parser=as_bool,
+                description="Enable the Streamlit Monitoring Mode UI for performance metric review.",
+                section="Monitoring",
+            ),
+        ),
     )
 )
 

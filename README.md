@@ -1,4 +1,4 @@
-﻿# Finance LLM
+# Finance LLM
 
 ## Quick Start: 간편하게 실행하기
 
@@ -195,11 +195,11 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## PDF 추출 엔진 비교
 
-`EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader` 중 하나로 설정할 수 있습니다.
+`EXTRACTION_ENGINE` can be set to one of `pymupdf`, `marker`, `opendataloader`, or `pdf-to-markdown`.
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10
-python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker --limit 5
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker pdf-to-markdown --limit 5
 ```
 
 자세한 내용은 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.
@@ -216,11 +216,13 @@ python -m pytest -q
 
 현재 로컬 `data/reports.db` 메타데이터에서 뽑은 평가용 fixture는 `tests/fixtures/evaluation_dataset.json`에 있습니다. PDF 본문은 포함하지 않고, 질문/기대 라우팅/기대 필터/기대 출처 파일명/RDB 기대 집계값만 담았습니다.
 
+테스트셋은 한 번 기준선으로 정하면 변경 사유가 생기기 전까지 그대로 유지합니다. 선정 기준과 고정 정책은 fixture의 `selection_criteria`, `stability_policy`, [`docs/EVALUATION_DATASET.md`](docs/EVALUATION_DATASET.md)에 함께 저장합니다. `scripts/build_evaluation_dataset.py`는 source가 사라졌거나 지표 축이 바뀌는 등 명시적 변경 사유가 있을 때만 재생성에 사용합니다.
+
 ```bash
 python -m pytest tests/test_evaluation_dataset.py -q
 ```
 
-이 테스트셋은 향후 retrieval 품질, RDB 라우팅, 날짜별 데이터 캘린더, latency/비용 측정 회귀 평가에 사용할 기준 데이터입니다.
+이 테스트셋은 향후 parsing, chunking, retrieval/rerank, 모델 변경에 따른 답변 변화, RDB 라우팅, 날짜별 데이터 캘린더, latency/비용 측정 회귀 평가에 사용할 고정 기준 데이터입니다.
 
 ## 주의사항
 
@@ -230,23 +232,47 @@ python -m pytest tests/test_evaluation_dataset.py -q
 - FAISS의 `index.pkl`은 pickle 역직렬화를 사용하므로 신뢰할 수 없는 파일을 로드하지 마세요.
 - 로컬 GUI에서 PDF `열기` 기능은 Streamlit 서버가 실행 중인 PC 기준으로 동작합니다. 원격 서버에 배포하면 서버 PC에서 파일을 열려고 시도합니다.
 
-## Debug Mode 계획 및 TODO
+## Monitoring Mode 계획 및 TODO
 
-Debug Mode는 일반 사용자 화면을 복잡하게 만들지 않으면서, 성능개선과 품질 진단에 필요한 정보를 별도 대시보드로 모아보는 개발/운영용 모드입니다. 일반 GUI에서는 검색 준비 상태, 상세 인덱스 상태, latency breakdown, rerank 점수 같은 진단 정보를 숨기고, Debug Mode 화면에서만 노출하는 방향으로 개발합니다.
+Monitoring Mode는 이름 그대로 성능개선을 위한 지표 모니터링 모드입니다. 일반 사용자 화면을 복잡하게 만들지 않으면서 parsing, chunking, retrieval/rerank, 모델 변경에 따른 답변 변화 최소화, latency/비용 같은 개선 지표를 별도 대시보드에서 추적합니다. 일반 GUI에서는 검색 준비 상태, 상세 인덱스 상태, latency breakdown, rerank 점수 같은 관측 정보를 숨기고, Monitoring Mode 화면에서만 노출하는 방향으로 개발합니다.
+
+### 실행 방법
+
+Monitoring Mode UI는 `.env`에서 명시적으로 켰을 때만 Streamlit에 표시됩니다.
+
+```env
+MONITORING_MODE=true
+```
+
+이후 평소처럼 GUI를 실행합니다.
+
+```bash
+streamlit run apps/gui/app.py
+```
+
+활성화되면 상단에 `Chat` / `Monitoring` 탭이 생기고, `Monitoring` 탭에서 데이터/설정 상태, 고정 평가 테스트셋 커버리지, 현재 대화의 route/source/latency 지표를 확인할 수 있습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+
+### 테스트 방법
+
+```bash
+python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_evaluation_dataset.py -q
+python -m pytest -q
+```
 
 ### 목표
 
-- 검색/답변 품질 저하 원인을 빠르게 찾는 성능개선 대시보드 제공
+- 검색/답변 품질 저하 원인을 빠르게 찾는 성능개선 지표 대시보드 제공
 - 수집 → 추출 → 임베딩 → 검색 → rerank → 답변 생성까지 단계별 병목 확인
+- parsing/chunking/retrieval/rerank/model 변경 전후의 답변 변화와 품질 지표 추적
 - API 비용, latency, Top-K 품질, 필터 적용 결과를 한 화면에서 추적
 - 일반 사용자 UX와 개발자 진단 UX를 분리
 
 ### TODO
 
-- [ ] 일반 사용자 UX와 분리된 진단 모드의 진입 방식과 노출 범위를 정합니다.
+- [ ] 일반 사용자 UX와 분리된 Monitoring Mode의 진입 방식과 노출 범위를 정합니다.
 - [ ] 데이터 준비 상태와 검색 가능 여부를 한눈에 파악할 수 있는 대시보드 방향을 잡습니다.
 - [ ] 질문 처리 흐름을 추적해 검색 실패, 라우팅 오류, 답변 품질 저하 원인을 확인할 수 있게 합니다.
-- [ ] 검색·rerank·생성 단계의 품질과 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
+- [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
 - [ ] 디버깅 결과를 안전하게 공유할 수 있도록 민감정보를 제외한 export 방식을 검토합니다.
-- [ ] Debug Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.
+- [ ] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.

@@ -232,6 +232,19 @@ def resolve_temporal_context(
         )
         return _temporal_context("명시 날짜", report_date, report_date, today)
 
+    month_day_match = re.search(
+        "(?<!\\d)(?P<month>1[0-2]|0?[1-9])\\s*(?:-|/|\\.|\\uC6D4)\\s*"
+        "(?P<day>3[01]|[12]\\d|0?[1-9])\\s*(?:\\uC77C)?",
+        query,
+    )
+    if month_day_match:
+        month = int(month_day_match.group("month"))
+        report_month = _latest_known_month_matching(month, known_months)
+        if report_month is None:
+            report_month = f"{today.year:04d}-{month:02d}"
+        report_date = f"{int(report_month[:4]):04d}-{month:02d}-{int(month_day_match.group('day')):02d}"
+        return _temporal_context("명시 날짜", report_date, report_date, today)
+
     relative_context = _resolve_relative_temporal_context(query, today)
     if relative_context:
         return relative_context
@@ -343,11 +356,35 @@ def get_metadata_candidates() -> dict[str, tuple[str, ...]]:
                     """
                 ).fetchall()
             )
+            target_report_types: dict[str, tuple[str, ...]] = {}
+            for row in conn.execute(
+                """
+                SELECT target_name, report_type
+                FROM reports
+                WHERE target_name IS NOT NULL
+                  AND target_name != ''
+                  AND target_name != 'null'
+                  AND report_type IS NOT NULL
+                  AND report_type != ''
+                GROUP BY target_name, report_type
+                ORDER BY target_name, report_type
+                """
+            ).fetchall():
+                target_report_types.setdefault(row["target_name"], tuple())
+                target_report_types[row["target_name"]] = (
+                    *target_report_types[row["target_name"]],
+                    row["report_type"],
+                )
     except sqlite3.Error as exc:
         logger.warning(f"[MetadataFilter] metadata candidate scan failed: {exc}")
-        return {"target_name": (), "broker": (), "report_month": ()}
+        return {"target_name": (), "broker": (), "report_month": (), "target_report_types": {}}
 
-    return {"target_name": targets, "broker": brokers, "report_month": report_months}
+    return {
+        "target_name": targets,
+        "broker": brokers,
+        "report_month": report_months,
+        "target_report_types": target_report_types,
+    }
 
 
 def infer_search_filters(
@@ -386,6 +423,13 @@ def infer_search_filters(
         if any(_normalize_text(keyword) in normalized_query for keyword in keywords):
             filters["report_type"] = report_type
             break
+
+    if target and "report_type" not in filters:
+        target_report_types = values.get("target_report_types")
+        if isinstance(target_report_types, dict):
+            report_types = tuple(target_report_types.get(target, ()))
+            if len(report_types) == 1:
+                filters["report_type"] = report_types[0]
 
     return filters
 
