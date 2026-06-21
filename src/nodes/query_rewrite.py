@@ -20,6 +20,7 @@ GENERIC_SEARCH_TERMS = (
     "발표",
     "리포트",
     "보고서",
+    "주요",
     "내용",
     "정리",
     "요약",
@@ -28,6 +29,12 @@ GENERIC_SEARCH_TERMS = (
     "개수",
     "건수",
     "날짜",
+    "을",
+    "를",
+    "은",
+    "는",
+    "도",
+    "줘",
     "관련",
     "관련된",
     "대한",
@@ -79,6 +86,25 @@ SUMMARY_FOLLOWUP_TERMS = (
     "투자 포인트",
 )
 
+DEICTIC_SCOPE_MARKERS = (
+    "위에서",
+    "위에",
+    "위 내용",
+    "이 내용",
+    "해당 내용",
+    "방금",
+    "앞에서",
+    "앞서",
+    "해당 리포트",
+    "위 리포트",
+)
+
+REPORT_TYPE_ONLY_SCOPE_MARKERS = (
+    "기업분석",
+    "산업분석",
+    "경제분석",
+)
+
 
 def _strip_temporal_phrases(text: str) -> str:
     stripped = str(text or "")
@@ -115,7 +141,7 @@ def has_explicit_search_topic(question: str) -> bool:
     """Return whether a query has a non-generic topic besides date/filter words."""
     remainder = _strip_temporal_phrases(question)
     normalized = re.sub(r"\s+", "", remainder)
-    for term in GENERIC_SEARCH_TERMS:
+    for term in sorted(GENERIC_SEARCH_TERMS, key=len, reverse=True):
         normalized = normalized.replace(term, "")
     normalized = re.sub(r"[^\w가-힣]+", "", normalized)
     return len(normalized) >= 2
@@ -124,7 +150,9 @@ def has_explicit_search_topic(question: str) -> bool:
 def is_scope_followup(question: str) -> bool:
     """Return whether the query points back to the prior retrieved answer scope."""
     normalized = re.sub(r"\s+", "", str(question or ""))
-    if any(re.sub(r"\s+", "", keyword) in normalized for keyword in FOLLOWUP_SCOPE_MARKERS):
+    if any(re.sub(r"\s+", "", keyword) in normalized for keyword in DEICTIC_SCOPE_MARKERS):
+        return True
+    if any(normalized == re.sub(r"\s+", "", keyword) for keyword in REPORT_TYPE_ONLY_SCOPE_MARKERS):
         return True
     return (
         any(re.sub(r"\s+", "", keyword) in normalized for keyword in SUMMARY_FOLLOWUP_TERMS)

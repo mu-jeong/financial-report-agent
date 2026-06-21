@@ -44,6 +44,19 @@ def test_infer_search_filters_detects_report_type_keywords():
     assert filters == {"report_type": "economy"}
 
 
+def test_infer_search_filters_does_not_match_report_type_across_word_boundary():
+    filters = infer_search_filters(
+        "방금 리포트 리스크 알려줘",
+        {
+            "target_name": [],
+            "broker": [],
+            "report_month": [],
+        },
+    )
+
+    assert "report_type" not in filters
+
+
 @pytest.mark.parametrize(
     ("query", "expected_start", "expected_end"),
     [

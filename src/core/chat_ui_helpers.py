@@ -28,6 +28,10 @@ def _strip_temporal_phrases(question: str) -> str:
     return _compact_spaces(cleaned)
 
 
+def _has_temporal_phrase(question: str) -> bool:
+    return any(pattern.search(str(question or "")) for pattern in _DATE_RANGE_PATTERNS)
+
+
 def build_scope_notice(state_or_metadata: dict[str, Any]) -> str | None:
     """Return a short user-facing note about reused or reset retrieval scope."""
     if state_or_metadata.get("scope_notice"):
@@ -37,8 +41,10 @@ def build_scope_notice(state_or_metadata: dict[str, Any]) -> str | None:
     filters = state_or_metadata.get("search_filters") or {}
     temporal_context = state_or_metadata.get("temporal_context")
     has_date_filter = bool(filters.get("report_date_start") or filters.get("report_date_end") or temporal_context)
-    if has_date_filter and not filters.get("file_names"):
+    if has_date_filter and not filters.get("file_names") and _has_temporal_phrase(state_or_metadata.get("question", "")):
         return "새 날짜 조건이 있어 검색 범위를 다시 설정했습니다."
+    if has_date_filter:
+        return "직전 답변의 검색 조건을 이어받아 답변합니다."
     return "직전 답변의 참고 문서 범위 안에서 답변합니다."
 
 

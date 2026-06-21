@@ -28,9 +28,27 @@ REPORT_TYPE_KEYWORDS = {
     "economy": ("economy", "경제", "매크로", "금리", "환율"),
 }
 
+NOSPACE_REPORT_TYPE_KEYWORDS = {
+    report_type: tuple(keyword for keyword in keywords if " " in keyword)
+    for report_type, keywords in REPORT_TYPE_KEYWORDS.items()
+}
+
+PLAIN_REPORT_TYPE_KEYWORDS = {
+    report_type: tuple(keyword for keyword in keywords if " " not in keyword)
+    for report_type, keywords in REPORT_TYPE_KEYWORDS.items()
+}
+
 
 def _normalize_text(value: Any) -> str:
     return str(value or "").casefold().replace(" ", "")
+
+
+def _contains_report_type_keyword(query: str, keyword: str, *, allow_nospace: bool) -> bool:
+    query_text = str(query or "").casefold()
+    keyword_text = str(keyword or "").casefold()
+    if allow_nospace:
+        return keyword_text.replace(" ", "") in query_text.replace(" ", "")
+    return keyword_text in query_text
 
 
 def _pick_longest_mentioned(query: str, candidates: Iterable[str]) -> str | None:
@@ -418,11 +436,15 @@ def infer_search_filters(
     if broker:
         filters["broker"] = broker
 
-    normalized_query = _normalize_text(query)
-    for report_type, keywords in REPORT_TYPE_KEYWORDS.items():
-        if any(_normalize_text(keyword) in normalized_query for keyword in keywords):
+    for report_type, keywords in PLAIN_REPORT_TYPE_KEYWORDS.items():
+        if any(_contains_report_type_keyword(query, keyword, allow_nospace=False) for keyword in keywords):
             filters["report_type"] = report_type
             break
+    else:
+        for report_type, keywords in NOSPACE_REPORT_TYPE_KEYWORDS.items():
+            if any(_contains_report_type_keyword(query, keyword, allow_nospace=True) for keyword in keywords):
+                filters["report_type"] = report_type
+                break
 
     if target and "report_type" not in filters:
         target_report_types = values.get("target_report_types")

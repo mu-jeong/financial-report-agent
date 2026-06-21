@@ -103,3 +103,29 @@ def test_history_decision_keeps_date_scoped_broad_search_independent(monkeypatch
         "6월에 발간된 2차전지와 관련된 내용 알려줘",
         RECENT_HISTORY,
     )
+
+def test_scope_followup_marker_does_not_override_explicit_new_topic():
+    result = query_rewrite.query_rewrite_node(
+        {
+            "question": "삼성전자 리포트들 각각 주요 내용 정리해줘",
+            "chat_history": [],
+        }
+    )
+
+    assert result == {
+        "rewritten_query": "삼성전자 리포트들 각각 주요 내용 정리해줘",
+        "uses_chat_history": False,
+        "followup_scope_intent": False,
+    }
+
+
+def test_deictic_scope_marker_still_marks_followup_with_topic_words():
+    result = query_rewrite.query_rewrite_node(
+        {
+            "question": "방금 리포트 리스크 알려줘",
+            "chat_history": [],
+        }
+    )
+
+    assert result["followup_scope_intent"] is True
+

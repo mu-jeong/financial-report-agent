@@ -19,6 +19,7 @@ def test_build_scope_notice_explains_prior_scope_reuse():
 def test_build_scope_notice_explains_new_date_scope_reset():
     notice = build_scope_notice(
         {
+            "question": "2026년 6월 리포트 알려줘",
             "scope_source": "prior_search_scope",
             "temporal_context": {"description": "6월=2026-06-01~2026-06-30"},
             "search_filters": {"report_date_start": "2026-06-01", "report_date_end": "2026-06-30"},
@@ -45,3 +46,37 @@ def test_build_clipboard_copy_html_escapes_text_and_invokes_clipboard_api():
     assert "navigator.clipboard.writeText" in html
     assert "issue <report> & details" not in html
     assert "Copy issue report" in html
+
+def test_build_scope_notice_distinguishes_reused_prior_date_scope_from_new_date_reset():
+    notice = build_scope_notice(
+        {
+            "question": "기업분석",
+            "scope_source": "prior_search_scope",
+            "temporal_context": {"description": "이번주=2026-06-15~2026-06-21"},
+            "search_filters": {
+                "report_date_start": "2026-06-15",
+                "report_date_end": "2026-06-21",
+                "report_type": "company",
+            },
+        }
+    )
+
+    assert notice == "직전 답변의 검색 조건을 이어받아 답변합니다."
+
+
+def test_build_scope_notice_reports_reset_only_when_current_question_has_date():
+    notice = build_scope_notice(
+        {
+            "question": "6/15(월)",
+            "scope_source": "prior_search_scope",
+            "temporal_context": {"description": "명시 날짜=2026-06-15"},
+            "search_filters": {
+                "report_date_start": "2026-06-15",
+                "report_date_end": "2026-06-15",
+                "report_type": "industry",
+            },
+        }
+    )
+
+    assert notice == "새 날짜 조건이 있어 검색 범위를 다시 설정했습니다."
+

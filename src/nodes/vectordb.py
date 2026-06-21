@@ -205,12 +205,71 @@ def ensure_document_coverage(
     return result[:max_passages]
 
 
+MULTI_DOCUMENT_COVERAGE_KEYWORDS = (
+    "리포트들",
+    "보고서들",
+    "목록",
+    "리스트",
+    "비교",
+    "각각",
+    "전부",
+    "전체",
+    "여러",
+    "발간된",
+    "나온 리포트",
+    "자료들",
+)
+
+SINGLE_TARGET_DEEP_DIVE_KEYWORDS = (
+    "전망",
+    "리스크",
+    "투자포인트",
+    "투자 포인트",
+    "핵심",
+    "자세히",
+    "분석",
+    "왜",
+    "근거",
+)
+
+
+def _normalized_contains(text: str, keywords: tuple[str, ...]) -> bool:
+    normalized_text = str(text or "").casefold().replace(" ", "")
+    return any(keyword.casefold().replace(" ", "") in normalized_text for keyword in keywords)
+
+
+def should_apply_document_coverage(
+    query: str,
+    search_filters: dict | None,
+    required_file_names: list[str] | tuple[str, ...] | str | None = None,
+) -> tuple[bool, str]:
+    """Decide whether to trade some ranking purity for document diversity."""
+    if required_file_names:
+        return True, "required_file_names"
+
+    filters = search_filters or {}
+    if filters.get("file_names"):
+        return True, "file_names_filter"
+
+    if _normalized_contains(query, MULTI_DOCUMENT_COVERAGE_KEYWORDS):
+        return True, "multi_document_intent"
+
+    if filters.get("target_name") and _normalized_contains(query, SINGLE_TARGET_DEEP_DIVE_KEYWORDS):
+        return False, "single_target_deep_dive"
+
+    if filters.get("target_name"):
+        return False, "single_target_default"
+
+    return False, "no_coverage_intent"
+
+
 def select_top_passages(
     query: str,
     docs_with_scores: list[tuple],
     *,
+    search_filters: dict | None = None,
     required_file_names: list[str] | tuple[str, ...] | str | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     """Build passages and select final context entries using SEARCH_TOP_K."""
     passages = _build_passages(docs_with_scores)
     candidate_count = min(
@@ -222,12 +281,24 @@ def select_top_passages(
     else:
         ranked = passages[:candidate_count]
     ranked = apply_recency_weight(ranked, RECENCY_WEIGHT)[:SEARCH_TOP_K]
-    return ensure_document_coverage(
-        ranked,
-        docs_with_scores,
-        max_passages=SEARCH_TOP_K,
-        required_file_names=required_file_names,
+    apply_coverage, coverage_reason = should_apply_document_coverage(
+        query,
+        search_filters,
+        required_file_names,
     )
+    if apply_coverage:
+        selected = ensure_document_coverage(
+            ranked,
+            docs_with_scores,
+            max_passages=SEARCH_TOP_K,
+            required_file_names=required_file_names,
+        )
+    else:
+        selected = ranked[:SEARCH_TOP_K]
+    return selected, {
+        "document_coverage_applied": apply_coverage,
+        "document_coverage_reason": coverage_reason,
+    }
 
 
 def vectordb_node(state: State) -> dict:
@@ -284,11 +355,13 @@ def vectordb_node(state: State) -> dict:
         }
 
     required_file_names = search_filters.get("file_names") if isinstance(search_filters, dict) else None
-    top_passages = select_top_passages(
+    top_passages, coverage_metrics = select_top_passages(
         query,
         docs_with_scores,
+        search_filters=search_filters,
         required_file_names=required_file_names,
     )
+    retrieval_metrics.update(coverage_metrics)
     retrieval_metrics["selected_source_count"] = len(top_passages)
     retrieval_metrics["selected_file_names"] = sorted(
         {
