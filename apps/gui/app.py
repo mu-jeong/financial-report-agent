@@ -3,6 +3,7 @@ import sys
 import subprocess
 import calendar
 import importlib
+import json
 import threading
 import time
 import uuid
@@ -22,11 +23,10 @@ from src.core import issue_report_store
 from src.core import monitoring
 from src.core import pdf_extraction
 from src.core import compare_pdf_extractors
-from src.core.chat_ux import (
+from src.core.chat_ui_helpers import (
     build_clipboard_copy_html,
     build_no_result_suggestions,
     build_scope_notice,
-    build_thread_title,
 )
 
 data_update_jobs = importlib.reload(data_update_jobs)
@@ -39,19 +39,31 @@ append_message = conversation_store.append_message
 create_thread = conversation_store.create_thread
 create_issue_report = issue_report_store.create_issue_report
 build_issue_report_context = issue_report_store.build_issue_report_context
+build_evaluation_failure_actions = monitoring.build_evaluation_failure_actions
+build_issue_report_rows = monitoring.build_issue_report_rows
 build_message_monitoring_rows = monitoring.build_message_monitoring_rows
+build_monitoring_page_labels = monitoring.build_monitoring_page_labels
+build_monitoring_tab_labels = monitoring.build_monitoring_tab_labels
+compare_evaluation_runs = monitoring.compare_evaluation_runs
+promote_issue_report_to_eval_candidate = monitoring.promote_issue_report_to_eval_candidate
 compact_graph_monitoring_metadata = monitoring.compact_graph_monitoring_metadata
 run_pdf_extraction_comparison = compare_pdf_extractors.run_pdf_extraction_comparison
 SUPPORTED_EXTRACTION_ENGINES = compare_pdf_extractors.SUPPORTED_EXTRACTION_ENGINES
 delete_thread = conversation_store.delete_thread
 get_chat_history = conversation_store.get_chat_history
 load_evaluation_dataset = monitoring.load_evaluation_dataset
+list_issue_reports = issue_report_store.list_issue_reports
 list_messages = conversation_store.list_messages
 list_threads = conversation_store.list_threads
 mark_interrupted_running_messages_failed = conversation_store.mark_interrupted_running_messages_failed
 rename_thread = conversation_store.rename_thread
 set_thread_pinned = conversation_store.set_thread_pinned
+run_evaluation_dataset = monitoring.run_evaluation_dataset
+select_evaluation_cases = monitoring.select_evaluation_cases
+summarize_all_chat_threads = monitoring.summarize_all_chat_threads
 summarize_chat_messages = monitoring.summarize_chat_messages
+summarize_data_integrity = monitoring.summarize_data_integrity
+summarize_issue_reports = monitoring.summarize_issue_reports
 summarize_evaluation_dataset = monitoring.summarize_evaluation_dataset
 update_message = conversation_store.update_message
 from src.core.status import get_data_status
@@ -68,6 +80,8 @@ source_anchor_id = citations.source_anchor_id
 from src.graphs.main_graph import graph_app
 
 WEEKDAY_LABELS = ["월", "화", "수", "목", "금"]
+MONITORING_EVAL_RUN_DIR = Path("debug") / "evaluation_runs"
+MONITORING_REGRESSION_CANDIDATE_DIR = Path("debug") / "regression_candidates"
 
 st.set_page_config(
     page_title="Finance Report Agent",
@@ -1150,6 +1164,12 @@ def render_sidebar(current_id: str) -> None:
     st.title("Finance Report Agent")
     if MONITORING_MODE:
         st.caption("Monitoring Mode ON")
+        st.radio(
+            "화면",
+            build_monitoring_page_labels(),
+            key="active_monitoring_page",
+            label_visibility="collapsed",
+        )
 
     if st.button("새 대화 시작", use_container_width=True):
         st.session_state.current_thread_id = create_thread(f"대화 {len(threads) + 1}")
@@ -1205,7 +1225,7 @@ def render_chat(current_id: str, current_thread: dict) -> None:
 
     if user_query:
         if not messages and (current_thread["name"] == "새로운 대화" or current_thread["name"].startswith("대화 ")):
-            thread_name = build_thread_title(user_query)
+            thread_name = user_query[:15] + "..."
             rename_thread(current_id, thread_name)
         else:
             thread_name = current_thread["name"]
@@ -1405,8 +1425,263 @@ def _render_parsing_engine_evaluation() -> None:
         st.caption("No row data.")
 
 
-def render_monitoring_mode(current_id: str, current_thread: dict) -> None:
-    """Render Monitoring Mode UI. Only called when MONITORING_MODE=true."""
+
+def _all_thread_messages() -> list[dict]:
+    threads = list_threads()
+    return [
+        {"thread": thread, "messages": list_messages(thread["id"])}
+        for thread in threads
+    ]
+
+
+def _latest_saved_evaluation_run(exclude_path: str | None = None) -> dict | None:
+    if not MONITORING_EVAL_RUN_DIR.exists():
+        return None
+    run_paths = sorted(MONITORING_EVAL_RUN_DIR.glob("evaluation_run_*.json"), reverse=True)
+    for run_path in run_paths:
+        if exclude_path and str(run_path) == exclude_path:
+            continue
+        try:
+            return json.loads(run_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def _render_experiment_monitoring() -> None:
+    st.subheader("실험 실행")
+    st.caption("고정 evaluation dataset을 현재 graph로 실행하고 route/filter/source/citation/latency pass/fail을 저장합니다.")
+    try:
+        dataset = load_evaluation_dataset()
+    except FileNotFoundError:
+        st.warning("평가셋 fixture를 찾지 못했습니다: tests/fixtures/evaluation_dataset.json")
+        return
+
+    cases = dataset.get("cases") or []
+    case_ids = [str(case.get("id")) for case in cases]
+    selected_case_ids = st.multiselect(
+        "실행할 테스트 케이스",
+        options=case_ids,
+        default=case_ids,
+        format_func=lambda case_id: next(
+            (f"{case_id} · {case.get('question', '')}" for case in cases if str(case.get("id")) == case_id),
+            case_id,
+        ),
+        help="개수가 아니라 실제로 실행할 테스트 케이스를 선택합니다.",
+    )
+    latency_threshold = st.number_input("Latency threshold seconds", min_value=1.0, max_value=300.0, value=30.0, step=1.0)
+    selected_cases = select_evaluation_cases(dataset, selected_case_ids)
+    st.caption(f"선택된 테스트: {len(selected_cases)}개")
+    if st.button("Run selected evaluation cases", use_container_width=True, disabled=not selected_cases):
+        with st.spinner("Evaluation dataset 실행 중..."):
+            try:
+                run = run_evaluation_dataset(
+                    dataset,
+                    graph_app.invoke,
+                    output_dir=MONITORING_EVAL_RUN_DIR,
+                    selected_case_ids=selected_case_ids,
+                    latency_threshold_seconds=float(latency_threshold),
+                )
+            except Exception as exc:
+                st.error(f"Evaluation run failed: {exc}")
+            else:
+                st.session_state.latest_evaluation_run = run
+                st.success("Evaluation run saved.")
+
+    run = st.session_state.get("latest_evaluation_run") or _latest_saved_evaluation_run()
+    if not run:
+        st.caption("아직 저장된 evaluation run이 없습니다.")
+        return
+
+    st.markdown("#### Latest run summary")
+    summary = run.get("summary") or {}
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Cases", summary.get("case_count", 0))
+    col2.metric("Passed", summary.get("passed", 0))
+    col3.metric("Failed", summary.get("failed", 0))
+    col4.metric("Pass rate", f"{summary.get('pass_rate', 0) * 100:.1f}%")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Source hit", f"{summary.get('source_hit_rate', 0) * 100:.1f}%")
+    col2.metric("Citation valid", f"{summary.get('citation_valid_rate', 0) * 100:.1f}%")
+    col3.metric("No-result", f"{summary.get('no_result_rate', 0) * 100:.1f}%")
+    latency = summary.get("avg_latency_seconds")
+    col4.metric("Avg latency", "-" if latency is None else f"{latency:.2f}s")
+
+    previous = _latest_saved_evaluation_run(exclude_path=run.get("json_path"))
+    comparison = compare_evaluation_runs(run, previous)
+    if comparison:
+        st.markdown("#### Previous run comparison")
+        st.dataframe([comparison], use_container_width=True, hide_index=True)
+
+    st.markdown("#### Run artifacts")
+    st.code(run.get("json_path") or "", language="text")
+    st.markdown("#### Case results")
+    results = run.get("results") or []
+    st.dataframe(results, use_container_width=True, hide_index=True)
+
+    failure_actions = build_evaluation_failure_actions(results)
+    st.markdown("#### Failure triage")
+    if failure_actions:
+        st.warning("Fail 케이스는 아래 권장 조치 기준으로 다음 작업을 선택하세요.")
+        st.dataframe(failure_actions, use_container_width=True, hide_index=True)
+        failed_case_ids = [str(row["case_id"]) for row in failure_actions if row.get("case_id")]
+        if st.button("Rerun failed cases only", use_container_width=True):
+            with st.spinner("Failed cases 재실행 중..."):
+                try:
+                    rerun = run_evaluation_dataset(
+                        dataset,
+                        graph_app.invoke,
+                        output_dir=MONITORING_EVAL_RUN_DIR,
+                        selected_case_ids=failed_case_ids,
+                        latency_threshold_seconds=float(latency_threshold),
+                    )
+                except Exception as exc:
+                    st.error(f"Failed-case rerun failed: {exc}")
+                else:
+                    st.session_state.latest_evaluation_run = rerun
+                    st.success("Failed cases rerun saved.")
+                    st.rerun()
+    else:
+        st.success("현재 run에는 triage가 필요한 fail 케이스가 없습니다.")
+
+
+def _render_global_monitoring(status: dict) -> None:
+    st.subheader("전체 Monitoring")
+    st.caption("모든 대화와 저장소 상태를 집계해 운영 품질을 봅니다. 개별 chat 원문은 기본 노출하지 않습니다.")
+    thread_messages = _all_thread_messages()
+    summary = summarize_all_chat_threads(thread_messages)
+    integrity = summarize_data_integrity(status)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Threads", summary["thread_count"])
+    col2.metric("Assistant", summary["assistant_message_count"])
+    col3.metric("Failure rate", f"{summary['failure_rate'] * 100:.1f}%")
+    col4.metric("No-result rate", f"{summary['no_result_rate'] * 100:.1f}%")
+
+    col1, col2, col3 = st.columns(3)
+    avg_latency = summary.get("avg_latency_seconds")
+    p95_latency = summary.get("p95_latency_seconds")
+    col1.metric("Avg latency", "-" if avg_latency is None else f"{avg_latency:.2f}s")
+    col2.metric("P95 latency", "-" if p95_latency is None else f"{p95_latency:.2f}s")
+    col3.metric("Integrity issues", integrity["warning_count"] + integrity["fail_count"])
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Status counts")
+        st.dataframe([{"status": key, "count": value} for key, value in sorted(summary["statuses"].items())], use_container_width=True, hide_index=True)
+    with right:
+        st.markdown("#### Route counts")
+        st.dataframe([{"route": key, "count": value} for key, value in sorted(summary["routes"].items())], use_container_width=True, hide_index=True)
+
+    st.markdown("#### Data integrity checks")
+    st.dataframe(
+        [{"check": key, **value} for key, value in integrity["checks"].items()],
+        use_container_width=True,
+        hide_index=True,
+    )
+    failures = summary.get("recent_failures") or []
+    st.markdown("#### Recent failed responses")
+    if failures:
+        st.dataframe(failures, use_container_width=True, hide_index=True)
+    else:
+        st.caption("최근 실패 응답이 없습니다.")
+
+
+def _render_issue_report_monitoring() -> None:
+    st.subheader("Issue reports")
+    st.caption("사용자 신고를 전체 개선 루프의 입력으로 모아 봅니다. 필요하면 실패 케이스를 regression 후보로 승격할 수 있습니다.")
+    reports = list_issue_reports()
+    thread_names = {thread["id"]: thread["name"] for thread in list_threads()}
+    summary = summarize_issue_reports(reports)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Reports", summary["report_count"])
+    col2.metric("Threads", summary["thread_count"])
+    col3.metric("Categories", len(summary["categories"]))
+
+    if summary["categories"]:
+        st.markdown("#### Category counts")
+        st.dataframe(
+            [{"category": category, "count": count} for category, count in sorted(summary["categories"].items(), key=lambda item: (-item[1], item[0]))],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    rows = build_issue_report_rows(reports, thread_names=thread_names)
+    st.markdown("#### Report rows")
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+        selected_report_id = st.selectbox("상세 보기", options=[row["id"] for row in rows])
+        selected = next((report for report in reports if report.get("id") == selected_report_id), None)
+        if selected:
+            st.code(selected.get("file_path") or "", language="text")
+            if st.button("Regression suite 후보로 저장", use_container_width=True):
+                candidate = promote_issue_report_to_eval_candidate(
+                    selected,
+                    output_dir=MONITORING_REGRESSION_CANDIDATE_DIR,
+                )
+                st.success("Regression candidate artifact를 저장했습니다.")
+                st.code(candidate["json_path"], language="text")
+            with st.expander("원문 보기", expanded=False):
+                st.text(selected.get("content") or "")
+    else:
+        st.caption("저장된 issue report가 없습니다.")
+
+def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
+    """Render metrics for the currently selected chat only."""
+    st.header("Chat Monitoring")
+    st.caption(f"현재 선택된 chat: {current_thread['name']}")
+    messages = list_messages(current_id)
+    summary = summarize_chat_messages(messages)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Messages", summary["message_count"])
+    col2.metric("Assistant", summary["assistant_message_count"])
+    col3.metric("Avg sources", f"{summary['avg_rerank_source_count']:.1f}")
+    latency = summary["avg_latency_seconds"]
+    col4.metric("Avg latency", "-" if latency is None else f"{latency:.2f}s")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Status counts")
+        st.json(summary["statuses"])
+    with right:
+        st.markdown("#### Route counts")
+        st.json(summary["routes"])
+
+    st.markdown("#### Assistant response rows")
+    rows = build_message_monitoring_rows(messages)
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("아직 모니터링할 assistant 응답이 없습니다.")
+
+    st.markdown("#### 최근 응답 상세")
+    latest = next(
+        (
+            message
+            for message in reversed(messages)
+            if message.get("role") == "assistant"
+            and (message.get("metadata") or {}).get("status") == "succeeded"
+        ),
+        None,
+    )
+    if latest:
+        metadata = latest.get("metadata") or {}
+        st.json(
+            {
+                "route": metadata.get("route"),
+                "latency_seconds": metadata.get("latency_seconds"),
+                "search_filters": metadata.get("search_filters"),
+                "temporal_context": metadata.get("temporal_context"),
+                "monitoring": metadata.get("monitoring"),
+            }
+        )
+    else:
+        st.caption("성공한 assistant 응답이 아직 없습니다.")
+
+def render_global_monitoring_page() -> None:
+    """Render global Monitoring Mode pages that do not depend on a selected chat."""
     st.header("Monitoring Mode")
     st.caption(
         "성능개선을 위한 지표 모니터링 화면입니다. parsing, chunking, retrieval/rerank, "
@@ -1418,9 +1693,14 @@ def render_monitoring_mode(current_id: str, current_thread: dict) -> None:
     vector_status = status["vector_db"]
     config = status["config"]
 
-    data_tab, eval_tab, parsing_tab, conversation_tab = st.tabs(
-        ["데이터/설정", "고정 테스트셋", "Parsing engines", "현재 대화 지표"]
-    )
+    (
+        data_tab,
+        experiment_tab,
+        eval_tab,
+        parsing_tab,
+        global_monitoring_tab,
+        issue_tab,
+    ) = st.tabs([label for label in build_monitoring_tab_labels() if label != "Chat Monitoring"])
 
     with data_tab:
         st.subheader("데이터 준비 상태")
@@ -1459,6 +1739,9 @@ def render_monitoring_mode(current_id: str, current_thread: dict) -> None:
             for report_date, count in (db_status.get("report_date_counts") or {}).items()
         ]
         st.dataframe(date_counts, use_container_width=True, hide_index=True)
+
+    with experiment_tab:
+        _render_experiment_monitoring()
 
     with eval_tab:
         st.subheader("고정 평가 테스트셋")
@@ -1510,56 +1793,11 @@ def render_monitoring_mode(current_id: str, current_thread: dict) -> None:
     with parsing_tab:
         _render_parsing_engine_evaluation()
 
-    with conversation_tab:
-        st.subheader("현재 대화 응답 지표")
-        messages = list_messages(current_id)
-        summary = summarize_chat_messages(messages)
+    with global_monitoring_tab:
+        _render_global_monitoring(status)
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Messages", summary["message_count"])
-        col2.metric("Assistant", summary["assistant_message_count"])
-        col3.metric("Avg sources", f"{summary['avg_rerank_source_count']:.1f}")
-        latency = summary["avg_latency_seconds"]
-        col4.metric("Avg latency", "-" if latency is None else f"{latency:.2f}s")
-
-        left, right = st.columns(2)
-        with left:
-            st.markdown("#### Status counts")
-            st.json(summary["statuses"])
-        with right:
-            st.markdown("#### Route counts")
-            st.json(summary["routes"])
-
-        st.markdown("#### Assistant response rows")
-        rows = build_message_monitoring_rows(messages)
-        if rows:
-            st.dataframe(rows, use_container_width=True, hide_index=True)
-        else:
-            st.caption("아직 모니터링할 assistant 응답이 없습니다.")
-
-        st.markdown("#### 최근 응답 상세")
-        latest = next(
-            (
-                message
-                for message in reversed(messages)
-                if message.get("role") == "assistant"
-                and (message.get("metadata") or {}).get("status") == "succeeded"
-            ),
-            None,
-        )
-        if latest:
-            metadata = latest.get("metadata") or {}
-            st.json(
-                {
-                    "route": metadata.get("route"),
-                    "latency_seconds": metadata.get("latency_seconds"),
-                    "search_filters": metadata.get("search_filters"),
-                    "temporal_context": metadata.get("temporal_context"),
-                    "monitoring": metadata.get("monitoring"),
-                }
-            )
-        else:
-            st.caption("성공한 assistant 응답이 아직 없습니다.")
+    with issue_tab:
+        _render_issue_report_monitoring()
 
 
 threads = _load_threads()
@@ -1574,10 +1812,14 @@ with st.sidebar:
     render_sidebar(current_id)
 
 if MONITORING_MODE:
-    chat_tab, monitoring_tab = st.tabs(["Chat", "Monitoring"])
-    with chat_tab:
-        render_chat(current_id, current_thread)
-    with monitoring_tab:
-        render_monitoring_mode(current_id, current_thread)
+    active_page = st.session_state.get("active_monitoring_page", "Chat")
+    if active_page == "전체 Monitoring":
+        render_global_monitoring_page()
+    else:
+        chat_tab, chat_monitoring_tab = st.tabs(["Chat", "Chat Monitoring"])
+        with chat_tab:
+            render_chat(current_id, current_thread)
+        with chat_monitoring_tab:
+            render_chat_monitoring_page(current_id, current_thread)
 else:
     render_chat(current_id, current_thread)

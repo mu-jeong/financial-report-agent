@@ -8,13 +8,6 @@ import base64
 import re
 from typing import Any
 
-from src.core.metadata_filters import infer_search_filters
-
-_DATE_PATTERNS = [
-    re.compile(r"20\d{2}\s*년\s*(?P<month>1[0-2]|0?[1-9])\s*월\s*(?P<day>3[01]|[12]\d|0?[1-9])\s*일?"),
-    re.compile(r"20\d{2}[-/.](?P<month>1[0-2]|0?[1-9])[-/.](?P<day>3[01]|[12]\d|0?[1-9])"),
-    re.compile(r"(?<!\d)(?P<month>1[0-2]|0?[1-9])\s*/\s*(?P<day>3[01]|[12]\d|0?[1-9])"),
-]
 _DATE_RANGE_PATTERNS = [
     re.compile(r"20\d{2}\s*년\s*(?:1[0-2]|0?[1-9])\s*월\s*(?:3[01]|[12]\d|0?[1-9])\s*일?"),
     re.compile(r"20\d{2}[-/.](?:1[0-2]|0?[1-9])[-/.](?:3[01]|[12]\d|0?[1-9])"),
@@ -22,19 +15,10 @@ _DATE_RANGE_PATTERNS = [
     re.compile(r"20\d{2}\s*년\s*(?:1[0-2]|0?[1-9])\s*월"),
     re.compile(r"(?:이번주|지난주|전주|금주|다음주|차주|이번달|지난달|전월|금월|다음달|익월|오늘|어제|그제|내일|모레)"),
 ]
-_REPORT_WORD_RE = re.compile(r"\s*(?:발간된|최근|최신|가장|리포트들|리포트|내용|핵심|알려줘|해줘|에서|의)\s*")
 
 
 def _compact_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
-
-
-def _short_date_label(question: str) -> str | None:
-    for pattern in _DATE_PATTERNS:
-        match = pattern.search(question)
-        if match:
-            return f"{int(match.group('month'))}/{int(match.group('day'))}"
-    return None
 
 
 def _strip_temporal_phrases(question: str) -> str:
@@ -42,37 +26,6 @@ def _strip_temporal_phrases(question: str) -> str:
     for pattern in _DATE_RANGE_PATTERNS:
         cleaned = pattern.sub(" ", cleaned)
     return _compact_spaces(cleaned)
-
-
-def build_thread_title(question: str, max_length: int = 32) -> str:
-    """Build a concise deterministic title from the first user question."""
-    filters = infer_search_filters(question)
-    target = filters.get("target_name")
-    report_type = filters.get("report_type")
-    date_label = _short_date_label(question)
-
-    intent = "비교" if any(keyword in question for keyword in ["비교", "증권사별", "대비"]) else "요약"
-    subject = target or ""
-    if not subject:
-        without_time = _strip_temporal_phrases(question)
-        for keyword in ["산업", "업종", "섹터", "기업", "경제"]:
-            marker = without_time.find(keyword)
-            if marker > 0:
-                subject = _REPORT_WORD_RE.sub(" ", without_time[: marker + len(keyword)])
-                break
-        subject = _compact_spaces(subject) or "새 대화"
-    if report_type == "industry" and "산업" not in subject:
-        subject = f"{subject} 산업"
-    elif report_type == "economy" and "경제" not in subject:
-        subject = f"{subject} 경제"
-
-    parts = [subject]
-    if date_label:
-        parts.append(date_label)
-    parts.append("리포트")
-    parts.append(intent)
-    title = _compact_spaces(" ".join(part for part in parts if part))
-    return title[:max_length]
 
 
 def build_scope_notice(state_or_metadata: dict[str, Any]) -> str | None:

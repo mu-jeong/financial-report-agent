@@ -1,17 +1,8 @@
-from src.core.chat_ux import (
+from src.core.chat_ui_helpers import (
     build_clipboard_copy_html,
     build_no_result_suggestions,
     build_scope_notice,
-    build_thread_title,
 )
-
-
-def test_build_thread_title_prefers_target_date_and_comparison_intent():
-    assert build_thread_title("2026년 6월 9일 NAVER 리포트들을 증권사별로 비교해줘") == "NAVER 6/9 리포트 비교"
-
-
-def test_build_thread_title_uses_report_type_when_target_is_missing():
-    assert build_thread_title("이번주 반도체 산업 리포트 요약해줘") == "반도체 산업 리포트 요약"
 
 
 def test_build_scope_notice_explains_prior_scope_reuse():
