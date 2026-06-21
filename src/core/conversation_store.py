@@ -186,6 +186,68 @@ def update_message(
         conn.commit()
 
 
+def mark_interrupted_running_messages_failed(
+    active_job_ids: set[str] | list[str] | tuple[str, ...] | None = None,
+) -> int:
+    """Mark persisted assistant messages from interrupted background jobs as failed.
+
+    Streamlit answer generation runs in daemon threads. If the app process exits
+    before a thread updates its placeholder message, the DB can retain
+    ``status=running`` forever and the chat input stays locked. On app startup or
+    rerun, callers can pass the in-memory active job ids; any other running
+    assistant message is treated as interrupted and unlocked.
+    """
+    init_conversation_db()
+    active_jobs = {str(job_id) for job_id in (active_job_ids or []) if job_id}
+    repaired_count = 0
+    now = _utc_now()
+    interrupted_content = (
+        "이전 답변 생성 작업이 앱 종료 또는 재시작으로 중단되었습니다. "
+        "필요하면 다시 질문해 주세요."
+    )
+
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, thread_id, metadata
+            FROM conversation_messages
+            WHERE role = 'assistant'
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            if metadata.get("status") != "running":
+                continue
+            job_id = metadata.get("job_id")
+            if job_id and str(job_id) in active_jobs:
+                continue
+            metadata.update(
+                {
+                    "status": "failed",
+                    "error": "interrupted_background_job",
+                    "interrupted_at": now,
+                }
+            )
+            conn.execute(
+                """
+                UPDATE conversation_messages
+                SET content = ?, metadata = ?
+                WHERE id = ?
+                """,
+                (interrupted_content, json.dumps(metadata, ensure_ascii=False), row["id"]),
+            )
+            conn.execute(
+                "UPDATE conversation_threads SET updated_at = ? WHERE id = ?",
+                (now, row["thread_id"]),
+            )
+            repaired_count += 1
+        conn.commit()
+    return repaired_count
+
+
 def list_threads() -> list[dict[str, Any]]:
     init_conversation_db()
     with get_connection() as conn:

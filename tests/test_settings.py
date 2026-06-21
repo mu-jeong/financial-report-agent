@@ -1,0 +1,59 @@
+from datetime import date
+
+from src.configs.settings import BASE_DIR, get_config_value, quickstart_env_updates, render_env_example
+
+
+def test_get_config_value_parses_typed_environment(monkeypatch):
+    monkeypatch.setenv("CRAWLER_LOOKBACK_DAYS", "14")
+    monkeypatch.setenv("USE_RERANKER", "yes")
+    monkeypatch.setenv("RERANK_TIMEOUT", "12.5")
+    monkeypatch.setenv("MONITORING_MODE", "on")
+
+    assert get_config_value("CRAWLER_LOOKBACK_DAYS") == 14
+    assert get_config_value("USE_RERANKER") is True
+    assert get_config_value("RERANK_TIMEOUT") == 12.5
+    assert get_config_value("MONITORING_MODE") is True
+
+
+def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
+    monkeypatch.delenv("CRAWLER_LOOKBACK_DAYS", raising=False)
+    monkeypatch.delenv("MONITORING_MODE", raising=False)
+    monkeypatch.setenv("CRAWLER_TARGET_DATE", "")
+
+    assert get_config_value("CRAWLER_LOOKBACK_DAYS") == 7
+    assert get_config_value("CRAWLER_TARGET_DATE") == date.today().isoformat()
+    assert get_config_value("MONITORING_MODE") is False
+
+
+def test_quickstart_env_updates_use_run_date_and_shared_defaults(monkeypatch):
+    for key in [
+        "CRAWLER_LOOKBACK_DAYS",
+        "CRAWLER_TARGET_COUNT",
+        "CRAWLER_MAX_LOOKBACK_DAYS",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+
+    updates = quickstart_env_updates(date(2026, 6, 3))
+
+    assert updates == {
+        "CRAWLER_MODE": "LATEST",
+        "CRAWLER_TARGET_DATE": "2026-06-03",
+        "CRAWLER_LOOKBACK_DAYS": "7",
+        "CRAWLER_TARGET_COUNT": "0",
+        "CRAWLER_MAX_LOOKBACK_DAYS": "7",
+    }
+
+
+def test_render_env_example_contains_generated_defaults():
+    content = render_env_example()
+
+    assert "Generated from src/configs/settings.py" in content
+    assert "OPENROUTER_API_KEY=your_openrouter_api_key_here" in content
+    assert "CRAWLER_TARGET_DATE=" in content
+    assert "CRAWLER_LOOKBACK_DAYS=7" in content
+    assert "REPORT_PDF_DIR=" in content
+    assert "MONITORING_MODE=false" in content
+
+
+def test_env_example_file_matches_rendered_specs():
+    assert (BASE_DIR / ".env.example").read_text(encoding="utf-8-sig") == render_env_example()

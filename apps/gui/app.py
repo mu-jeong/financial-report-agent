@@ -42,6 +42,7 @@ get_chat_history = conversation_store.get_chat_history
 load_evaluation_dataset = monitoring.load_evaluation_dataset
 list_messages = conversation_store.list_messages
 list_threads = conversation_store.list_threads
+mark_interrupted_running_messages_failed = conversation_store.mark_interrupted_running_messages_failed
 rename_thread = conversation_store.rename_thread
 summarize_chat_messages = monitoring.summarize_chat_messages
 summarize_evaluation_dataset = monitoring.summarize_evaluation_dataset
@@ -165,6 +166,14 @@ def _show_queued_chat_job_toasts() -> None:
     for event in queued_events:
         icon = "✅" if event.get("status") == "succeeded" else "⚠️"
         st.toast(event.get("message", "답변 작업 상태가 변경되었습니다."), icon=icon)
+
+
+def _repair_interrupted_chat_jobs() -> int:
+    """Unlock chats whose background answer thread was lost on app restart."""
+    registry = _chat_job_registry()
+    with registry["lock"]:
+        active_job_ids = set(registry["running_job_ids"])
+    return mark_interrupted_running_messages_failed(active_job_ids=active_job_ids)
 
 
 def _search_scope_from_graph_state(final_state: dict) -> dict | None:
@@ -475,6 +484,7 @@ def _scroll_to_anchor(anchor_id: str, *, offset_px: int = 104) -> None:
 
 
 def _load_threads() -> list[dict]:
+    _repair_interrupted_chat_jobs()
     threads = list_threads()
     if not threads:
         thread_id = create_thread("새로운 대화")
