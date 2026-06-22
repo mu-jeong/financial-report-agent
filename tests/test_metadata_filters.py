@@ -400,6 +400,89 @@ def test_search_scope_reuses_prior_non_temporal_filters_for_date_only_followup()
     assert result["temporal_context"]["report_date_end"] == "2026-06-15"
 
 
+def test_search_scope_keeps_prior_dates_and_adds_company_filter_for_section_deep_dive():
+    result = search_scope.search_scope_node(
+        {
+            "question": "개별종목 리포트에 대해 좀 더 자세히 작성해줘",
+            "rewritten_query": "개별종목 리포트에 대해 좀 더 자세히 작성해줘",
+            "chat_history": [],
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-15",
+                    "report_date_end": "2026-06-21",
+                },
+                "temporal_context": {
+                    "expression": "지난주",
+                    "report_date_start": "2026-06-15",
+                    "report_date_end": "2026-06-21",
+                },
+                "file_names": ["economy.pdf", "company-a.pdf", "industry.pdf"],
+            },
+            "followup_scope_intent": True,
+        }
+    )
+
+    assert result["routing_context"]["route_hint"] is None
+    assert result["routing_context"]["has_vector_intent"] is True
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-15",
+        "report_date_end": "2026-06-21",
+        "report_type": "company",
+    }
+    assert result["scope_decision"] == {
+        "matched": True,
+        "reason": "matched_prior_section_alias",
+        "matched_section_id": "company",
+        "matched_section_label": "개별 종목 분석 리포트",
+        "matched_alias": "개별종목",
+        "inherited_filters": {
+            "report_date_start": "2026-06-15",
+            "report_date_end": "2026-06-21",
+        },
+        "added_filters": {"report_type": "company"},
+        "dropped_filters": ["file_names"],
+        "search_filters": {
+            "report_date_start": "2026-06-15",
+            "report_date_end": "2026-06-21",
+            "report_type": "company",
+        },
+    }
+
+
+def test_search_scope_does_not_select_single_top_company_for_company_section_followup():
+    result = search_scope.search_scope_node(
+        {
+            "question": "주요 기업에 대해 발간된 리포트를 상세하게 정리해줘",
+            "rewritten_query": "top target company report summary",
+            "chat_history": [],
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-15",
+                    "report_date_end": "2026-06-21",
+                },
+                "temporal_context": {
+                    "expression": "지난주",
+                    "report_date_start": "2026-06-15",
+                    "report_date_end": "2026-06-21",
+                },
+                "file_names": ["company-a.pdf", "company-b.pdf", "industry.pdf"],
+            },
+            "followup_scope_intent": True,
+        }
+    )
+
+    assert "scope_selection_request" not in result
+    assert result["scope_decision"]["matched_section_id"] == "company"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-15",
+        "report_date_end": "2026-06-21",
+        "report_type": "company",
+    }
+
+
 def test_search_scope_keeps_explicit_current_filters_over_prior_scope(monkeypatch):
     def fake_infer_search_filters(query):
         return {

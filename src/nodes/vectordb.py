@@ -242,10 +242,14 @@ def should_apply_document_coverage(
     query: str,
     search_filters: dict | None,
     required_file_names: list[str] | tuple[str, ...] | str | None = None,
+    scope_decision: dict | None = None,
 ) -> tuple[bool, str]:
     """Decide whether to trade some ranking purity for document diversity."""
     if required_file_names:
         return True, "required_file_names"
+
+    if (scope_decision or {}).get("reason") == "matched_prior_section_alias":
+        return True, "section_followup_scope"
 
     filters = search_filters or {}
     if filters.get("file_names"):
@@ -269,6 +273,7 @@ def select_top_passages(
     *,
     search_filters: dict | None = None,
     required_file_names: list[str] | tuple[str, ...] | str | None = None,
+    scope_decision: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """Build passages and select final context entries using SEARCH_TOP_K."""
     passages = _build_passages(docs_with_scores)
@@ -285,6 +290,7 @@ def select_top_passages(
         query,
         search_filters,
         required_file_names,
+        scope_decision,
     )
     if apply_coverage:
         selected = ensure_document_coverage(
@@ -311,6 +317,7 @@ def vectordb_node(state: State) -> dict:
     selection_context = state.get("selection_context")
     if selection_context:
         temporal_context_text += f"\n[검색 대상 선정 근거]\n{selection_context}\n"
+    scope_decision = state.get("scope_decision")
     if not os.path.exists(FAISS_DIR):
         msg = "faiss_db/ 폴더가 없어 검색을 진행할 수 없습니다. 먼저 임베딩 파이프라인을 실행해 주세요."
         logger.warning(msg)
@@ -360,6 +367,7 @@ def vectordb_node(state: State) -> dict:
         docs_with_scores,
         search_filters=search_filters,
         required_file_names=required_file_names,
+        scope_decision=scope_decision,
     )
     retrieval_metrics.update(coverage_metrics)
     retrieval_metrics["selected_source_count"] = len(top_passages)
@@ -389,6 +397,7 @@ def vectordb_node(state: State) -> dict:
                 "report_date": meta.get("report_date", "-"),
                 "title": meta.get("title", "-"),
                 "broker": meta.get("broker", "-"),
+                "report_type": meta.get("report_type", "-"),
                 "file_name": meta.get("file_name", "-"),
                 "score": float(result.get("score", 0.0)),
                 "rerank_score": result.get("rerank_score"),

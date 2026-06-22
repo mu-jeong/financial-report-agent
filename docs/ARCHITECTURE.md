@@ -72,15 +72,21 @@ LangGraph는 대략 다음 노드로 구성됩니다.
 1. Query rewrite: 사용자 질문을 검색과 SQL 생성에 적합하게 정리합니다.
    - `should_rewrite_with_history()`는 날짜만 바뀐 후속 질문, 직전 답변 범위를 가리키는 질문, 독립적인 새 검색 질문을 구분합니다.
    - `query_rewrite_node()`는 `rewritten_query`와 함께 `uses_chat_history`, `followup_scope_intent`를 state에 기록합니다.
-2. Router: RDB 검색이 적합한지 VectorDB 검색이 적합한지 선택합니다.
+2. Search scope: `src/nodes/search_scope.py`가 metadata filter, 직전 답변 scope 재사용, scope-selection 요청을 결정합니다.
    - GUI가 전달한 `prior_search_scope`와 `followup_scope_intent`를 함께 봅니다. 후속 질문이고 현재 질문에 새 날짜 조건이 없으면 직전 답변의 `search_filters`, `temporal_context`, 참고 PDF `file_names`를 검색 조건으로 재사용합니다.
    - 현재 질문에 새 날짜 조건이 있으면 직전 검색 범위보다 현재 질문의 날짜/필터를 우선합니다.
-3. RDB path: SQL guardrail을 통과한 read-only SELECT만 SQLite에 실행합니다.
-4. VectorDB path: FAISS 후보를 넉넉히 가져온 뒤 metadata filter, 최신성 가중치, 선택형 rerank를 적용합니다.
+   - `src/core/followup_scope.py`는 직전 답변의 `answer_scope_index`를 사용해 "개별 종목/주요 기업", "섹터", "거시경제" 같은 섹션 deep-dive 질문을 `company`, `industry`, `economy` report type scope로 해석합니다.
+   - 섹션 follow-up이 매칭되면 직전 날짜 범위는 유지하고 stale `file_names` scope는 제거합니다. 적용 근거는 `scope_decision`에 `matched_alias`, `inherited_filters`, `added_filters`, `dropped_filters`로 기록합니다.
+   - "top target company"처럼 rewrite된 표현이 있더라도 섹션 follow-up이면 단일 top-company 선택으로 축소하지 않습니다.
+3. Router: RDB 검색이 적합한지 VectorDB 검색이 적합한지 선택합니다.
+4. RDB path: SQL guardrail을 통과한 read-only SELECT만 SQLite에 실행합니다.
+5. VectorDB path: FAISS 후보를 넉넉히 가져온 뒤 metadata filter, 최신성 가중치, 선택형 rerank를 적용합니다.
    - `metadata_matches()`는 날짜/종목/증권사/리포트 유형뿐 아니라 `file_names` 필터도 처리해 직전 답변에 실제 사용된 PDF 범위로 재검색할 수 있습니다.
-5. VectorDB 결과가 없으면 해당 thread의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.
-6. Final response: 검색 결과와 참고 문서를 바탕으로 답변을 생성합니다.
+   - `select_top_passages()`는 명시 파일 scope, 복수 문서/list 의도, 섹션 follow-up에서 `ensure_document_coverage()`를 적용해 최종 context가 한 PDF의 여러 chunk로만 채워지는 상황을 줄입니다. 적용 여부와 이유는 `document_coverage_applied`, `document_coverage_reason`으로 monitoring metadata에 남습니다.
+6. VectorDB 결과가 없으면 해당 thread의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.
+7. Final response: 검색 결과와 참고 문서를 바탕으로 답변을 생성합니다.
    - GUI는 성공한 assistant 메시지 metadata에 `rerank_info`와 `search_scope`를 저장합니다. `search_scope`는 다음 후속 질문의 `prior_search_scope` 입력으로 전달됩니다.
+   - `rerank_info`에는 답변에 사용된 source의 `report_type`도 포함되어, 이후 `answer_scope_index` 구성과 monitoring에서 섹션별 source 확인에 사용됩니다.
    - GUI source renderer는 같은 PDF에서 검색된 여러 chunk를 `group_sources_by_document()`로 문서 단위로 묶고, `document_rank_aliases()`로 원래 chunk rank를 1부터 시작하는 문서 표시 번호로 다시 매깁니다.
 
 ## 6. 메타데이터 필터와 최신성 가중치
@@ -94,7 +100,7 @@ LangGraph는 대략 다음 노드로 구성됩니다.
 
 `src/nodes/vectordb.py`는 필터링 전 후보를 충분히 가져온 뒤 조건에 맞는 문서를 고릅니다. `RECENCY_WEIGHT`가 0보다 크면 최신 `report_date` 문서에 점수 가중치를 부여합니다.
 
-후속 질문에서 직전 답변의 문서 범위를 재사용할 때는 `file_names` 필터가 함께 들어갈 수 있습니다. 이 필터는 종목/날짜 조건만으로는 같은 범위가 보장되지 않는 경우를 막기 위해, 직전 답변에 실제 사용된 PDF 파일명과 일치하는 chunk만 남깁니다.
+후속 질문에서 직전 답변의 문서 범위를 재사용할 때는 `file_names` 필터가 함께 들어갈 수 있습니다. 이 필터는 종목/날짜 조건만으로는 같은 범위가 보장되지 않는 경우를 막기 위해, 직전 답변에 실제 사용된 PDF 파일명과 일치하는 chunk만 남깁니다. 반대로 답변의 한 섹션을 더 자세히 묻는 경우에는 섹션 `report_type`을 새 범위로 사용하므로 기존 `file_names`를 제거합니다. 이렇게 해야 "개별 종목/주요 기업" 후속 질문이 직전 전체 답변의 일부 파일 목록이나 단일 top company로 과도하게 좁혀지지 않습니다.
 
 ## 7. Rerank
 
@@ -122,7 +128,7 @@ RERANK_MODEL=cohere/rerank-v3.5
 - GUI 답변 생성은 백그라운드 thread에서 실행되고, assistant 메시지는 먼저 `status=running`으로 저장된 뒤 완료 시 `status=succeeded`, 실패 시 `status=failed` metadata로 갱신됩니다.
 - deprecated CLI는 기존 호환성을 위해 기본 thread를 계속 사용하지만 신규 기능 개발 대상이 아닙니다.
 - assistant 메시지는 참고 문서와 rerank 정보를 metadata로 함께 저장할 수 있습니다.
-- GUI assistant 메시지는 성공 시 `search_scope` metadata를 추가로 저장합니다. 값에는 `route`, `search_filters`, `temporal_context`, `scope_source`, `file_names`가 포함될 수 있으며, 이후 같은 thread의 후속 질문에서 가장 최근 성공 답변의 scope를 재사용합니다.
+- GUI assistant 메시지는 성공 시 `search_scope` metadata를 추가로 저장합니다. 값에는 `route`, `search_filters`, `temporal_context`, `scope_source`, `file_names`, `answer_scope_index`가 포함될 수 있으며, 이후 같은 thread의 후속 질문에서 가장 최근 성공 답변의 scope를 재사용합니다.
 
 ## 9. 문제 신고
 
@@ -137,7 +143,8 @@ RERANK_MODEL=cohere/rerank-v3.5
 ## 10. 참고 문서 네비게이션과 PDF 위치 이동 한계
 
 현재 GUI는 답변 안의 `[숫자]` 참조를 참고 문서 expander의 해당 항목으로
-이동하는 내부 anchor 링크로 변환합니다. Streamlit 상단 바에 가려지지 않도록
+이동하는 내부 anchor 링크로 변환합니다. 참고 문서 expander는 기본적으로 접힌
+상태이며, 사용자가 필요할 때 직접 펼칩니다. Streamlit 상단 바에 가려지지 않도록
 anchor에는 scroll margin을 둡니다.
 
 검색 결과는 chunk 단위 rank를 갖지만, GUI 참고 문서 목록은 PDF 문서 기준으로
@@ -170,6 +177,6 @@ text offset 같은 위치 metadata를 함께 저장해야 합니다. 현재 구�
 주요 검증 명령은 다음과 같습니다.
 
 ```bash
-python -m py_compile apps/gui/app.py apps/cli/app.py src/core/data_update_jobs.py src/graphs/main_graph.py src/nodes/vectordb.py
+python -m py_compile apps/gui/app.py apps/cli/app.py src/core/data_update_jobs.py src/graphs/main_graph.py src/core/followup_scope.py src/nodes/search_scope.py src/nodes/vectordb.py
 python -m pytest -q
 ```

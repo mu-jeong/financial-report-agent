@@ -451,6 +451,7 @@ def compact_graph_monitoring_metadata(
         "search_filters": final_state.get("search_filters") or {},
         "temporal_context": final_state.get("temporal_context"),
         "selection_context": final_state.get("selection_context"),
+        "scope_decision": final_state.get("scope_decision"),
         "monitoring": {
             "query_rewrite": {
                 "rewritten_query": final_state.get("rewritten_query"),

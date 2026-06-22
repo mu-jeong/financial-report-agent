@@ -5,6 +5,7 @@ from langchain_core.prompts import PromptTemplate
 
 from src.configs.config import get_logger
 from src.configs.prompts import HISTORY_USAGE_DECISION_PROMPT, QUERY_REWRITE_PROMPT
+from src.core.followup_scope import is_section_deep_dive_followup
 from src.core.metadata_filters import resolve_temporal_context
 from src.graphs.state import State
 from src.llms.factory import build_chat_model
@@ -151,6 +152,8 @@ def is_scope_followup(question: str) -> bool:
     """Return whether the query points back to the prior retrieved answer scope."""
     normalized = re.sub(r"\s+", "", str(question or ""))
     if any(re.sub(r"\s+", "", keyword) in normalized for keyword in DEICTIC_SCOPE_MARKERS):
+        return True
+    if is_section_deep_dive_followup(question):
         return True
     if any(normalized == re.sub(r"\s+", "", keyword) for keyword in REPORT_TYPE_ONLY_SCOPE_MARKERS):
         return True

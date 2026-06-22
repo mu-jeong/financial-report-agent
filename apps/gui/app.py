@@ -28,6 +28,7 @@ from src.core.chat_ui_helpers import (
     build_no_result_suggestions,
     build_scope_notice,
 )
+from src.core.followup_scope import build_answer_scope_index
 
 data_update_jobs = importlib.reload(data_update_jobs)
 conversation_store = importlib.reload(conversation_store)
@@ -221,6 +222,7 @@ def _search_scope_from_graph_state(final_state: dict) -> dict | None:
     }
     if file_names:
         scope["file_names"] = file_names
+    scope["answer_scope_index"] = build_answer_scope_index(scope, rerank_info)
     return scope
 
 
@@ -1075,7 +1077,7 @@ def _render_message(message: dict, *, index: int) -> None:
                 key_prefix=f"message_{index}",
                 anchor_prefix=anchor_prefix,
                 used_ranks=source_filter_ranks,
-                expanded=bool(used_ranks) and linked_content != display_content,
+                expanded=False,
             )
             _render_no_result_actions(message, index=index)
         else:

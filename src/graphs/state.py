@@ -17,6 +17,7 @@ class State(TypedDict):
     selection_context: Optional[dict]  # DB aggregation context for selected target/scope
     routing_context: Optional[dict]  # search_scope_node가 router에 전달하는 결정 힌트
     scope_selection_request: Optional[dict]  # conditional scope_selection_node execution request
+    scope_decision: Optional[dict]  # prior answer section/scope matching decision for follow-up queries
     
     # --- 아래 필드들은 라우팅 경로(분기)에 따라 값이 없을 수도 있으므로 Optional 처리 ---
     sql_query: Optional[str]        # RDB에서 사용된 SQL (RDB 경로)

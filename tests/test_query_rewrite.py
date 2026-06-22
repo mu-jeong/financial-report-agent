@@ -104,6 +104,7 @@ def test_history_decision_keeps_date_scoped_broad_search_independent(monkeypatch
         RECENT_HISTORY,
     )
 
+
 def test_scope_followup_marker_does_not_override_explicit_new_topic():
     result = query_rewrite.query_rewrite_node(
         {
@@ -129,3 +130,17 @@ def test_deictic_scope_marker_still_marks_followup_with_topic_words():
 
     assert result["followup_scope_intent"] is True
 
+
+def test_query_rewrite_marks_section_deep_dive_as_prior_scope_followup():
+    result = query_rewrite.query_rewrite_node(
+        {
+            "question": "개별종목 리포트에 대해 좀 더 자세히 작성해줘",
+            "chat_history": [],
+        }
+    )
+
+    assert result == {
+        "rewritten_query": "개별종목 리포트에 대해 좀 더 자세히 작성해줘",
+        "uses_chat_history": False,
+        "followup_scope_intent": True,
+    }

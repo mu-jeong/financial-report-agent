@@ -1,3 +1,4 @@
+from src.core.followup_scope import resolve_section_followup_scope
 from src.core.metadata_filters import infer_search_filters, resolve_temporal_context
 from src.graphs.state import State
 
@@ -12,6 +13,9 @@ VECTORDB_INTENT_KEYWORDS = (
     "전망",
     "리스크",
     "요약",
+    "자세히",
+    "상세히",
+    "상세하게",
     "summary",
     "content",
 )
@@ -72,6 +76,7 @@ def search_scope_node(state: State) -> dict:
 
     scope_source = None
     route_hint = None
+    scope_decision = None
     prior_search_scope = state.get("prior_search_scope") or {}
     followup_scope_intent = bool(state.get("followup_scope_intent"))
     current_non_temporal_filters = {
@@ -93,18 +98,27 @@ def search_scope_node(state: State) -> dict:
         if file_names:
             prior_filters["file_names"] = file_names
         if prior_filters:
-            prior_filters.update(current_non_temporal_filters)
-            if current_temporal_context and not full_period_request:
-                prior_filters["report_date_start"] = current_temporal_context["report_date_start"]
-                prior_filters["report_date_end"] = current_temporal_context["report_date_end"]
-                prior_filters.pop("file_names", None)
-            if "report_type" in current_non_temporal_filters and not has_vector_intent:
-                prior_filters.pop("file_names", None)
-            if full_period_request:
-                prior_filters.pop("report_date_start", None)
-                prior_filters.pop("report_date_end", None)
-                prior_filters.pop("file_names", None)
-            search_filters = prior_filters
+            section_decision = resolve_section_followup_scope(
+                state["question"],
+                current_filters=current_non_temporal_filters,
+                prior_search_scope=prior_search_scope,
+            )
+            if section_decision.get("matched"):
+                search_filters = section_decision["search_filters"]
+                scope_decision = section_decision
+            else:
+                prior_filters.update(current_non_temporal_filters)
+                if current_temporal_context and not full_period_request:
+                    prior_filters["report_date_start"] = current_temporal_context["report_date_start"]
+                    prior_filters["report_date_end"] = current_temporal_context["report_date_end"]
+                    prior_filters.pop("file_names", None)
+                if "report_type" in current_non_temporal_filters:
+                    prior_filters.pop("file_names", None)
+                if full_period_request:
+                    prior_filters.pop("report_date_start", None)
+                    prior_filters.pop("report_date_end", None)
+                    prior_filters.pop("file_names", None)
+                search_filters = prior_filters
             temporal_context = (
                 None
                 if full_period_request
@@ -119,7 +133,9 @@ def search_scope_node(state: State) -> dict:
                 route_hint = "rdb"
 
     scope_selection_request = None
-    if _is_top_target_request(combined_intent_text):
+    if _is_top_target_request(combined_intent_text) and not (
+        scope_decision and scope_decision.get("reason") == "matched_prior_section_alias"
+    ):
         scope_selection_request = {
             "type": "top_company_target_by_report_count",
             "filters": {
@@ -141,4 +157,6 @@ def search_scope_node(state: State) -> dict:
     }
     if scope_selection_request is not None:
         result["scope_selection_request"] = scope_selection_request
+    if scope_decision is not None:
+        result["scope_decision"] = scope_decision
     return result

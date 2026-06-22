@@ -32,7 +32,7 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 - 선택형 OpenRouter rerank(`cohere/rerank-v3.5`) 또는 FlashRank fallback
 - `report_date` 기준 날짜/월/분기/연도 필터링과 최신성 가중치(`RECENCY_WEIGHT`) 지원
 - VectorDB 검색 실패 시 short-term memory 영향을 제거하고 원질문으로 재검색
-- 답변의 `[숫자]` citation과 참고 문서 목록 연동
+- 답변의 `[숫자]` citation과 기본 접힘 상태의 참고 문서 목록 연동
 - Streamlit GUI 대화 기록 저장, 백그라운드 답변 생성, 대화 이름 변경/삭제, 참고 PDF 열기
 - FinanceDataReader 기반 주가 조회 tool calling
 - Streamlit GUI 실행 (CLI는 유지보수 전용 deprecated 모드)
@@ -180,18 +180,27 @@ GUI 답변 생성은 백그라운드 thread에서 실행됩니다. 답변 생성
 
 ### 대화 후속 질문과 참고 문서 표시
 
-GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata에 저장합니다. 저장되는 범위에는 VectorDB 필터, 상대 날짜 해석 결과, 실제 답변에 사용된 참고 PDF 파일명이 포함됩니다. 사용자가 "주요 내용 정리", "방금 내용 요약", "위 내용 핵심"처럼 직전 답변을 가리키는 후속 질문을 하면 같은 문서 범위를 재사용해 답변이 다른 리포트로 새지 않도록 합니다. 다만 "5월 주요 내용"처럼 새 날짜 조건을 명시한 질문은 현재 질문의 조건을 우선합니다.
+GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata에 저장합니다. 저장되는 범위에는 VectorDB 필터, 상대 날짜 해석 결과, 실제 답변에 사용된 참고 PDF 파일명, 답변 섹션별 `answer_scope_index`가 포함됩니다. 사용자가 "주요 내용 정리", "방금 내용 요약", "위 내용 핵심"처럼 직전 답변을 가리키는 후속 질문을 하면 같은 문서 범위를 재사용해 답변이 다른 리포트로 새지 않도록 합니다.
+
+직전 답변의 특정 섹션을 더 자세히 묻는 질문도 별도로 처리합니다. 예를 들어 "개별 종목/주요 기업 리포트를 상세하게 정리해줘", "섹터 부분을 자세히 알려줘", "거시경제 내용을 더 알려줘" 같은 질문은 직전 답변의 날짜 범위를 유지하면서 `report_type=company|industry|economy` 필터를 추가합니다. 이때 직전 답변의 전체 PDF 파일명 목록은 섹션 범위를 과도하게 제한하지 않도록 제거하고, 어떤 섹션 alias와 필터가 적용됐는지는 `scope_decision` metadata로 남깁니다. 다만 "5월 주요 내용"처럼 새 날짜 조건을 명시한 질문은 현재 질문의 조건을 우선합니다.
+
+참고 문서 목록은 답변 안의 citation 링크와 연결되지만, 화면에서는 기본적으로 접힌 상태로 표시됩니다. 필요한 경우 사용자가 직접 펼쳐서 문서명과 `열기` 버튼을 확인합니다.
 
 ## 검색 및 답변 흐름
 
 1. `query_rewrite`: 질문을 검색 친화적으로 정리합니다.
    - 후속 질문 여부를 판단해 `followup_scope_intent`를 상태에 남깁니다.
-2. `router`: RDB 질문인지 VectorDB 질문인지 판단합니다.
+   - 직전 답변 섹션을 가리키는 deep-dive 질문은 `src/core/followup_scope.py`의 섹션 alias(`company`, `industry`, `economy`)로 감지합니다.
+2. `search_scope`: 날짜/메타데이터 필터와 직전 답변 scope 재사용 여부를 결정합니다.
    - `followup_scope_intent`가 켜져 있고 새 날짜 조건이 없으면 직전 VectorDB 답변의 검색 필터, 날짜 범위, 실제 참고 파일명을 `prior_search_scope`로 재사용합니다.
-3. RDB 검색: LLM이 SQL을 생성하고 guardrail을 통과한 read-only `SELECT`만 실행합니다.
-4. VectorDB 검색: FAISS 후보를 넉넉히 가져온 뒤 날짜/종목/증권사/리포트 유형/파일명 필터와 최신성 가중치를 적용합니다.
-5. `USE_RERANKER=true`일 때 OpenRouter rerank를 추가로 적용합니다. 기본값은 비용을 고려해 false입니다.
-6. VectorDB 검색 결과가 없으면 해당 대화의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.
+   - 섹션 follow-up이면 직전 날짜 범위는 유지하고 섹션별 `report_type` 필터를 추가하며, `scope_decision`에 적용 근거를 기록합니다.
+   - 섹션 follow-up은 "top company"류 rewrite가 끼어들어도 단일 기업 선택으로 축소하지 않습니다.
+3. `router`: RDB 질문인지 VectorDB 질문인지 판단합니다.
+4. RDB 검색: LLM이 SQL을 생성하고 guardrail을 통과한 read-only `SELECT`만 실행합니다.
+5. VectorDB 검색: FAISS 후보를 넉넉히 가져온 뒤 날짜/종목/증권사/리포트 유형/파일명 필터와 최신성 가중치를 적용합니다.
+   - 복수 문서 의도, 명시 파일 scope, 섹션 follow-up에서는 특정 PDF chunk에 결과가 쏠리지 않도록 문서 coverage를 적용합니다.
+6. `USE_RERANKER=true`일 때 OpenRouter rerank를 추가로 적용합니다. 기본값은 비용을 고려해 false입니다.
+7. VectorDB 검색 결과가 없으면 해당 대화의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.
 
 ## PDF 추출 엔진 비교
 
@@ -212,7 +221,7 @@ python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marke
 python -m pytest -q
 ```
 
-현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, OpenRouter embedding/rerank payload, PDF 추출 엔진/표 제거 계약, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다.
+현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, 답변 섹션 기반 follow-up scope 결정, 섹션 follow-up의 문서 coverage, OpenRouter embedding/rerank payload, PDF 추출 엔진/표 제거 계약, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다.
 
 ### 평가용 테스트셋
 
@@ -274,7 +283,7 @@ python -m pytest -q
 - Data status: 다운로드 PDF, DB row, 임베딩 완료/대기, FAISS 파일, 주요 설정 상태
 - Evaluation dataset: 고정 평가셋 case 수, route coverage, monitoring dimension 분포
 - Parsing engine evaluation: 선택한 PDF/폴더를 여러 엔진으로 추출해 latency, 문자 수, block 수, table-like line 등 지표를 CSV/JSON/sample로 저장
-- Conversation metrics: 현재 대화의 route, source 수, latency, monitoring metadata 요약
+- Conversation metrics: 현재 대화의 route, source 수, latency, `scope_decision`, retrieval coverage 등 monitoring metadata 요약
 
 ### TODO
 

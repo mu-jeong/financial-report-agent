@@ -92,6 +92,7 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
             "followup_scope_intent": False,
             "search_filters": {"target_name": "NAVER"},
             "temporal_context": None,
+            "scope_decision": {"reason": "matched_prior_section_alias"},
         },
         latency_seconds=1.23456,
         rerank_info=[
@@ -103,6 +104,7 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
     assert metadata["route"] == "vectordb"
     assert metadata["latency_seconds"] == 1.235
     assert metadata["search_filters"] == {"target_name": "NAVER"}
+    assert metadata["scope_decision"] == {"reason": "matched_prior_section_alias"}
     assert metadata["monitoring"]["retrieval"]["source_count"] == 2
     assert metadata["monitoring"]["retrieval"]["score_summary"]["rerank_score"]["avg"] == 0.7
 

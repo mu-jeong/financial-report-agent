@@ -78,6 +78,7 @@ def test_ensure_document_coverage_honors_explicit_required_file_scope():
 
     assert {item["meta"]["file_name"] for item in covered} == {"hanwha.pdf", "yuanta.pdf"}
 
+
 def test_select_top_passages_skips_document_coverage_for_single_target_deep_dive(monkeypatch):
     import src.nodes.vectordb as vectordb
 
@@ -145,3 +146,68 @@ def test_select_top_passages_applies_document_coverage_for_multi_document_intent
         "document_coverage_reason": "multi_document_intent",
     }
 
+
+def test_select_top_passages_applies_document_coverage_for_section_followup(monkeypatch):
+    import src.nodes.vectordb as vectordb
+
+    monkeypatch.setattr(vectordb, "SEARCH_TOP_K", 3)
+    monkeypatch.setattr(vectordb, "USE_RERANKER", False)
+    monkeypatch.setattr(vectordb, "RECENCY_WEIGHT", 0)
+    docs_with_scores = [
+        (
+            Document(
+                page_content="넥스트바이오메디컬 논문 상세 chunk 1",
+                metadata={"file_name": "nextbio.pdf", "target_name": "넥스트바이오메디컬", "report_type": "company"},
+            ),
+            0.1,
+        ),
+        (
+            Document(
+                page_content="넥스트바이오메디컬 논문 상세 chunk 2",
+                metadata={"file_name": "nextbio.pdf", "target_name": "넥스트바이오메디컬", "report_type": "company"},
+            ),
+            0.2,
+        ),
+        (
+            Document(
+                page_content="넥스트바이오메디컬 논문 상세 chunk 3",
+                metadata={"file_name": "nextbio.pdf", "target_name": "넥스트바이오메디컬", "report_type": "company"},
+            ),
+            0.3,
+        ),
+        (
+            Document(
+                page_content="삼성E&A 수주 모멘텀",
+                metadata={"file_name": "samsung_ea.pdf", "target_name": "삼성E&A", "report_type": "company"},
+            ),
+            0.9,
+        ),
+        (
+            Document(
+                page_content="리가켐바이오 ADC 이벤트",
+                metadata={"file_name": "ligachem.pdf", "target_name": "리가켐바이오", "report_type": "company"},
+            ),
+            1.0,
+        ),
+    ]
+
+    selected, metrics = select_top_passages(
+        "개별 종목에 대해 좀 더 자세히 작성해줘",
+        docs_with_scores,
+        search_filters={
+            "report_date_start": "2026-06-15",
+            "report_date_end": "2026-06-21",
+            "report_type": "company",
+        },
+        scope_decision={"reason": "matched_prior_section_alias", "matched_section_id": "company"},
+    )
+
+    assert {item["meta"]["file_name"] for item in selected} == {
+        "nextbio.pdf",
+        "samsung_ea.pdf",
+        "ligachem.pdf",
+    }
+    assert metrics == {
+        "document_coverage_applied": True,
+        "document_coverage_reason": "section_followup_scope",
+    }
