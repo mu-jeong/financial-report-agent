@@ -72,6 +72,31 @@ def test_vectordb_no_result_retries_once_without_memory():
     )
 
 
+def test_build_graph_uses_memory_checkpointer_for_thread_state():
+    app = main_graph.build_graph()
+
+    assert app.checkpointer is not None
+
+
+def test_final_response_node_commits_active_scope_for_next_turn():
+    result = main_graph.final_response_node(
+        {
+            "question": "삼성전자 리포트 요약",
+            "generation": "요약 답변 [1]",
+            "route": "vectordb",
+            "search_filters": {"target_name": "삼성전자", "report_type": "company"},
+            "temporal_context": {"report_date_start": "2026-06-22", "report_date_end": "2026-06-25"},
+            "scope_source": "explicit_question",
+            "rerank_info": [{"file_name": "samsung.pdf", "rank": 1, "report_type": "company"}],
+        }
+    )
+
+    assert result["active_scope"]["route"] == "vectordb"
+    assert result["active_scope"]["search_filters"] == {"target_name": "삼성전자", "report_type": "company"}
+    assert result["active_scope"]["temporal_context"] == {"report_date_start": "2026-06-22", "report_date_end": "2026-06-25"}
+    assert result["active_scope"]["file_names"] == ["samsung.pdf"]
+
+
 def test_clear_short_term_memory_retry_keeps_metadata_filters():
     result = main_graph.clear_short_term_memory_retry_node(
         {

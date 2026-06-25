@@ -131,6 +131,17 @@ def test_deictic_scope_marker_still_marks_followup_with_topic_words():
     assert result["followup_scope_intent"] is True
 
 
+def test_deictic_period_marker_marks_followup_with_explicit_target():
+    result = query_rewrite.query_rewrite_node(
+        {
+            "question": "해당 기간 내에 발간된 sk하이닉스에 대한 리포트 정리해서 내용을 알려줘",
+            "chat_history": [],
+        }
+    )
+
+    assert result["followup_scope_intent"] is True
+
+
 def test_query_rewrite_marks_section_deep_dive_as_prior_scope_followup():
     result = query_rewrite.query_rewrite_node(
         {

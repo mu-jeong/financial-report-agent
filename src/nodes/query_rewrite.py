@@ -56,28 +56,27 @@ GENERIC_SEARCH_TERMS = (
 )
 
 FOLLOWUP_SCOPE_MARKERS = (
-    # Unicode escape strings are used here so Korean markers remain stable
-    # across Windows consoles/editors with inconsistent source display encodings.
-    "\uac00\uc7a5 \ub9ce\uc774",  # "가장 많이" - most frequent
-    "\ucd5c\ub2e4",  # "최다" - top/most
-    "\uc804\uccb4 \uae30\uac04",  # "전체 기간" - full period
-    "\uc804\uccb4\uae30\uac04",  # "전체기간" - full period without spacing
-    "\uae30\uc5c5\ubd84\uc11d",  # "기업분석" - company analysis
-    "\uc0b0\uc5c5\ubd84\uc11d",  # "산업분석" - industry analysis
-    "\uacbd\uc81c\ubd84\uc11d",  # "경제분석" - economy analysis
-    "\uc704\uc5d0\uc11c",  # "위에서" - above/from above
-    "\uc704\uc5d0",  # "위에" - above
-    "\uc55e\uc11c",  # "앞서" - previously
-    "\uc55e\uc5d0\uc11c",  # "앞에서" - earlier/from before
-    "\ud574\ub2f9 \ub9ac\ud3ec\ud2b8",  # "해당 리포트" - that report
-    "\uc704 \ub9ac\ud3ec\ud2b8",  # "위 리포트" - above report
+    "가장 많이",
+    "최다",
+    "전체 기간",
+    "전체기간",
+    "기업분석",
+    "산업분석",
+    "경제분석",
+    "위에서",
+    "위에",
+    "앞서",
+    "앞에서",
+    "해당 리포트",
+    "위 리포트",
+    "해당 기간",
+    "위 기간",
+    "그 기간",
     "주요 내용",
     "위 내용",
     "이 내용",
     "해당 내용",
     "방금",
-    "앞에서",
-    "앞서",
 )
 
 SUMMARY_FOLLOWUP_TERMS = (
@@ -98,6 +97,9 @@ DEICTIC_SCOPE_MARKERS = (
     "앞서",
     "해당 리포트",
     "위 리포트",
+    "해당 기간",
+    "위 기간",
+    "그 기간",
 )
 
 REPORT_TYPE_ONLY_SCOPE_MARKERS = (
@@ -139,7 +141,7 @@ def _strip_temporal_phrases(text: str) -> str:
 
 
 def has_explicit_search_topic(question: str) -> bool:
-    """Return whether a query has a non-generic topic besides date/filter words."""
+    """검색 주제가 있는지 반환합니다."""
     remainder = _strip_temporal_phrases(question)
     normalized = re.sub(r"\s+", "", remainder)
     for term in sorted(GENERIC_SEARCH_TERMS, key=len, reverse=True):
@@ -149,7 +151,7 @@ def has_explicit_search_topic(question: str) -> bool:
 
 
 def is_scope_followup(question: str) -> bool:
-    """Return whether the query points back to the prior retrieved answer scope."""
+    """후속 질문이 이전 범위를 가리키는지 반환합니다."""
     normalized = re.sub(r"\s+", "", str(question or ""))
     if any(re.sub(r"\s+", "", keyword) in normalized for keyword in DEICTIC_SCOPE_MARKERS):
         return True
@@ -164,17 +166,17 @@ def is_scope_followup(question: str) -> bool:
 
 
 def is_temporal_filter_followup(question: str) -> bool:
-    """Return whether the question gives a date filter but omits the prior topic."""
+    """날짜만 있는 후속 질문인지 반환합니다."""
     return resolve_temporal_context(question) is not None and not has_explicit_search_topic(question)
 
 
 def is_temporal_broad_search_with_topic(question: str) -> bool:
-    """Return whether a date-filtered query already contains a standalone topic."""
+    """날짜 조건과 독립 주제가 함께 있는지 반환합니다."""
     return resolve_temporal_context(question) is not None and has_explicit_search_topic(question)
 
 
 def format_recent_history(history: list[tuple[str, str]], *, limit: int = RECENT_HISTORY_TURNS) -> str:
-    """Format recent non-empty turns for history-dependency decisions and rewrites."""
+    """최근 history를 rewrite용 문자열로 포맷합니다."""
     lines: list[str] = []
     for role, msg in history[-limit:]:
         content = str(msg or "").strip()
@@ -193,7 +195,7 @@ def _parse_history_decision(raw_decision: str) -> bool:
 
 
 def _llm_history_decision(question: str, history_text: str) -> bool:
-    """Use an LLM to classify whether the question depends on recent history."""
+    """질문이 최근 history에 의존하는지 LLM으로 분류합니다."""
     if not history_text.strip():
         return False
 
@@ -205,12 +207,7 @@ def _llm_history_decision(question: str, history_text: str) -> bool:
 
 
 def should_rewrite_with_history(question: str, history: list[tuple[str, str]] | None = None) -> bool:
-    """Return whether the current question should use conversation context.
-
-    The decision is no longer based on a fixed marker list. Cheap deterministic
-    guardrails handle date-only follow-ups and clearly date-scoped broad searches;
-    the remaining ambiguous cases are classified semantically from recent history.
-    """
+    """현재 질문이 대화 context를 사용해야 하는지 반환합니다."""
     if not history:
         return False
 

@@ -13,6 +13,7 @@ class State(TypedDict):
     search_filters: Optional[dict]  # VectorDB 검색 시 적용할 메타데이터 필터 {'target_name': '...', 'broker': '...'}
     temporal_context: Optional[dict]  # 상대/명시 날짜 표현을 구체 날짜 범위로 해석한 정보
     prior_search_scope: Optional[dict]  # 직전 답변의 검색 범위. 후속 질문에서 명시 조건이 없을 때 재사용
+    active_scope: Optional[dict]  # LangGraph thread에 유지되는 현재 대화의 활성 검색 범위
     scope_source: Optional[str]  # search_filters가 이전 검색 범위에서 온 경우의 출처 표시
     selection_context: Optional[dict]  # DB aggregation에서 선택된 대상/범위 컨텍스트
     routing_context: Optional[dict]  # search_scope_node가 router에 전달하는 결정 힌트

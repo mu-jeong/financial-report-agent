@@ -152,18 +152,14 @@ def search_scope_node(state: State) -> dict:
     scope_source = None
     route_hint = None
     scope_decision = None
-    prior_search_scope = state.get("prior_search_scope") or {}
+    prior_search_scope = state.get("prior_search_scope") or state.get("active_scope") or {}
     followup_scope_intent = bool(state.get("followup_scope_intent"))
     current_non_temporal_filters = {
         key: value
         for key, value in current_question_filters.items()
         if key not in {"report_date_start", "report_date_end"}
     }
-    if (
-        followup_scope_intent
-        and (not current_temporal_context or full_period_request or not has_vector_intent)
-        and isinstance(prior_search_scope, dict)
-    ):
+    if followup_scope_intent and isinstance(prior_search_scope, dict):
         prior_filters = dict(prior_search_scope.get("search_filters") or {})
         file_names = [
             file_name

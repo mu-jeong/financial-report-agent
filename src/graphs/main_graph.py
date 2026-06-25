@@ -11,6 +11,35 @@ from src.nodes.scope_selection import scope_selection_node
 from src.nodes.search_scope import search_scope_merge_node, search_scope_prepare_node
 from src.nodes.stock_price import stock_price_tool_node
 from src.nodes.vectordb import vectordb_node
+from src.core.followup_scope import build_answer_scope_index
+
+
+def build_active_scope_from_state(state: State) -> dict | None:
+    """Build the durable search scope that should carry to the next thread turn."""
+    search_filters = dict(state.get("search_filters") or {})
+    temporal_context = state.get("temporal_context")
+    sources = state.get("rerank_info") or state.get("rdb_sources") or []
+    file_names: list[str] = []
+    seen_file_names = set()
+    for source in sources:
+        file_name = (source or {}).get("file_name")
+        if file_name and file_name != "-" and file_name not in seen_file_names:
+            seen_file_names.add(file_name)
+            file_names.append(file_name)
+
+    if not search_filters and not temporal_context and not file_names:
+        return None
+
+    active_scope = {
+        "route": state.get("route"),
+        "search_filters": search_filters,
+        "temporal_context": temporal_context,
+        "scope_source": state.get("scope_source"),
+    }
+    if file_names:
+        active_scope["file_names"] = file_names
+    active_scope["answer_scope_index"] = build_answer_scope_index(active_scope, sources)
+    return active_scope
 
 
 def should_retry_vectordb_without_memory(state: State) -> bool:
@@ -45,10 +74,13 @@ def final_response_node(state: State) -> dict:
     if answer:
         source_count = len(state.get("rerank_info") or [])
         answer = remove_unavailable_citations(str(answer), source_count=source_count)
-        return {
+        result = {
             "generation": answer,
             "chat_history": [("사용자", state["question"]), ("AI", answer)],
         }
+        if active_scope := build_active_scope_from_state(state):
+            result["active_scope"] = active_scope
+        return result
 
     messages = state.get("messages", [])
     message_delta = []
@@ -74,6 +106,8 @@ def final_response_node(state: State) -> dict:
     }
     if message_delta:
         result["messages"] = message_delta
+    if active_scope := build_active_scope_from_state(state):
+        result["active_scope"] = active_scope
     return result
 
 

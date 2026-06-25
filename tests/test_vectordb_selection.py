@@ -1,6 +1,10 @@
 from langchain_core.documents import Document
 
-from src.nodes.vectordb import ensure_document_coverage, select_top_passages
+from src.nodes.vectordb import (
+    ensure_document_coverage,
+    required_file_names_from_prior_scope,
+    select_top_passages,
+)
 
 
 def test_ensure_document_coverage_keeps_small_filtered_document_set():
@@ -145,6 +149,101 @@ def test_select_top_passages_applies_document_coverage_for_multi_document_intent
         "document_coverage_applied": True,
         "document_coverage_reason": "multi_document_intent",
     }
+
+
+def test_select_top_passages_applies_document_coverage_for_date_bounded_target_summary(monkeypatch):
+    import src.nodes.vectordb as vectordb
+
+    monkeypatch.setattr(vectordb, "SEARCH_TOP_K", 3)
+    monkeypatch.setattr(vectordb, "USE_RERANKER", False)
+    monkeypatch.setattr(vectordb, "RECENCY_WEIGHT", 0)
+    docs_with_scores = [
+        (
+            Document(
+                page_content="SK하이닉스 6월 22일 chunk 1",
+                metadata={
+                    "file_name": "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 전망.pdf",
+                    "target_name": "SK하이닉스",
+                    "report_date": "2026-06-22",
+                    "report_type": "company",
+                },
+            ),
+            0.1,
+        ),
+        (
+            Document(
+                page_content="SK하이닉스 6월 22일 chunk 2",
+                metadata={
+                    "file_name": "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 전망.pdf",
+                    "target_name": "SK하이닉스",
+                    "report_date": "2026-06-22",
+                    "report_type": "company",
+                },
+            ),
+            0.2,
+        ),
+        (
+            Document(
+                page_content="SK하이닉스 6월 25일 ADR",
+                metadata={
+                    "file_name": "company_2026-06-25_SK하이닉스_IBK투자증권_ADR 발행.pdf",
+                    "target_name": "SK하이닉스",
+                    "report_date": "2026-06-25",
+                    "report_type": "company",
+                },
+            ),
+            0.3,
+        ),
+    ]
+
+    selected, metrics = select_top_passages(
+        "해당 기간 내에 발간된 sk하이닉스에 대한 리포트 정리해서 내용을 알려줘",
+        docs_with_scores,
+        search_filters={
+            "report_date_start": "2026-06-22",
+            "report_date_end": "2026-06-25",
+            "target_name": "SK하이닉스",
+            "report_type": "company",
+        },
+    )
+
+    assert {item["meta"]["file_name"] for item in selected} == {
+        "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 전망.pdf",
+        "company_2026-06-25_SK하이닉스_IBK투자증권_ADR 발행.pdf",
+    }
+    assert metrics == {
+        "document_coverage_applied": True,
+        "document_coverage_reason": "date_bounded_target_report_set",
+    }
+
+
+def test_required_file_names_from_prior_scope_keeps_matching_target_period_files_only():
+    prior_scope = {
+        "file_names": [
+            "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 전망.pdf",
+            "company_2026-06-22_SK하이닉스_한화투자증권_PE 10배.pdf",
+            "company_2026-06-25_SK하이닉스_IBK투자증권_ADR 발행.pdf",
+            "company_2026-06-25_삼성전자_미래에셋증권_생산능력.pdf",
+            "industry_2026-06-22_반도체_iM증권_산업 전망.pdf",
+        ]
+    }
+
+    required = required_file_names_from_prior_scope(
+        "해당 기간 내에 발간된 sk하이닉스에 대한 리포트 정리해서 내용을 알려줘",
+        prior_scope,
+        {
+            "report_date_start": "2026-06-22",
+            "report_date_end": "2026-06-25",
+            "target_name": "SK하이닉스",
+            "report_type": "company",
+        },
+    )
+
+    assert required == [
+        "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 전망.pdf",
+        "company_2026-06-22_SK하이닉스_한화투자증권_PE 10배.pdf",
+        "company_2026-06-25_SK하이닉스_IBK투자증권_ADR 발행.pdf",
+    ]
 
 
 def test_select_top_passages_applies_document_coverage_for_section_followup(monkeypatch):

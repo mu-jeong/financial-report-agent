@@ -1,4 +1,4 @@
-"""Read-only helpers for Monitoring Mode metrics and fixture summaries."""
+"""Monitoring Mode helper입니다."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ EVALUATION_SNAPSHOT_MANIFEST_PATH = EVALUATION_SNAPSHOT_ROOT / "manifest.json"
 
 
 def load_evaluation_dataset(path: str | Path = EVALUATION_DATASET_PATH) -> dict[str, Any]:
-    """Load the fixed local evaluation dataset."""
+    """고정 local evaluation dataset을 로드합니다."""
     dataset_path = Path(path)
     return json.loads(dataset_path.read_text(encoding="utf-8-sig"))
 
@@ -30,7 +30,7 @@ def load_evaluation_dataset(path: str | Path = EVALUATION_DATASET_PATH) -> dict[
 def load_multiturn_evaluation_dataset(
     path: str | Path = MULTITURN_EVALUATION_DATASET_PATH,
 ) -> dict[str, Any]:
-    """Load the fixed local multi-turn evaluation dataset."""
+    """고정 local multi-turn evaluation dataset을 로드합니다."""
     dataset_path = Path(path)
     return json.loads(dataset_path.read_text(encoding="utf-8-sig"))
 
@@ -38,7 +38,7 @@ def load_multiturn_evaluation_dataset(
 def load_evaluation_snapshot_manifest(
     path: str | Path = EVALUATION_SNAPSHOT_MANIFEST_PATH,
 ) -> dict[str, Any]:
-    """Load the fixed evaluation snapshot manifest."""
+    """고정 evaluation snapshot manifest를 로드합니다."""
     manifest_path = Path(path)
     return json.loads(manifest_path.read_text(encoding="utf-8-sig"))
 
@@ -71,7 +71,7 @@ def validate_evaluation_snapshot(
     manifest: dict[str, Any],
     snapshot_root: str | Path = EVALUATION_SNAPSHOT_ROOT,
 ) -> dict[str, Any]:
-    """Validate that dataset metadata and snapshot files describe one baseline."""
+    """dataset metadata와 snapshot 파일이 같은 baseline을 가리키는지 검증합니다."""
     root = Path(snapshot_root)
     database = manifest.get("database") or {}
     vector_db = manifest.get("vector_db") or {}
@@ -147,7 +147,7 @@ def validate_evaluation_snapshot(
 
 
 def summarize_evaluation_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
-    """Return compact Monitoring Mode coverage metrics for the fixed dataset."""
+    """고정 dataset의 Monitoring Mode coverage metric을 반환합니다."""
     cases = dataset.get("cases") or []
     case_types = Counter(case.get("type", "unknown") for case in cases)
     dimensions = Counter(
@@ -178,7 +178,7 @@ def summarize_evaluation_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
 
 
 def summarize_chat_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize recent chat metadata for Monitoring Mode without exposing full text."""
+    """본문 전체를 노출하지 않고 chat metadata를 요약합니다."""
     assistant_messages = [
         message
         for message in messages
@@ -223,7 +223,7 @@ def summarize_chat_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build one safe monitoring row per assistant response."""
+    """assistant 응답마다 monitoring row를 만듭니다."""
     rows: list[dict[str, Any]] = []
     latest_user_question = ""
     for message in messages:
@@ -305,7 +305,7 @@ def _metadata_query_rewrite(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_message_trace_detail(message: dict[str, Any], *, user_question: str | None = None) -> dict[str, Any]:
-    """Split one assistant response into trace sections for Chat Monitoring."""
+    """assistant 응답을 Chat Monitoring용 trace section으로 나눕니다."""
     metadata = _message_metadata(message)
     monitoring = metadata.get("monitoring") or {}
     retrieval = _metadata_retrieval(metadata)
@@ -354,7 +354,7 @@ def build_message_trace_summary(
     diff: dict[str, Any] | None = None,
     hints: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Flatten one trace detail into the default Chat Monitoring overview."""
+    """trace detail을 Chat Monitoring overview로 평탄화합니다."""
     query_rewrite = detail.get("query_rewrite") or {}
     scope = detail.get("scope") or {}
     routing = detail.get("routing") or {}
@@ -389,7 +389,7 @@ def _dict_diff(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, A
 
 
 def build_response_diff(current: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
-    """Compare a selected assistant response with the previous successful one."""
+    """선택한 assistant 응답을 직전 성공 응답과 비교합니다."""
     if not previous:
         return {}
     current_metadata = _message_metadata(current)
@@ -427,7 +427,7 @@ def build_chat_trace_debug_hints(
     *,
     user_question: str | None = None,
 ) -> list[str]:
-    """Return rule-based hints for common Chat Monitoring failure patterns."""
+    """Chat Monitoring 실패 pattern에 대한 rule 기반 hint를 반환합니다."""
     hints: list[str] = []
     metadata = _message_metadata(current)
     previous_metadata = _message_metadata(previous)
@@ -456,7 +456,7 @@ def build_chat_trace_debug_hints(
 
 
 def previous_successful_assistant(messages: list[dict[str, Any]], selected_message_id: Any) -> dict[str, Any] | None:
-    """Return the successful assistant response immediately before selected_message_id."""
+    """selected_message_id 앞의 성공한 assistant 응답을 반환합니다."""
     previous: dict[str, Any] | None = None
     for message in messages:
         if message.get("role") != "assistant":
@@ -469,7 +469,7 @@ def previous_successful_assistant(messages: list[dict[str, Any]], selected_messa
 
 
 def user_question_before_message(messages: list[dict[str, Any]], selected_message_id: Any) -> str | None:
-    """Return the nearest user question before a selected assistant response."""
+    """선택한 assistant 응답 앞의 user 질문을 반환합니다."""
     latest_user: str | None = None
     for message in messages:
         if message.get("id") == selected_message_id:
@@ -506,7 +506,7 @@ def build_chat_trace_issue_context(
     *,
     selected_message_id: Any,
 ) -> dict[str, Any]:
-    """Build an issue-report context from a selected Chat Monitoring trace."""
+    """선택한 Chat Monitoring trace로 issue report context를 만듭니다."""
     selected = next((message for message in messages if message.get("id") == selected_message_id), None)
     previous = previous_successful_assistant(messages, selected_message_id)
     selected_question = user_question_before_message(messages, selected_message_id)
@@ -524,7 +524,7 @@ def build_chat_trace_issue_context(
 
 
 def build_reusable_search_scope(final_state: dict[str, Any]) -> dict[str, Any] | None:
-    """Build a reusable retrieval scope from a completed graph state."""
+    """완료된 graph state에서 재사용 가능한 retrieval scope를 만듭니다."""
     search_filters = dict(final_state.get("search_filters") or {})
     temporal_context = final_state.get("temporal_context")
     sources = final_state.get("rerank_info") or final_state.get("rdb_sources") or []
@@ -577,7 +577,7 @@ def evaluate_multiturn_turn_result(
     input_had_chat_history: bool = False,
     input_had_prior_search_scope: bool = False,
 ) -> dict[str, Any]:
-    """Score one multi-turn evaluation turn against graph output and input context."""
+    """multi-turn evaluation turn을 graph output과 input context 기준으로 채점합니다."""
     result = evaluate_dataset_case_result(
         turn,
         final_state,
@@ -649,7 +649,7 @@ def run_multiturn_evaluation_dataset(
     execution_mode: str = "current_data",
     data_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run multi-turn cases while carrying chat history and prior retrieval scope."""
+    """chat history와 prior retrieval scope를 이어가며 multi-turn case를 실행합니다."""
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
     cases = select_evaluation_cases(dataset, selected_case_ids)
     if limit:
@@ -755,7 +755,7 @@ def evaluate_dataset_case_result(
     latency_seconds: float,
     latency_threshold_seconds: float = 30.0,
 ) -> dict[str, Any]:
-    """Score one fixed evaluation case against graph output."""
+    """fixed evaluation case를 graph output 기준으로 채점합니다."""
     sources = final_state.get("rerank_info") or final_state.get("rdb_sources") or []
     route_pass = final_state.get("route") == case.get("expected_route")
     filter_pass = _filters_match(case.get("expected_filters") or {}, final_state.get("search_filters") or {})
@@ -806,7 +806,7 @@ def select_evaluation_cases(
     dataset: dict[str, Any],
     selected_case_ids: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return evaluation cases selected by explicit ids, preserving selection order."""
+    """명시된 id로 선택한 evaluation case를 선택 순서대로 반환합니다."""
     cases = list(dataset.get("cases") or [])
     if not selected_case_ids:
         return cases
@@ -824,7 +824,7 @@ def run_evaluation_dataset(
     execution_mode: str = "current_data",
     data_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run the fixed dataset through the graph and persist a JSON experiment run."""
+    """고정 dataset을 graph로 실행하고 JSON experiment run을 저장합니다."""
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
     cases = select_evaluation_cases(dataset, selected_case_ids)
     if limit:
@@ -865,7 +865,7 @@ def run_evaluation_dataset(
 
 
 def build_evaluation_failure_actions(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build actionable next-step guidance for failed evaluation cases."""
+    """실패한 evaluation case의 next-step guidance를 만듭니다."""
     rows: list[dict[str, Any]] = []
     for result in results:
         if result.get("status") != "fail":
@@ -905,7 +905,7 @@ def build_evaluation_failure_actions(results: list[dict[str, Any]]) -> list[dict
 
 
 def compare_evaluation_runs(current: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
-    """Return summary deltas between two saved experiment runs."""
+    """저장된 두 experiment run 사이의 summary delta를 반환합니다."""
     if not previous:
         return {}
     current_summary = current.get("summary") or {}
@@ -924,11 +924,7 @@ def filter_evaluation_runs_by_mode(
     runs: list[dict[str, Any]],
     execution_mode: str | None,
 ) -> list[dict[str, Any]]:
-    """Return saved evaluation runs matching an execution mode.
-
-    Older artifacts did not record an execution mode; treat them as current-data
-    runs so previous-run comparisons do not mix them with fixed snapshots.
-    """
+    """execution mode와 일치하는 저장된 evaluation run을 반환합니다."""
     if not execution_mode:
         return runs
     return [
@@ -939,7 +935,7 @@ def filter_evaluation_runs_by_mode(
 
 
 def summarize_all_chat_threads(thread_messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize persisted chat quality signals across all threads."""
+    """모든 thread에 저장된 chat 품질 signal을 요약합니다."""
     assistant_rows: list[dict[str, Any]] = []
     recent_failures: list[dict[str, Any]] = []
     for entry in thread_messages:
@@ -1009,7 +1005,7 @@ def promote_issue_report_to_eval_candidate(
     *,
     output_dir: str | Path,
 ) -> dict[str, Any]:
-    """Persist an issue report as a regression/evaluation candidate artifact."""
+    """issue report를 regression/evaluation candidate artifact로 저장합니다."""
     candidate_id = f"candidate_{report.get('id') or uuid.uuid4().hex[:8]}"
     candidate = {
         "id": candidate_id,
@@ -1052,7 +1048,7 @@ def build_monitoring_tab_labels() -> list[str]:
 
 
 def build_monitoring_page_labels() -> list[str]:
-    """Return top-level pages shown when Monitoring Mode is enabled."""
+    """Monitoring Mode가 켜졌을 때 보여줄 top-level page를 반환합니다."""
     return ["Chat", "전체 Monitoring"]
 
 
@@ -1062,7 +1058,7 @@ def compact_graph_monitoring_metadata(
     latency_seconds: float,
     rerank_info: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Build safe per-response monitoring metadata from a completed graph state."""
+    """완료된 graph state에서 응답별 monitoring metadata를 만듭니다."""
     route = final_state.get("route")
     rerank_info = rerank_info or []
     metadata: dict[str, Any] = {

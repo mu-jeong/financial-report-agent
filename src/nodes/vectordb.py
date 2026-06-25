@@ -31,12 +31,7 @@ def build_embeddings_fn():
 
 
 def _metadata_aware_fetch_k(faiss_store: FAISS, search_filters: dict | None) -> int:
-    """Fetch enough candidates before deterministic metadata filtering.
-
-    FAISS does vector ranking first, while report dates live in metadata. If the
-    user asks for "5월" and we only inspect the top few vector hits, all May
-    documents can be dropped before the metadata filter gets a chance to match.
-    """
+    """metadata filtering 전에 충분한 후보를 가져옵니다."""
     default_fetch_k = max(SEARCH_TOP_K * 8, SEARCH_TOP_K)
     if not search_filters:
         return default_fetch_k
@@ -81,12 +76,7 @@ def _parse_report_date(value: str | None) -> int | None:
 
 
 def apply_recency_weight(passages: list[dict], weight: float = RECENCY_WEIGHT) -> list[dict]:
-    """Boost newer reports after semantic ranking.
-
-    The semantic rank remains the main signal. ``RECENCY_WEIGHT`` adds a small
-    normalized bonus based on report_date so that similarly relevant passages
-    prefer newer reports.
-    """
+    """semantic ranking 이후 최신 리포트 가중치를 적용합니다."""
     if not passages or weight <= 0:
         return passages
 
@@ -108,7 +98,7 @@ def apply_recency_weight(passages: list[dict], weight: float = RECENCY_WEIGHT) -
         recency_score = ((ordinal - oldest) / span) if ordinal is not None else 0.0
         relevance_score = item.get("rerank_score")
         if relevance_score is None:
-            # Preserve the current semantic order when no external rerank score exists.
+            # 외부 rerank score가 없으면 현재 semantic 순서를 유지합니다.
             relevance_score = 1.0 - (index / total)
         final_score = float(relevance_score) + (weight * recency_score)
         item["recency_score"] = recency_score
@@ -132,14 +122,7 @@ def ensure_document_coverage(
     max_passages: int = SEARCH_TOP_K,
     required_file_names: list[str] | tuple[str, ...] | str | None = None,
 ) -> list[dict]:
-    """Keep at least one passage per filtered document when the set is small.
-
-    A list-style query such as "이번 주 현대차 리포트" often has only a few
-    matching files but many chunks per file. Pure rerank/recency ordering can
-    fill the final context with chunks from one file, which makes the answer and
-    source metadata drop the other matching report. When all distinct documents
-    fit within SEARCH_TOP_K, preserve one best available passage per file.
-    """
+    """필터링된 문서마다 최소 1개 passage를 유지합니다."""
     if not selected_passages or max_passages <= 0:
         return selected_passages
 
@@ -232,10 +215,116 @@ SINGLE_TARGET_DEEP_DIVE_KEYWORDS = (
     "근거",
 )
 
+DATE_BOUNDED_TARGET_REPORT_SET_KEYWORDS = (
+    "리포트",
+    "보고서",
+    "발간",
+    "해당 기간",
+    "기간 내",
+    "정리",
+    "요약",
+    "내용",
+    "알려줘",
+)
+
+DEICTIC_PERIOD_MARKERS = (
+    "해당 기간",
+    "위 기간",
+    "그 기간",
+    "기간 내",
+)
+
 
 def _normalized_contains(text: str, keywords: tuple[str, ...]) -> bool:
     normalized_text = str(text or "").casefold().replace(" ", "")
     return any(keyword.casefold().replace(" ", "") in normalized_text for keyword in keywords)
+
+
+def _filters_have_date_range(filters: dict | None) -> bool:
+    filters = filters or {}
+    return bool(filters.get("report_date_start") and filters.get("report_date_end"))
+
+
+def _file_name_matches_filters(file_name: str, filters: dict | None) -> bool:
+    filters = filters or {}
+    normalized_file = str(file_name or "").casefold().replace(" ", "")
+    if not normalized_file:
+        return False
+
+    report_type = filters.get("report_type")
+    if report_type and not normalized_file.startswith(f"{str(report_type).casefold()}_"):
+        return False
+
+    target_name = filters.get("target_name")
+    if target_name and str(target_name).casefold().replace(" ", "") not in normalized_file:
+        return False
+
+    report_date_start = filters.get("report_date_start")
+    report_date_end = filters.get("report_date_end")
+    if report_date_start or report_date_end:
+        date_match = None
+        parts = str(file_name or "").split("_")
+        if len(parts) >= 2:
+            date_match = parts[1]
+        if not date_match:
+            return False
+        if report_date_start and date_match < str(report_date_start):
+            return False
+        if report_date_end and date_match > str(report_date_end):
+            return False
+
+    return True
+
+
+def required_file_names_from_prior_scope(
+    question: str,
+    prior_search_scope: dict | None,
+    search_filters: dict | None,
+) -> list[str]:
+    """지시적 기간 질문에 필요한 prior scope 파일을 반환합니다."""
+    if not prior_search_scope or not search_filters:
+        return []
+    if not _normalized_contains(question, DEICTIC_PERIOD_MARKERS):
+        return []
+    if not search_filters.get("target_name"):
+        return []
+
+    file_names = prior_search_scope.get("file_names") or []
+    required: list[str] = []
+    seen: set[str] = set()
+    for file_name in file_names:
+        file_name_text = str(file_name or "")
+        if file_name_text in seen:
+            continue
+        if _file_name_matches_filters(file_name_text, search_filters):
+            seen.add(file_name_text)
+            required.append(file_name_text)
+    return required
+
+
+def _doc_identity(doc) -> tuple:
+    metadata = getattr(doc, "metadata", {}) or {}
+    return (
+        metadata.get("parent_id"),
+        metadata.get("file_name"),
+        metadata.get("child_index"),
+        id(doc),
+    )
+
+
+def _merge_docs_with_scores(
+    primary: list[tuple],
+    supplemental: list[tuple],
+) -> list[tuple]:
+    merged = list(primary)
+    seen = {_doc_identity(doc) for doc, _score in merged}
+    for doc, score in supplemental:
+        identity = _doc_identity(doc)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append((doc, score))
+    return merged
 
 
 def should_apply_document_coverage(
@@ -244,7 +333,7 @@ def should_apply_document_coverage(
     required_file_names: list[str] | tuple[str, ...] | str | None = None,
     scope_decision: dict | None = None,
 ) -> tuple[bool, str]:
-    """Decide whether to trade some ranking purity for document diversity."""
+    """document coverage 적용 여부를 결정합니다."""
     if required_file_names:
         return True, "required_file_names"
 
@@ -254,6 +343,13 @@ def should_apply_document_coverage(
     filters = search_filters or {}
     if filters.get("file_names"):
         return True, "file_names_filter"
+
+    if (
+        filters.get("target_name")
+        and _filters_have_date_range(filters)
+        and _normalized_contains(query, DATE_BOUNDED_TARGET_REPORT_SET_KEYWORDS)
+    ):
+        return True, "date_bounded_target_report_set"
 
     if _normalized_contains(query, MULTI_DOCUMENT_COVERAGE_KEYWORDS):
         return True, "multi_document_intent"
@@ -275,7 +371,7 @@ def select_top_passages(
     required_file_names: list[str] | tuple[str, ...] | str | None = None,
     scope_decision: dict | None = None,
 ) -> tuple[list[dict], dict]:
-    """Build passages and select final context entries using SEARCH_TOP_K."""
+    """최종 context passage를 선택합니다."""
     passages = _build_passages(docs_with_scores)
     candidate_count = min(
         len(passages),
@@ -331,9 +427,23 @@ def vectordb_node(state: State) -> dict:
     )
 
     fetch_k = _metadata_aware_fetch_k(faiss_store, search_filters)
-    docs_with_scores = faiss_store.similarity_search_with_score(query, k=fetch_k)
-    candidate_count_before_filter = len(docs_with_scores)
-    docs_with_scores = filter_docs_with_scores(docs_with_scores, search_filters)
+    all_docs_with_scores = faiss_store.similarity_search_with_score(query, k=fetch_k)
+    candidate_count_before_filter = len(all_docs_with_scores)
+    docs_with_scores = filter_docs_with_scores(all_docs_with_scores, search_filters)
+    prior_required_file_names = required_file_names_from_prior_scope(
+        state["question"],
+        state.get("prior_search_scope"),
+        search_filters,
+    )
+    if prior_required_file_names:
+        supplemental_filters = dict(search_filters)
+        supplemental_filters.pop("target_name", None)
+        supplemental_filters["file_names"] = prior_required_file_names
+        supplemental_docs_with_scores = filter_docs_with_scores(
+            all_docs_with_scores,
+            supplemental_filters,
+        )
+        docs_with_scores = _merge_docs_with_scores(docs_with_scores, supplemental_docs_with_scores)
     candidate_count_after_filter = len(docs_with_scores)
     retrieval_metrics = {
         "fetch_k": fetch_k,
@@ -342,6 +452,8 @@ def vectordb_node(state: State) -> dict:
         "search_top_k": SEARCH_TOP_K,
         "use_reranker": USE_RERANKER,
     }
+    if prior_required_file_names:
+        retrieval_metrics["prior_scope_required_file_names"] = prior_required_file_names
     if not docs_with_scores:
         if search_filters:
             filter_text = ", ".join(f"{key}={value}" for key, value in search_filters.items())
@@ -361,7 +473,10 @@ def vectordb_node(state: State) -> dict:
             "monitoring_metrics": {"retrieval": retrieval_metrics},
         }
 
-    required_file_names = search_filters.get("file_names") if isinstance(search_filters, dict) else None
+    required_file_names = (
+        prior_required_file_names
+        or (search_filters.get("file_names") if isinstance(search_filters, dict) else None)
+    )
     top_passages, coverage_metrics = select_top_passages(
         query,
         docs_with_scores,

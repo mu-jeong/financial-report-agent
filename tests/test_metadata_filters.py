@@ -400,6 +400,80 @@ def test_search_scope_reuses_prior_non_temporal_filters_for_date_only_followup()
     assert result["temporal_context"]["report_date_end"] == "2026-06-15"
 
 
+def test_search_scope_reuses_prior_period_and_adds_current_target_for_deictic_period(monkeypatch):
+    def fake_infer_search_filters(query):
+        if "2026-06-22" in query:
+            return {
+                "report_date_start": "2026-06-22",
+                "report_date_end": "2026-06-25",
+                "target_name": "SK하이닉스",
+                "report_type": "company",
+            }
+        if "sk하이닉스" in query.casefold():
+            return {"target_name": "SK하이닉스", "report_type": "company"}
+        return {}
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "해당 기간 내에 발간된 sk하이닉스에 대한 리포트 정리해서 내용을 알려줘",
+            "rewritten_query": "SK하이닉스 2026-06-22~2026-06-25 발간 리포트 요약 및 내용",
+            "chat_history": [],
+            "followup_scope_intent": True,
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-25",
+                },
+                "temporal_context": {
+                    "expression": "이번주",
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-25",
+                },
+                "file_names": [
+                    "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 전망.pdf",
+                    "company_2026-06-25_SK하이닉스_IBK투자증권_ADR 발행.pdf",
+                    "company_2026-06-25_삼성전자_미래에셋증권_생산능력.pdf",
+                ],
+            },
+        }
+    )
+
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-25",
+        "target_name": "SK하이닉스",
+        "report_type": "company",
+    }
+
+
+def test_search_scope_uses_active_scope_when_prior_scope_input_is_absent():
+    result = search_scope.search_scope_node(
+        {
+            "question": "리스크는 뭐야?",
+            "rewritten_query": "리스크는 뭐야?",
+            "chat_history": [],
+            "followup_scope_intent": True,
+            "active_scope": {
+                "route": "vectordb",
+                "search_filters": {"target_name": "삼성전자", "report_type": "company"},
+                "file_names": ["samsung.pdf"],
+            },
+        }
+    )
+
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "target_name": "삼성전자",
+        "report_type": "company",
+        "file_names": ["samsung.pdf"],
+    }
+
+
 def test_search_scope_keeps_prior_dates_and_adds_company_filter_for_section_deep_dive():
     result = search_scope.search_scope_node(
         {
@@ -584,7 +658,7 @@ def test_search_scope_does_not_select_single_top_company_for_company_section_fol
     }
 
 
-def test_search_scope_keeps_explicit_current_filters_over_prior_scope(monkeypatch):
+def test_search_scope_overrides_date_but_keeps_prior_non_temporal_scope(monkeypatch):
     def fake_infer_search_filters(query):
         return {
             "report_date_start": "2026-05-01",
@@ -611,6 +685,8 @@ def test_search_scope_keeps_explicit_current_filters_over_prior_scope(monkeypatc
                 "search_filters": {
                     "report_date_start": "2026-06-08",
                     "report_date_end": "2026-06-14",
+                    "target_name": "삼성전자",
+                    "report_type": "company",
                 },
                 "file_names": ["weekly-a.pdf"],
             },
@@ -618,11 +694,14 @@ def test_search_scope_keeps_explicit_current_filters_over_prior_scope(monkeypatc
     )
 
     assert result["routing_context"]["has_vector_intent"] is True
-    assert result["scope_source"] is None
+    assert result["scope_source"] == "prior_search_scope"
     assert result["search_filters"] == {
         "report_date_start": "2026-05-01",
         "report_date_end": "2026-05-31",
+        "target_name": "삼성전자",
+        "report_type": "company",
     }
+    assert "file_names" not in result["search_filters"]
 
 
 def test_search_scope_requests_top_company_selection_from_prior_week_scope(monkeypatch):
