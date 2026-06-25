@@ -31,6 +31,7 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 - OpenRouter 임베딩(`baai/bge-m3`) 지원
 - 선택형 OpenRouter rerank(`cohere/rerank-v3.5`) 또는 FlashRank fallback
 - `report_date` 기준 날짜/월/분기/연도 필터링과 최신성 가중치(`RECENCY_WEIGHT`) 지원
+- KRX 상장법인 업종 CSV 기반 섹터/분야 질문의 회사 universe lookup 지원
 - VectorDB 검색 실패 시 short-term memory 영향을 제거하고 원질문으로 재검색
 - 답변의 `[숫자]` citation과 기본 접힘 상태의 참고 문서 목록 연동
 - Streamlit GUI 대화 기록 저장, 백그라운드 답변 생성, 대화 이름 변경/삭제, 참고 PDF 열기
@@ -120,6 +121,16 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 - `CRAWLER_CATEGORIES`: `company`, `industry`, `economy`, 쉼표 구분 목록, 또는 `all`을 사용할 수 있습니다.
 - `CRAWLER_LOOKBACK_DAYS=7`: 기준일 포함 최대 8일 범위를 조회합니다.
 - `CRAWLER_TARGET_COUNT=0`: 개수 제한 없이 가능한 리포트를 수집합니다.
+
+## 상장기업 업종 데이터
+
+섹터나 분야에 속한 기업을 묻는 질문은 레포에 포함된 KRX 상장법인 업종 CSV를 회사 universe lookup에 사용합니다. 원본 데이터는 KRX 상장법인목록 페이지에서 내려받은 Excel을 `company_name,industry,main_products` CSV로 변환한 것입니다.
+
+- 출처: https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage
+- 기본 데이터 파일: `data/listed_company_industries.csv`
+- 명시 설정: `.env`의 `COMPANY_INDUSTRY_DATA_PATH`에 CSV 경로를 지정합니다.
+
+이 데이터는 리포트 본문 검색용 VectorDB가 아니라 `회사명/업종/주요제품` 구조화 lookup에 사용합니다. 예를 들어 “반도체 섹터에 속한 기업”은 먼저 업종 CSV에서 관련 회사를 찾고, 현재 날짜/report_type scope의 `reports` DB와 교집합을 낸 뒤 해당 `file_name` 범위로 VectorDB 검색을 좁힙니다.
 
 ## 임베딩 인덱스 생성
 
@@ -245,7 +256,7 @@ python -m pytest tests/test_evaluation_dataset.py -q
 
 ## Monitoring Mode
 
-Monitoring Mode는 성능 개선과 회귀 확인을 위한 개발자용 지표 모니터링 모드입니다. 일반 채팅 UX와 분리된 `Monitoring` 탭에서 데이터/설정 상태, 고정 평가 테스트셋 커버리지, 대화별 route/source/latency metadata, PDF parsing engine 비교 결과를 확인합니다. 일반 GUI에서는 이 진단 정보를 숨기고, `.env`에서 명시적으로 켰을 때만 노출합니다.
+Monitoring Mode는 성능 개선과 회귀 확인을 위한 개발자용 지표 모니터링 모드입니다. 일반 채팅 UX와 분리된 `Monitoring` 탭에서 데이터/설정 상태, 고정 평가 테스트셋 커버리지, 대화별 route/source/latency metadata, PDF parsing engine 비교 결과를 확인합니다. 일반 GUI에서는 이 진단 정보를 숨기고, `.env`에서 명시적으로 켰을 때만 노출합니다. 전체 Monitoring과 개별 Chat Monitoring의 구현 세부 내용은 [`docs/MONITORING.md`](docs/MONITORING.md)에 별도로 정리되어 있습니다.
 
 ### 실행 방법
 
@@ -284,6 +295,7 @@ python -m pytest -q
 - Evaluation dataset: 고정 평가셋 case 수, route coverage, monitoring dimension 분포
 - Parsing engine evaluation: 선택한 PDF/폴더를 여러 엔진으로 추출해 latency, 문자 수, block 수, table-like line 등 지표를 CSV/JSON/sample로 저장
 - Conversation metrics: 현재 대화의 route, source 수, latency, `scope_decision`, retrieval coverage 등 monitoring metadata 요약
+- Chat Monitoring trace viewer: assistant 응답 row에서 특정 턴을 선택해 `Trace summary`, `Scope / routing`, `Advanced diagnostics` 세 tab으로 확인합니다. 기본 화면에는 핵심 trace, 직전 성공 응답 대비 diff, 자동 debug hint를 모으고, retrieval/rerank, sources, answer/citation raw detail은 필요할 때만 펼쳐 봅니다. 선택한 trace는 issue report로 바로 저장할 수 있습니다.
 
 ### TODO
 

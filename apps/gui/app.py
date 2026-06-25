@@ -41,18 +41,26 @@ create_thread = conversation_store.create_thread
 create_issue_report = issue_report_store.create_issue_report
 build_issue_report_context = issue_report_store.build_issue_report_context
 build_evaluation_failure_actions = monitoring.build_evaluation_failure_actions
+build_chat_trace_debug_hints = monitoring.build_chat_trace_debug_hints
+build_chat_trace_issue_context = monitoring.build_chat_trace_issue_context
 build_issue_report_rows = monitoring.build_issue_report_rows
 build_message_monitoring_rows = monitoring.build_message_monitoring_rows
+build_message_trace_detail = monitoring.build_message_trace_detail
+build_message_trace_summary = monitoring.build_message_trace_summary
 build_monitoring_page_labels = monitoring.build_monitoring_page_labels
 build_monitoring_tab_labels = monitoring.build_monitoring_tab_labels
+build_response_diff = monitoring.build_response_diff
 compare_evaluation_runs = monitoring.compare_evaluation_runs
+filter_evaluation_runs_by_mode = monitoring.filter_evaluation_runs_by_mode
 promote_issue_report_to_eval_candidate = monitoring.promote_issue_report_to_eval_candidate
 compact_graph_monitoring_metadata = monitoring.compact_graph_monitoring_metadata
+previous_successful_assistant = monitoring.previous_successful_assistant
 run_pdf_extraction_comparison = compare_pdf_extractors.run_pdf_extraction_comparison
 SUPPORTED_EXTRACTION_ENGINES = compare_pdf_extractors.SUPPORTED_EXTRACTION_ENGINES
 delete_thread = conversation_store.delete_thread
 get_chat_history = conversation_store.get_chat_history
 load_evaluation_dataset = monitoring.load_evaluation_dataset
+load_evaluation_snapshot_manifest = monitoring.load_evaluation_snapshot_manifest
 list_issue_reports = issue_report_store.list_issue_reports
 list_messages = conversation_store.list_messages
 list_threads = conversation_store.list_threads
@@ -67,6 +75,8 @@ summarize_data_integrity = monitoring.summarize_data_integrity
 summarize_issue_reports = monitoring.summarize_issue_reports
 summarize_evaluation_dataset = monitoring.summarize_evaluation_dataset
 update_message = conversation_store.update_message
+user_question_before_message = monitoring.user_question_before_message
+validate_evaluation_snapshot = monitoring.validate_evaluation_snapshot
 from src.core.status import get_data_status
 from src.utils import citations
 
@@ -364,9 +374,9 @@ def _run_chat_response_job(
         if "Error" in answer or "차단" in answer:
             answer = f"주의: {answer}"
         rerank_info = (
-            final_state.get("rerank_info", [])
+            final_state.get("rerank_info") or []
             if final_state.get("route") == "vectordb"
-            else final_state.get("rdb_sources", [])
+            else final_state.get("rdb_sources") or []
         )
         search_scope = _search_scope_from_graph_state(final_state)
         metadata = {
@@ -1436,28 +1446,103 @@ def _all_thread_messages() -> list[dict]:
     ]
 
 
-def _latest_saved_evaluation_run(exclude_path: str | None = None) -> dict | None:
+def _latest_saved_evaluation_run(
+    exclude_path: str | None = None,
+    execution_mode: str | None = None,
+) -> dict | None:
     if not MONITORING_EVAL_RUN_DIR.exists():
         return None
     run_paths = sorted(MONITORING_EVAL_RUN_DIR.glob("evaluation_run_*.json"), reverse=True)
+    loaded_runs: list[dict] = []
     for run_path in run_paths:
         if exclude_path and str(run_path) == exclude_path:
             continue
         try:
-            return json.loads(run_path.read_text(encoding="utf-8"))
+            run = json.loads(run_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-    return None
+        loaded_runs.append(run)
+    matching_runs = filter_evaluation_runs_by_mode(loaded_runs, execution_mode)
+    return matching_runs[0] if matching_runs else None
+
+
+def _run_fixed_snapshot_evaluation(
+    *,
+    selected_case_ids: list[str],
+    latency_threshold_seconds: float,
+) -> dict:
+    repo_root = Path(__file__).resolve().parents[2]
+    command = [
+        sys.executable,
+        str(repo_root / "scripts" / "run_evaluation_snapshot.py"),
+        "--dataset",
+        str(repo_root / "tests" / "fixtures" / "evaluation_dataset.json"),
+        "--snapshot-root",
+        str(repo_root / "tests" / "fixtures" / "eval_snapshot"),
+        "--output-dir",
+        str(repo_root / MONITORING_EVAL_RUN_DIR),
+        "--latency-threshold-seconds",
+        str(latency_threshold_seconds),
+    ]
+    for case_id in selected_case_ids:
+        command.extend(["--case-id", case_id])
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=None,
+    )
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    try:
+        payload = json.loads(stdout.splitlines()[-1]) if stdout else {}
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Snapshot runner returned non-JSON output. stdout={stdout!r}, stderr={stderr!r}") from exc
+    if completed.returncode != 0 or payload.get("status") != "ok":
+        detail = payload.get("validation") or payload.get("error") or stderr or stdout
+        raise RuntimeError(f"Snapshot evaluation failed: {detail}")
+    json_path = Path(payload["json_path"])
+    if not json_path.is_absolute():
+        json_path = repo_root / json_path
+    return json.loads(json_path.read_text(encoding="utf-8"))
 
 
 def _render_experiment_monitoring() -> None:
     st.subheader("실험 실행")
-    st.caption("고정 evaluation dataset을 현재 graph로 실행하고 route/filter/source/citation/latency pass/fail을 저장합니다.")
+    st.caption("고정 evaluation dataset을 current data 또는 fixed snapshot 모드로 실행하고 route/filter/source/citation/latency pass/fail을 저장합니다.")
     try:
         dataset = load_evaluation_dataset()
     except FileNotFoundError:
         st.warning("평가셋 fixture를 찾지 못했습니다: tests/fixtures/evaluation_dataset.json")
         return
+
+    mode_label = st.radio(
+        "실험 실행 모드",
+        ["현재 데이터로 실행", "고정 테스트 snapshot으로 실행"],
+        index=1,
+        horizontal=True,
+        help="baseline 비교는 같은 실행 모드끼리만 의미 있습니다.",
+    )
+    execution_mode = "fixed_snapshot" if mode_label == "고정 테스트 snapshot으로 실행" else "current_data"
+    snapshot_validation = None
+    if execution_mode == "current_data":
+        st.info("현재 `data/reports.db`와 `data/vector_db`를 사용합니다. DB/index가 바뀌면 baseline 비교가 흔들릴 수 있습니다.")
+    else:
+        st.info("`tests/fixtures/eval_snapshot`의 고정 DB/index를 별도 Python 프로세스에서 사용합니다.")
+        try:
+            manifest = load_evaluation_snapshot_manifest()
+        except FileNotFoundError:
+            st.error("Snapshot manifest를 찾지 못했습니다: tests/fixtures/eval_snapshot/manifest.json")
+        else:
+            snapshot_validation = validate_evaluation_snapshot(dataset, manifest)
+            if snapshot_validation["status"] == "pass":
+                st.success("Fixed snapshot validation passed.")
+            else:
+                st.error("Fixed snapshot validation failed. Snapshot DB/index를 생성한 뒤 실행할 수 있습니다.")
+                st.dataframe(snapshot_validation["checks"], use_container_width=True, hide_index=True)
 
     cases = dataset.get("cases") or []
     case_ids = [str(case.get("id")) for case in cases]
@@ -1474,28 +1559,41 @@ def _render_experiment_monitoring() -> None:
     latency_threshold = st.number_input("Latency threshold seconds", min_value=1.0, max_value=300.0, value=30.0, step=1.0)
     selected_cases = select_evaluation_cases(dataset, selected_case_ids)
     st.caption(f"선택된 테스트: {len(selected_cases)}개")
-    if st.button("Run selected evaluation cases", use_container_width=True, disabled=not selected_cases):
+    snapshot_ready = execution_mode == "current_data" or (snapshot_validation or {}).get("status") == "pass"
+    if st.button("Run selected evaluation cases", use_container_width=True, disabled=not selected_cases or not snapshot_ready):
         with st.spinner("Evaluation dataset 실행 중..."):
             try:
-                run = run_evaluation_dataset(
-                    dataset,
-                    graph_app.invoke,
-                    output_dir=MONITORING_EVAL_RUN_DIR,
-                    selected_case_ids=selected_case_ids,
-                    latency_threshold_seconds=float(latency_threshold),
-                )
+                if execution_mode == "fixed_snapshot":
+                    run = _run_fixed_snapshot_evaluation(
+                        selected_case_ids=selected_case_ids,
+                        latency_threshold_seconds=float(latency_threshold),
+                    )
+                else:
+                    run = run_evaluation_dataset(
+                        dataset,
+                        graph_app.invoke,
+                        output_dir=MONITORING_EVAL_RUN_DIR,
+                        selected_case_ids=selected_case_ids,
+                        latency_threshold_seconds=float(latency_threshold),
+                        execution_mode="current_data",
+                        data_source={"db_path": "data/reports.db", "faiss_dir": "data/vector_db"},
+                    )
             except Exception as exc:
                 st.error(f"Evaluation run failed: {exc}")
             else:
                 st.session_state.latest_evaluation_run = run
                 st.success("Evaluation run saved.")
 
-    run = st.session_state.get("latest_evaluation_run") or _latest_saved_evaluation_run()
+    latest_run = st.session_state.get("latest_evaluation_run")
+    if latest_run and (latest_run.get("execution_mode") or "current_data") != execution_mode:
+        latest_run = None
+    run = latest_run or _latest_saved_evaluation_run(execution_mode=execution_mode)
     if not run:
         st.caption("아직 저장된 evaluation run이 없습니다.")
         return
 
     st.markdown("#### Latest run summary")
+    st.caption(f"Execution mode: `{run.get('execution_mode') or 'current_data'}`")
     summary = run.get("summary") or {}
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Cases", summary.get("case_count", 0))
@@ -1509,10 +1607,14 @@ def _render_experiment_monitoring() -> None:
     latency = summary.get("avg_latency_seconds")
     col4.metric("Avg latency", "-" if latency is None else f"{latency:.2f}s")
 
-    previous = _latest_saved_evaluation_run(exclude_path=run.get("json_path"))
+    previous = _latest_saved_evaluation_run(
+        exclude_path=run.get("json_path"),
+        execution_mode=run.get("execution_mode") or "current_data",
+    )
     comparison = compare_evaluation_runs(run, previous)
     if comparison:
         st.markdown("#### Previous run comparison")
+        st.caption("같은 execution mode의 이전 run과만 비교합니다.")
         st.dataframe([comparison], use_container_width=True, hide_index=True)
 
     st.markdown("#### Run artifacts")
@@ -1530,13 +1632,21 @@ def _render_experiment_monitoring() -> None:
         if st.button("Rerun failed cases only", use_container_width=True):
             with st.spinner("Failed cases 재실행 중..."):
                 try:
-                    rerun = run_evaluation_dataset(
-                        dataset,
-                        graph_app.invoke,
-                        output_dir=MONITORING_EVAL_RUN_DIR,
-                        selected_case_ids=failed_case_ids,
-                        latency_threshold_seconds=float(latency_threshold),
-                    )
+                    if (run.get("execution_mode") or "current_data") == "fixed_snapshot":
+                        rerun = _run_fixed_snapshot_evaluation(
+                            selected_case_ids=failed_case_ids,
+                            latency_threshold_seconds=float(latency_threshold),
+                        )
+                    else:
+                        rerun = run_evaluation_dataset(
+                            dataset,
+                            graph_app.invoke,
+                            output_dir=MONITORING_EVAL_RUN_DIR,
+                            selected_case_ids=failed_case_ids,
+                            latency_threshold_seconds=float(latency_threshold),
+                            execution_mode="current_data",
+                            data_source={"db_path": "data/reports.db", "faiss_dir": "data/vector_db"},
+                        )
                 except Exception as exc:
                     st.error(f"Failed-case rerun failed: {exc}")
                 else:
@@ -1658,29 +1768,88 @@ def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
     else:
         st.caption("아직 모니터링할 assistant 응답이 없습니다.")
 
-    st.markdown("#### 최근 응답 상세")
-    latest = next(
-        (
-            message
-            for message in reversed(messages)
-            if message.get("role") == "assistant"
-            and (message.get("metadata") or {}).get("status") == "succeeded"
-        ),
-        None,
-    )
-    if latest:
-        metadata = latest.get("metadata") or {}
-        st.json(
-            {
-                "route": metadata.get("route"),
-                "latency_seconds": metadata.get("latency_seconds"),
-                "search_filters": metadata.get("search_filters"),
-                "temporal_context": metadata.get("temporal_context"),
-                "monitoring": metadata.get("monitoring"),
-            }
+    st.markdown("#### 응답 선택 상세")
+    selectable_rows = [row for row in rows if row.get("message_id") is not None]
+    if selectable_rows:
+        label_by_id = {row["message_id"]: row.get("label", str(row["message_id"])) for row in selectable_rows}
+        selected_message_id = st.selectbox(
+            "상세 볼 응답 선택",
+            [row["message_id"] for row in selectable_rows],
+            index=len(selectable_rows) - 1,
+            format_func=lambda message_id: label_by_id.get(message_id, str(message_id)),
+            key=f"chat_monitoring_selected_response_{current_id}",
         )
+        selected_message = next(
+            (message for message in messages if message.get("id") == selected_message_id),
+            None,
+        )
+        if selected_message:
+            selected_user_question = user_question_before_message(messages, selected_message_id)
+            previous_message = previous_successful_assistant(messages, selected_message_id)
+            detail = build_message_trace_detail(selected_message, user_question=selected_user_question)
+            diff = build_response_diff(selected_message, previous_message)
+            hints = build_chat_trace_debug_hints(
+                selected_message,
+                previous_message,
+                user_question=selected_user_question,
+            )
+
+            trace_summary = build_message_trace_summary(detail, diff=diff, hints=hints)
+            trace_tabs = st.tabs([
+                "Trace summary",
+                "Scope / routing",
+                "Advanced diagnostics",
+            ])
+            with trace_tabs[0]:
+                st.json(trace_summary)
+                st.markdown("#### Debug hints")
+                if hints:
+                    for hint in hints:
+                        st.warning(hint)
+                else:
+                    st.success("현재 선택 응답에서 자동 감지된 흔한 RAG 실패 패턴은 없습니다.")
+
+                st.markdown("#### Previous vs selected diff")
+                if diff:
+                    st.json(diff)
+                else:
+                    st.caption("비교할 이전 성공 assistant 응답이 없습니다.")
+            with trace_tabs[1]:
+                st.markdown("##### Query rewrite / follow-up")
+                st.json(detail["query_rewrite"])
+                st.markdown("##### Scope / filters")
+                st.json(detail["scope"])
+                st.markdown("##### Routing")
+                st.json(detail["routing"])
+            with trace_tabs[2]:
+                with st.expander("Retrieval / rerank", expanded=False):
+                    st.json(detail["retrieval"])
+                with st.expander("Sources", expanded=False):
+                    sources = detail["sources"]
+                    if sources:
+                        st.dataframe(sources, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("선택된 응답에 source metadata가 없습니다.")
+                with st.expander("Answer / citations", expanded=False):
+                    st.json(detail["answer"])
+
+            if st.button(
+                "Create issue report with selected trace",
+                key=f"chat_monitoring_issue_report_{current_id}_{selected_message_id}",
+            ):
+                report = create_issue_report(
+                    current_id,
+                    "Chat Monitoring trace",
+                    "Selected response trace from Chat Monitoring",
+                    build_chat_trace_issue_context(
+                        current_thread,
+                        messages,
+                        selected_message_id=selected_message_id,
+                    ),
+                )
+                st.success(f"Issue report saved: {report['file_path']}")
     else:
-        st.caption("성공한 assistant 응답이 아직 없습니다.")
+        st.caption("상세 trace를 표시할 assistant 응답이 없습니다.")
 
 def render_global_monitoring_page() -> None:
     """Render global Monitoring Mode pages that do not depend on a selected chat."""

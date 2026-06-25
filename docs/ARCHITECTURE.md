@@ -140,6 +140,18 @@ RERANK_MODEL=cohere/rerank-v3.5
 - `debug/*`는 Git에 포함하지 않고 `debug/.gitkeep`만 폴더 유지용으로 추적합니다.
 - 신고 파일은 사용자가 내용을 확인한 뒤 복사하거나 `.txt` 파일로 전달하는 로컬 디버깅 산출물입니다.
 
+### Chat Monitoring trace viewer
+
+개별 chat monitoring은 마지막 응답 하나만 보여주지 않고, assistant 응답 row에서 디버깅할 턴을 선택하는 trace viewer를 제공합니다. Row에는 직전 user 질문 preview, assistant 답변 preview, route, latency, source 수, 검색 필터, `scope_source`, `scope_decision_reason`, no-result/error 상태, 선택 source 파일명이 포함됩니다.
+
+선택된 응답은 사용 빈도에 따라 세 개의 tab으로 나뉘어 표시됩니다.
+
+1. Trace summary: 원질문, rewrite 결과, follow-up 여부, route, scope source/reason, search filter, source 수, citation 유효성 같은 핵심 진단값을 한 번에 보여줍니다. Debug hint와 직전 성공 응답 대비 diff도 이 tab에서 함께 확인합니다.
+2. Scope / routing: `Query rewrite / follow-up`, `Scope / filters`, `Routing`의 상세 JSON을 한 흐름으로 묶어 보여줍니다. 날짜/종목/리포트 유형/file scope가 어떻게 정해졌고 route hint가 어떻게 만들어졌는지 확인하는 개발자용 상세 화면입니다.
+3. Advanced diagnostics: 평소에는 접어둔 `Retrieval / rerank`, `Sources`, `Answer / citations` 원자료를 expander로 제공합니다. 후보 수, coverage 적용 여부, score summary, `rerank_info` 표, citation 번호/유효성처럼 정밀 디버깅에 필요한 raw metadata를 필요할 때만 펼쳐 봅니다.
+
+또한 선택 응답과 직전 성공 assistant 응답의 filter/source/retrieval 차이를 비교하고, 날짜 필터 손실, prior scope 미사용, no-result, route/content-intent 불일치, document coverage 미적용 같은 흔한 RAG 실패 패턴은 rule-based debug hint로 노출합니다. 선택한 trace, 직전 응답, diff, debug hint는 `Create issue report with selected trace` 버튼으로 issue report에 바로 저장할 수 있습니다.
+
 ## 10. 참고 문서 네비게이션과 PDF 위치 이동 한계
 
 현재 GUI는 답변 안의 `[숫자]` 참조를 참고 문서 expander의 해당 항목으로

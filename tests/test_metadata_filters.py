@@ -451,6 +451,107 @@ def test_search_scope_keeps_prior_dates_and_adds_company_filter_for_section_deep
     }
 
 
+def test_search_scope_drops_incompatible_sector_target_for_company_section_followup(monkeypatch):
+    def fake_infer_search_filters(query):
+        return {"target_name": "반도체", "report_type": "company"}
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(
+        search_scope,
+        "get_metadata_candidates",
+        lambda: {"target_report_types": {"반도체": ("industry",)}},
+    )
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "반도체 섹터에 속한 기업에 대한 내용을 좀 더 자세히 작성해줘",
+            "rewritten_query": "반도체 섹터 기업들에 대한 이번 주 발간 리포트 상세 내용",
+            "chat_history": [],
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-25",
+                },
+                "temporal_context": {
+                    "expression": "이번주",
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-25",
+                },
+            },
+            "followup_scope_intent": True,
+        }
+    )
+
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-25",
+        "report_type": "company",
+    }
+
+
+def test_search_scope_prepare_requests_industry_lookup_for_sector_company_question():
+    result = search_scope.search_scope_prepare_node(
+        {
+            "question": "반도체 섹터에 속한 기업에 대한 내용을 좀 더 자세히 작성해줘",
+            "chat_history": [],
+            "prior_search_scope": {
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-25",
+                },
+            },
+        }
+    )
+
+    assert result["scope_prepare"]["industry_lookup_request"] == {
+        "term": "반도체",
+        "reason": "sector_company_request",
+        "target": "company_universe",
+    }
+
+
+def test_search_scope_merge_applies_industry_lookup_file_scope():
+    result = search_scope.search_scope_merge_node(
+        {
+            "question": "반도체 섹터에 속한 기업에 대한 내용을 좀 더 자세히 작성해줘",
+            "rewritten_query": "반도체 섹터 기업 상세 내용",
+            "chat_history": [],
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-25",
+                },
+                "temporal_context": {
+                    "expression": "이번주",
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-25",
+                },
+            },
+            "followup_scope_intent": True,
+            "industry_lookup_context": {
+                "term": "반도체",
+                "matched_company_count": 177,
+                "matched_report_targets": ["SK하이닉스", "삼성전자"],
+                "report_file_count": 2,
+                "file_names": ["hynix.pdf", "samsung.pdf"],
+                "source_url": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage",
+            },
+        }
+    )
+
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-25",
+        "report_type": "company",
+        "file_names": ["hynix.pdf", "samsung.pdf"],
+    }
+    assert result["scope_decision"]["reason"] == "industry_company_universe_intersection"
+    assert result["scope_decision"]["industry_term"] == "반도체"
+
+
 def test_search_scope_does_not_select_single_top_company_for_company_section_followup():
     result = search_scope.search_scope_node(
         {

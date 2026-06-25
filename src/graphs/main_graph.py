@@ -3,11 +3,12 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from src.graphs.state import State
+from src.nodes.industry_lookup import industry_lookup_node
 from src.nodes.query_rewrite import query_rewrite_node
 from src.nodes.rdb import rdb_execute_node, rdb_sql_gen_node
 from src.nodes.router import router_node
 from src.nodes.scope_selection import scope_selection_node
-from src.nodes.search_scope import search_scope_node
+from src.nodes.search_scope import search_scope_merge_node, search_scope_prepare_node
 from src.nodes.stock_price import stock_price_tool_node
 from src.nodes.vectordb import vectordb_node
 
@@ -30,7 +31,6 @@ def clear_short_term_memory_retry_node(state: State) -> dict:
         "rewritten_query": state["question"],
         "generation": None,
         "rerank_info": None,
-        "faiss_context": None,
         "no_vector_results": False,
         "memory_retry_attempted": True,
     }
@@ -81,7 +81,9 @@ def build_graph():
     workflow = StateGraph(State)
 
     workflow.add_node("query_rewrite", query_rewrite_node)
-    workflow.add_node("search_scope", search_scope_node)
+    workflow.add_node("search_scope_prepare", search_scope_prepare_node)
+    workflow.add_node("industry_lookup", industry_lookup_node)
+    workflow.add_node("search_scope_merge", search_scope_merge_node)
     workflow.add_node("scope_selection", scope_selection_node)
     workflow.add_node("router", router_node)
     workflow.add_node("rdb_sql_gen_node", rdb_sql_gen_node)
@@ -92,7 +94,9 @@ def build_graph():
     workflow.add_node("final_response_node", final_response_node)
 
     workflow.add_edge(START, "query_rewrite")
-    workflow.add_edge("query_rewrite", "search_scope")
+    workflow.add_edge(START, "search_scope_prepare")
+    workflow.add_edge("search_scope_prepare", "industry_lookup")
+    workflow.add_edge(["query_rewrite", "industry_lookup"], "search_scope_merge")
 
     def after_search_scope(state: State) -> str:
         if state.get("scope_selection_request"):
@@ -100,7 +104,7 @@ def build_graph():
         return "router"
 
     workflow.add_conditional_edges(
-        "search_scope",
+        "search_scope_merge",
         after_search_scope,
         {
             "scope_selection": "scope_selection",

@@ -8,21 +8,31 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
     monkeypatch.setenv("USE_RERANKER", "yes")
     monkeypatch.setenv("RERANK_TIMEOUT", "12.5")
     monkeypatch.setenv("MONITORING_MODE", "on")
+    monkeypatch.setenv("DB_PATH", "/tmp/eval/reports.db")
+    monkeypatch.setenv("FAISS_DIR", "/tmp/eval/vector_db")
+    monkeypatch.setenv("COMPANY_INDUSTRY_DATA_PATH", "/tmp/eval/listed_company_industries.csv")
 
     assert get_config_value("CRAWLER_LOOKBACK_DAYS") == 14
     assert get_config_value("USE_RERANKER") is True
     assert get_config_value("RERANK_TIMEOUT") == 12.5
     assert get_config_value("MONITORING_MODE") is True
+    assert get_config_value("DB_PATH") == "/tmp/eval/reports.db"
+    assert get_config_value("FAISS_DIR") == "/tmp/eval/vector_db"
+    assert get_config_value("COMPANY_INDUSTRY_DATA_PATH") == "/tmp/eval/listed_company_industries.csv"
 
 
 def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     monkeypatch.delenv("CRAWLER_LOOKBACK_DAYS", raising=False)
     monkeypatch.delenv("MONITORING_MODE", raising=False)
+    monkeypatch.delenv("DB_PATH", raising=False)
+    monkeypatch.delenv("FAISS_DIR", raising=False)
     monkeypatch.setenv("CRAWLER_TARGET_DATE", "")
 
     assert get_config_value("CRAWLER_LOOKBACK_DAYS") == 7
     assert get_config_value("CRAWLER_TARGET_DATE") == date.today().isoformat()
     assert get_config_value("MONITORING_MODE") is False
+    assert get_config_value("DB_PATH") == str(BASE_DIR / "data" / "reports.db")
+    assert get_config_value("FAISS_DIR") == str(BASE_DIR / "data" / "vector_db")
 
 
 def test_quickstart_env_updates_use_run_date_and_shared_defaults(monkeypatch):
@@ -52,6 +62,7 @@ def test_render_env_example_contains_generated_defaults():
     assert "CRAWLER_TARGET_DATE=" in content
     assert "CRAWLER_LOOKBACK_DAYS=7" in content
     assert "REPORT_PDF_DIR=" in content
+    assert "COMPANY_INDUSTRY_DATA_PATH=" in content
     assert "MONITORING_MODE=false" in content
 
 

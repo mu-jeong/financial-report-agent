@@ -5,11 +5,7 @@ from dotenv import load_dotenv
 
 from src.configs.settings import (
     BASE_DIR,
-    CONVERSATION_DB_PATH_DEFAULT,
-    DB_PATH_DEFAULT,
-    FAISS_DIR_DEFAULT,
     LOG_FILE_DEFAULT,
-    SAVE_DIR_DEFAULT,
     get_config_value,
 )
 
@@ -18,11 +14,11 @@ load_dotenv()
 # ==============================================================================
 # 1. 파일 경로 설정
 # ==============================================================================
-SAVE_DIR = SAVE_DIR_DEFAULT()
+SAVE_DIR = get_config_value("SAVE_DIR")
 REPORT_PDF_DIR = get_config_value("REPORT_PDF_DIR")
-DB_PATH = DB_PATH_DEFAULT()
-FAISS_DIR = FAISS_DIR_DEFAULT()
-CONVERSATION_DB_PATH = CONVERSATION_DB_PATH_DEFAULT()
+DB_PATH = get_config_value("DB_PATH")
+FAISS_DIR = get_config_value("FAISS_DIR")
+CONVERSATION_DB_PATH = get_config_value("CONVERSATION_DB_PATH")
 MONITORING_MODE = get_config_value("MONITORING_MODE")
 
 # ==============================================================================

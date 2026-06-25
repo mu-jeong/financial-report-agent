@@ -6,6 +6,7 @@
 # ── 다운로드된 PDF 파일 및 DB 데이터 (대용량, 개인 데이터) ──
 data/*
 !data/.gitkeep
+!data/listed_company_industries.csv
 reports/
 
 # ── 로그 파일 ──
@@ -39,6 +40,7 @@ Thumbs.db
 
 
 .omx/
+.hermes/
 tests/fixtures/
 # ── 사용자 문제 신고 / 디버그 산출물 ─────────────────────────────────────────
 debug/*

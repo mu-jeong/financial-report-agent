@@ -36,6 +36,10 @@ def _default_conversation_db_path() -> str:
     return str(BASE_DIR / "data" / "conversations.db")
 
 
+def _default_company_industry_data_path() -> str:
+    return ""
+
+
 def _default_log_file() -> str:
     return str(BASE_DIR / "logs" / "finance_llm.log")
 
@@ -376,6 +380,61 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 default=_default_save_dir,
                 parser=as_str,
                 description="Directory used by the GUI to open referenced PDF files. Leave blank to use data/downloaded.",
+                section="Paths",
+                env_example="",
+            ),
+        ),
+        (
+            "SAVE_DIR",
+            ConfigSpec(
+                name="SAVE_DIR",
+                default=_default_save_dir,
+                parser=as_str,
+                description="Directory where downloaded report PDFs are stored.",
+                section="Paths",
+                env_example="",
+            ),
+        ),
+        (
+            "DB_PATH",
+            ConfigSpec(
+                name="DB_PATH",
+                default=_default_db_path,
+                parser=as_str,
+                description="SQLite reports database path. Override for fixed evaluation snapshots.",
+                section="Paths",
+                env_example="",
+            ),
+        ),
+        (
+            "FAISS_DIR",
+            ConfigSpec(
+                name="FAISS_DIR",
+                default=_default_faiss_dir,
+                parser=as_str,
+                description="FAISS vector index directory. Override for fixed evaluation snapshots.",
+                section="Paths",
+                env_example="",
+            ),
+        ),
+        (
+            "CONVERSATION_DB_PATH",
+            ConfigSpec(
+                name="CONVERSATION_DB_PATH",
+                default=_default_conversation_db_path,
+                parser=as_str,
+                description="SQLite conversation database path.",
+                section="Paths",
+                env_example="",
+            ),
+        ),
+        (
+            "COMPANY_INDUSTRY_DATA_PATH",
+            ConfigSpec(
+                name="COMPANY_INDUSTRY_DATA_PATH",
+                default=_default_company_industry_data_path,
+                parser=as_optional_str,
+                description="Optional KRX listed-company industry CSV path for sector/company universe lookup.",
                 section="Paths",
                 env_example="",
             ),

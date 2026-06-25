@@ -13,14 +13,137 @@ from typing import Any, Callable
 from src.utils.citations import extract_citation_ranks, group_sources_by_document
 
 from src.configs.settings import BASE_DIR
+from src.core.followup_scope import build_answer_scope_index
 
 EVALUATION_DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "evaluation_dataset.json"
+MULTITURN_EVALUATION_DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "multiturn_evaluation_dataset.json"
+EVALUATION_SNAPSHOT_ROOT = BASE_DIR / "tests" / "fixtures" / "eval_snapshot"
+EVALUATION_SNAPSHOT_MANIFEST_PATH = EVALUATION_SNAPSHOT_ROOT / "manifest.json"
 
 
 def load_evaluation_dataset(path: str | Path = EVALUATION_DATASET_PATH) -> dict[str, Any]:
     """Load the fixed local evaluation dataset."""
     dataset_path = Path(path)
     return json.loads(dataset_path.read_text(encoding="utf-8-sig"))
+
+
+def load_multiturn_evaluation_dataset(
+    path: str | Path = MULTITURN_EVALUATION_DATASET_PATH,
+) -> dict[str, Any]:
+    """Load the fixed local multi-turn evaluation dataset."""
+    dataset_path = Path(path)
+    return json.loads(dataset_path.read_text(encoding="utf-8-sig"))
+
+
+def load_evaluation_snapshot_manifest(
+    path: str | Path = EVALUATION_SNAPSHOT_MANIFEST_PATH,
+) -> dict[str, Any]:
+    """Load the fixed evaluation snapshot manifest."""
+    manifest_path = Path(path)
+    return json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+
+
+def _snapshot_check(name: str, passed: bool, detail: str) -> dict[str, str]:
+    return {"name": name, "status": "pass" if passed else "fail", "detail": detail}
+
+
+def _compare_snapshot_value(
+    checks: list[dict[str, str]],
+    *,
+    name: str,
+    dataset_value: Any,
+    manifest_value: Any,
+) -> None:
+    if manifest_value is None:
+        checks.append(_snapshot_check(name, True, "manifest value not specified"))
+        return
+    checks.append(
+        _snapshot_check(
+            name,
+            dataset_value == manifest_value,
+            f"dataset={dataset_value!r}, manifest={manifest_value!r}",
+        )
+    )
+
+
+def validate_evaluation_snapshot(
+    dataset: dict[str, Any],
+    manifest: dict[str, Any],
+    snapshot_root: str | Path = EVALUATION_SNAPSHOT_ROOT,
+) -> dict[str, Any]:
+    """Validate that dataset metadata and snapshot files describe one baseline."""
+    root = Path(snapshot_root)
+    database = manifest.get("database") or {}
+    vector_db = manifest.get("vector_db") or {}
+    db_path = root / str(database.get("path") or "reports.db")
+    faiss_dir = root / str(vector_db.get("path") or "vector_db")
+    checks: list[dict[str, str]] = []
+
+    _compare_snapshot_value(
+        checks,
+        name="dataset_name",
+        dataset_value=dataset.get("name"),
+        manifest_value=manifest.get("dataset_name"),
+    )
+    _compare_snapshot_value(
+        checks,
+        name="dataset_version",
+        dataset_value=dataset.get("version"),
+        manifest_value=manifest.get("dataset_version"),
+    )
+    generated_from = dataset.get("generated_from") or {}
+    _compare_snapshot_value(
+        checks,
+        name="snapshot_date",
+        dataset_value=generated_from.get("snapshot_date"),
+        manifest_value=manifest.get("snapshot_date"),
+    )
+    for field in (
+        "source_row_count",
+        "embedded_row_count",
+        "min_report_date",
+        "max_report_date",
+    ):
+        _compare_snapshot_value(
+            checks,
+            name=field,
+            dataset_value=generated_from.get(field),
+            manifest_value=database.get(field),
+        )
+
+    checks.append(
+        _snapshot_check(
+            "snapshot_db_exists",
+            db_path.exists(),
+            str(db_path),
+        )
+    )
+    checks.append(
+        _snapshot_check(
+            "vector_dir_exists",
+            faiss_dir.exists(),
+            str(faiss_dir),
+        )
+    )
+    for file_name in vector_db.get("required_files") or ["index.faiss", "index.pkl"]:
+        file_path = faiss_dir / str(file_name)
+        checks.append(
+            _snapshot_check(
+                f"vector_file:{file_name}",
+                file_path.exists(),
+                str(file_path),
+            )
+        )
+
+    status = "fail" if any(check["status"] == "fail" for check in checks) else "pass"
+    return {
+        "status": status,
+        "checks": checks,
+        "snapshot_root": str(root),
+        "db_path": str(db_path),
+        "faiss_dir": str(faiss_dir),
+        "manifest": manifest,
+    }
 
 
 def summarize_evaluation_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
@@ -102,25 +225,499 @@ def summarize_chat_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
 def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build one safe monitoring row per assistant response."""
     rows: list[dict[str, Any]] = []
+    latest_user_question = ""
     for message in messages:
+        if message.get("role") == "user":
+            latest_user_question = str(message.get("content") or "")
+            continue
         if message.get("role") != "assistant":
             continue
         metadata = message.get("metadata") or {}
         monitoring = metadata.get("monitoring") or {}
         search_scope = metadata.get("search_scope") or {}
+        rerank_info = metadata.get("rerank_info") or []
+        search_filters = search_scope.get("search_filters") or metadata.get("search_filters") or {}
+        scope_decision = metadata.get("scope_decision") or {}
+        route = metadata.get("route", "-")
+        created_at = message.get("created_at")
+        source_names = _ordered_file_names(rerank_info)
         rows.append(
             {
-                "created_at": message.get("created_at"),
+                "message_id": message.get("id"),
+                "created_at": created_at,
+                "user_question_preview": _safe_preview(metadata.get("question") or latest_user_question),
+                "assistant_preview": _safe_preview(message.get("content")),
                 "status": metadata.get("status", "unknown"),
-                "route": metadata.get("route", "-"),
+                "route": route,
                 "latency_seconds": metadata.get("latency_seconds"),
-                "source_count": len(metadata.get("rerank_info") or []),
-                "search_filters": search_scope.get("search_filters") or metadata.get("search_filters") or {},
+                "source_count": len(group_sources_by_document(rerank_info)),
+                "search_filters": search_filters,
+                "scope_source": metadata.get("scope_source") or search_scope.get("scope_source"),
+                "scope_decision_reason": scope_decision.get("reason"),
+                "no_vector_results": bool(metadata.get("no_vector_results")),
+                "selected_file_names": source_names,
                 "rdb_row_count": (monitoring.get("rdb") or {}).get("row_count"),
                 "error": metadata.get("error"),
+                "label": _response_label(created_at, route, metadata.get("question") or latest_user_question, len(group_sources_by_document(rerank_info)), metadata.get("latency_seconds")),
             }
         )
     return rows
+
+
+def _safe_preview(value: Any, max_chars: int = 120) -> str:
+    compact = " ".join(str(value or "").split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 1] + "…"
+
+
+def _response_label(created_at: Any, route: Any, question: Any, source_count: int, latency_seconds: Any) -> str:
+    latency = f" · {float(latency_seconds):.1f}s" if isinstance(latency_seconds, (int, float)) else ""
+    return f"{created_at or '-'} · {route or '-'} · {_safe_preview(question, 48)} · {source_count} sources{latency}"
+
+
+def _ordered_file_names(items: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in items or []:
+        file_name = str((item or {}).get("file_name") or "").strip()
+        if file_name and file_name != "-" and file_name not in seen:
+            seen.add(file_name)
+            names.append(file_name)
+    return names
+
+
+def _message_metadata(message: dict[str, Any] | None) -> dict[str, Any]:
+    return (message or {}).get("metadata") or {}
+
+
+def _metadata_search_filters(metadata: dict[str, Any]) -> dict[str, Any]:
+    search_scope = metadata.get("search_scope") or {}
+    return search_scope.get("search_filters") or metadata.get("search_filters") or {}
+
+
+def _metadata_retrieval(metadata: dict[str, Any]) -> dict[str, Any]:
+    return (metadata.get("monitoring") or {}).get("retrieval") or {}
+
+
+def _metadata_query_rewrite(metadata: dict[str, Any]) -> dict[str, Any]:
+    return (metadata.get("monitoring") or {}).get("query_rewrite") or {}
+
+
+def build_message_trace_detail(message: dict[str, Any], *, user_question: str | None = None) -> dict[str, Any]:
+    """Split one assistant response into trace sections for Chat Monitoring."""
+    metadata = _message_metadata(message)
+    monitoring = metadata.get("monitoring") or {}
+    retrieval = _metadata_retrieval(metadata)
+    query_rewrite = _metadata_query_rewrite(metadata)
+    rerank_info = metadata.get("rerank_info") or []
+    source_count = len(group_sources_by_document(rerank_info))
+    answer = str(message.get("content") or "")
+    citation_ranks = sorted(extract_citation_ranks(answer, source_count=None))
+    return {
+        "query_rewrite": {
+            "original_question": user_question or metadata.get("question"),
+            "rewritten_query": query_rewrite.get("rewritten_query"),
+            "uses_chat_history": query_rewrite.get("uses_chat_history"),
+            "followup_scope_intent": query_rewrite.get("followup_scope_intent") or metadata.get("followup_scope_intent"),
+            "scope_source": metadata.get("scope_source"),
+            "scope_decision": metadata.get("scope_decision"),
+        },
+        "scope": {
+            "search_filters": _metadata_search_filters(metadata),
+            "temporal_context": metadata.get("temporal_context"),
+            "selection_context": metadata.get("selection_context"),
+            "industry_lookup_context": metadata.get("industry_lookup_context"),
+            "search_scope": metadata.get("search_scope"),
+        },
+        "routing": {
+            "route": metadata.get("route"),
+            "routing_context": monitoring.get("routing") or metadata.get("routing_context"),
+            "route_hint": (monitoring.get("routing") or {}).get("route_hint"),
+            "has_vector_intent": (monitoring.get("routing") or {}).get("has_vector_intent"),
+            "full_period_request": (monitoring.get("routing") or {}).get("full_period_request"),
+        },
+        "retrieval": retrieval,
+        "sources": rerank_info,
+        "answer": {
+            "assistant_preview": _safe_preview(answer, 500),
+            "source_count": source_count,
+            "citation_ranks_used": citation_ranks,
+            "citation_valid": _citation_valid(answer, rerank_info),
+        },
+    }
+
+
+def build_message_trace_summary(
+    detail: dict[str, Any],
+    *,
+    diff: dict[str, Any] | None = None,
+    hints: list[str] | None = None,
+) -> dict[str, Any]:
+    """Flatten one trace detail into the default Chat Monitoring overview."""
+    query_rewrite = detail.get("query_rewrite") or {}
+    scope = detail.get("scope") or {}
+    routing = detail.get("routing") or {}
+    retrieval = detail.get("retrieval") or {}
+    answer = detail.get("answer") or {}
+    scope_decision = query_rewrite.get("scope_decision") or {}
+    industry_lookup = scope.get("industry_lookup_context") or {}
+    return {
+        "original_question": query_rewrite.get("original_question"),
+        "rewritten_query": query_rewrite.get("rewritten_query"),
+        "followup_scope_intent": query_rewrite.get("followup_scope_intent"),
+        "route": routing.get("route"),
+        "scope_source": query_rewrite.get("scope_source"),
+        "scope_reason": scope_decision.get("reason"),
+        "industry_term": scope_decision.get("industry_term") or industry_lookup.get("term"),
+        "search_filters": scope.get("search_filters") or {},
+        "candidate_count_after_filter": retrieval.get("candidate_count_after_filter"),
+        "source_count": answer.get("source_count") or retrieval.get("source_count"),
+        "citation_valid": answer.get("citation_valid"),
+        "debug_hint_count": len(hints or []),
+        "diff_available": bool(diff),
+    }
+
+
+def _dict_diff(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    keys = set(current) | set(previous)
+    kept = {key: current[key] for key in keys if key in current and key in previous and current[key] == previous[key]}
+    added = {key: current[key] for key in keys if key in current and key not in previous}
+    removed = {key: previous[key] for key in keys if key in previous and key not in current}
+    changed = {key: {"previous": previous[key], "current": current[key]} for key in keys if key in current and key in previous and current[key] != previous[key]}
+    return {"kept": kept, "added": added, "removed": removed, "changed": changed}
+
+
+def build_response_diff(current: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
+    """Compare a selected assistant response with the previous successful one."""
+    if not previous:
+        return {}
+    current_metadata = _message_metadata(current)
+    previous_metadata = _message_metadata(previous)
+    current_retrieval = _metadata_retrieval(current_metadata)
+    previous_retrieval = _metadata_retrieval(previous_metadata)
+    current_files = set(_ordered_file_names(current_metadata.get("rerank_info") or []))
+    previous_files = set(_ordered_file_names(previous_metadata.get("rerank_info") or []))
+    return {
+        "rewritten_query_changed": _metadata_query_rewrite(current_metadata).get("rewritten_query") != _metadata_query_rewrite(previous_metadata).get("rewritten_query"),
+        "route_changed": current_metadata.get("route") != previous_metadata.get("route"),
+        "search_filters": _dict_diff(_metadata_search_filters(current_metadata), _metadata_search_filters(previous_metadata)),
+        "temporal_context_changed": current_metadata.get("temporal_context") != previous_metadata.get("temporal_context"),
+        "scope_source_changed": current_metadata.get("scope_source") != previous_metadata.get("scope_source"),
+        "scope_decision_changed": current_metadata.get("scope_decision") != previous_metadata.get("scope_decision"),
+        "sources": {
+            "previous_count": len(previous_files),
+            "current_count": len(current_files),
+            "count_delta": len(current_files) - len(previous_files),
+            "added": sorted(current_files - previous_files),
+            "removed": sorted(previous_files - current_files),
+        },
+        "retrieval": {
+            "candidate_count_after_filter_delta": _delta(
+                current_retrieval.get("candidate_count_after_filter"),
+                previous_retrieval.get("candidate_count_after_filter"),
+            )
+        },
+    }
+
+
+def build_chat_trace_debug_hints(
+    current: dict[str, Any],
+    previous: dict[str, Any] | None = None,
+    *,
+    user_question: str | None = None,
+) -> list[str]:
+    """Return rule-based hints for common Chat Monitoring failure patterns."""
+    hints: list[str] = []
+    metadata = _message_metadata(current)
+    previous_metadata = _message_metadata(previous)
+    filters = _metadata_search_filters(metadata)
+    previous_filters = _metadata_search_filters(previous_metadata)
+    retrieval = _metadata_retrieval(metadata)
+    question = str(user_question or metadata.get("question") or "")
+    followup_intent = bool(metadata.get("followup_scope_intent") or _metadata_query_rewrite(metadata).get("followup_scope_intent"))
+    if followup_intent and metadata.get("scope_source") != "prior_search_scope" and not metadata.get("scope_decision"):
+        hints.append("⚠️ 후속 질문 가능성이 있지만 prior_search_scope가 사용되지 않았습니다.")
+    for key in ("report_date_start", "report_date_end"):
+        if previous_filters.get(key) and not filters.get(key):
+            hints.append("⚠️ 직전 응답에는 날짜 필터가 있었는데 현재 응답에서 날짜 필터가 사라졌습니다.")
+            break
+    file_names = _ordered_file_names(metadata.get("rerank_info") or [])
+    if len(metadata.get("rerank_info") or []) > 1 and len(set(file_names)) <= 1:
+        hints.append("⚠️ 복수 문서 요청처럼 보이지만 selected source가 1개 문서에 편중되어 있습니다.")
+    if retrieval.get("candidate_count_after_filter") == 0:
+        hints.append("⚠️ candidate_count_after_filter=0입니다. metadata filter가 과도할 수 있습니다.")
+    if metadata.get("route") == "rdb" and any(keyword in question for keyword in ("주요 내용", "요약", "리스크", "투자포인트", "투자 포인트")):
+        hints.append("⚠️ route=rdb인데 질문에 주요 내용/요약/리스크/투자포인트가 포함되어 있습니다.")
+    multi_doc_terms = ("전체", "각각", "리포트들", "목록", "비교", "모두", "여러")
+    if any(term in question for term in multi_doc_terms) and retrieval.get("document_coverage_applied") is False:
+        hints.append("⚠️ document_coverage_applied=False인데 질문에 전체/각각/리포트들이 포함되어 있습니다.")
+    return list(dict.fromkeys(hints))
+
+
+def previous_successful_assistant(messages: list[dict[str, Any]], selected_message_id: Any) -> dict[str, Any] | None:
+    """Return the successful assistant response immediately before selected_message_id."""
+    previous: dict[str, Any] | None = None
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        if message.get("id") == selected_message_id:
+            return previous
+        if (_message_metadata(message)).get("status") == "succeeded":
+            previous = message
+    return previous
+
+
+def user_question_before_message(messages: list[dict[str, Any]], selected_message_id: Any) -> str | None:
+    """Return the nearest user question before a selected assistant response."""
+    latest_user: str | None = None
+    for message in messages:
+        if message.get("id") == selected_message_id:
+            return latest_user
+        if message.get("role") == "user":
+            latest_user = str(message.get("content") or "")
+    return latest_user
+
+
+def _compact_trace_message(message: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not message:
+        return None
+    metadata = _message_metadata(message)
+    return {
+        "id": message.get("id"),
+        "role": message.get("role"),
+        "created_at": message.get("created_at"),
+        "content_preview": _safe_preview(message.get("content"), 500),
+        "metadata": {
+            "status": metadata.get("status"),
+            "route": metadata.get("route"),
+            "search_filters": _metadata_search_filters(metadata),
+            "scope_source": metadata.get("scope_source"),
+            "scope_decision": metadata.get("scope_decision"),
+            "retrieval": _metadata_retrieval(metadata),
+            "source_files": _ordered_file_names(metadata.get("rerank_info") or []),
+        },
+    }
+
+
+def build_chat_trace_issue_context(
+    thread: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    selected_message_id: Any,
+) -> dict[str, Any]:
+    """Build an issue-report context from a selected Chat Monitoring trace."""
+    selected = next((message for message in messages if message.get("id") == selected_message_id), None)
+    previous = previous_successful_assistant(messages, selected_message_id)
+    selected_question = user_question_before_message(messages, selected_message_id)
+    return {
+        "thread_id": thread.get("id"),
+        "thread_name": thread.get("name"),
+        "submitted_from": "chat_monitoring_trace",
+        "selected_user_question": selected_question,
+        "selected_message": _compact_trace_message(selected),
+        "previous_message": _compact_trace_message(previous),
+        "trace_detail": build_message_trace_detail(selected or {}, user_question=selected_question),
+        "diff": build_response_diff(selected or {}, previous),
+        "debug_hints": build_chat_trace_debug_hints(selected or {}, previous, user_question=selected_question),
+    }
+
+
+def build_reusable_search_scope(final_state: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a reusable retrieval scope from a completed graph state."""
+    search_filters = dict(final_state.get("search_filters") or {})
+    temporal_context = final_state.get("temporal_context")
+    sources = final_state.get("rerank_info") or final_state.get("rdb_sources") or []
+    file_names: list[str] = []
+    seen_file_names: set[str] = set()
+    for source in sources:
+        file_name = (source or {}).get("file_name")
+        if file_name and file_name != "-" and file_name not in seen_file_names:
+            seen_file_names.add(str(file_name))
+            file_names.append(str(file_name))
+
+    if not search_filters and not temporal_context and not file_names:
+        return None
+
+    scope: dict[str, Any] = {
+        "route": final_state.get("route"),
+        "search_filters": search_filters,
+        "temporal_context": temporal_context,
+        "scope_source": final_state.get("scope_source"),
+    }
+    if file_names:
+        scope["file_names"] = file_names
+    scope["answer_scope_index"] = build_answer_scope_index(scope, sources)
+    return scope
+
+
+def _expected_state_value(final_state: dict[str, Any], key: str) -> Any:
+    if key == "scope_decision_reason":
+        return (final_state.get("scope_decision") or {}).get("reason")
+    if key == "scope_decision_matched_section_id":
+        return (final_state.get("scope_decision") or {}).get("matched_section_id")
+    return final_state.get(key)
+
+
+def _expected_state_matches(expected_state: dict[str, Any], final_state: dict[str, Any]) -> tuple[bool, dict[str, dict[str, Any]]]:
+    mismatches: dict[str, dict[str, Any]] = {}
+    for key, expected_value in (expected_state or {}).items():
+        actual_value = _expected_state_value(final_state, key)
+        if actual_value != expected_value:
+            mismatches[key] = {"expected": expected_value, "actual": actual_value}
+    return not mismatches, mismatches
+
+
+def evaluate_multiturn_turn_result(
+    turn: dict[str, Any],
+    final_state: dict[str, Any],
+    *,
+    latency_seconds: float,
+    latency_threshold_seconds: float = 30.0,
+    input_had_chat_history: bool = False,
+    input_had_prior_search_scope: bool = False,
+) -> dict[str, Any]:
+    """Score one multi-turn evaluation turn against graph output and input context."""
+    result = evaluate_dataset_case_result(
+        turn,
+        final_state,
+        latency_seconds=latency_seconds,
+        latency_threshold_seconds=latency_threshold_seconds,
+    )
+    expected_input = turn.get("expected_input") or {}
+    chat_history_pass = (
+        True
+        if "chat_history" not in expected_input
+        else input_had_chat_history == bool(expected_input.get("chat_history"))
+    )
+    prior_scope_pass = (
+        True
+        if "prior_search_scope" not in expected_input
+        else input_had_prior_search_scope == bool(expected_input.get("prior_search_scope"))
+    )
+    state_pass, state_mismatches = _expected_state_matches(turn.get("expected_state") or {}, final_state)
+    passed = result["status"] == "pass" and chat_history_pass and prior_scope_pass and state_pass
+    result.update(
+        {
+            "status": "pass" if passed else "fail",
+            "chat_history_pass": chat_history_pass,
+            "prior_scope_pass": prior_scope_pass,
+            "expected_state_pass": state_pass,
+            "expected_state_mismatches": state_mismatches,
+            "actual_state": {
+                "uses_chat_history": final_state.get("uses_chat_history"),
+                "followup_scope_intent": final_state.get("followup_scope_intent"),
+                "scope_source": final_state.get("scope_source"),
+                "scope_decision_reason": (final_state.get("scope_decision") or {}).get("reason"),
+                "scope_decision_matched_section_id": (final_state.get("scope_decision") or {}).get("matched_section_id"),
+            },
+        }
+    )
+    return result
+
+
+def _summarize_multiturn_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    case_count = len(results)
+    turn_results = [turn for result in results for turn in result.get("turn_results", [])]
+    turn_count = len(turn_results)
+    passed = sum(1 for result in results if result.get("status") == "pass")
+    turn_passed = sum(1 for turn in turn_results if turn.get("status") == "pass")
+    base_summary = _summarize_eval_results(turn_results)
+    base_summary.update(
+        {
+            "case_count": case_count,
+            "turn_count": turn_count,
+            "passed": passed,
+            "failed": case_count - passed,
+            "pass_rate": passed / case_count if case_count else 0.0,
+            "turn_passed": turn_passed,
+            "turn_failed": turn_count - turn_passed,
+            "turn_pass_rate": turn_passed / turn_count if turn_count else 0.0,
+        }
+    )
+    return base_summary
+
+
+def run_multiturn_evaluation_dataset(
+    dataset: dict[str, Any],
+    invoke_fn: Callable[..., dict[str, Any]],
+    *,
+    output_dir: str | Path,
+    limit: int | None = None,
+    selected_case_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+    latency_threshold_seconds: float = 30.0,
+    execution_mode: str = "current_data",
+    data_source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run multi-turn cases while carrying chat history and prior retrieval scope."""
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
+    cases = select_evaluation_cases(dataset, selected_case_ids)
+    if limit:
+        cases = cases[:limit]
+    results: list[dict[str, Any]] = []
+    for case in cases:
+        case_id = case.get("id", "case")
+        thread_id = f"monitoring_multiturn_eval_{run_id}_{case_id}"
+        chat_history: list[tuple[str, str]] = []
+        prior_search_scope: dict[str, Any] | None = None
+        turn_results: list[dict[str, Any]] = []
+        for turn_index, turn in enumerate(case.get("turns") or [], 1):
+            payload: dict[str, Any] = {
+                "question": turn.get("question", ""),
+                "chat_history": list(chat_history),
+            }
+            input_had_chat_history = bool(payload["chat_history"])
+            input_had_prior_search_scope = prior_search_scope is not None
+            if prior_search_scope is not None:
+                payload["prior_search_scope"] = prior_search_scope
+            started = time.perf_counter()
+            final_state = invoke_fn(
+                payload,
+                config={"configurable": {"thread_id": thread_id}},
+            )
+            latency = time.perf_counter() - started
+            turn_result = evaluate_multiturn_turn_result(
+                turn,
+                final_state,
+                latency_seconds=latency,
+                latency_threshold_seconds=latency_threshold_seconds,
+                input_had_chat_history=input_had_chat_history,
+                input_had_prior_search_scope=input_had_prior_search_scope,
+            )
+            turn_result["turn_index"] = turn_index
+            turn_results.append(turn_result)
+            chat_history.extend([
+                ("???", str(turn.get("question", ""))),
+                ("AI", str(final_state.get("generation") or "")),
+            ])
+            prior_search_scope = build_reusable_search_scope(final_state)
+        results.append(
+            {
+                "case_id": case_id,
+                "description": case.get("description"),
+                "status": "pass" if turn_results and all(turn.get("status") == "pass" for turn in turn_results) else "fail",
+                "turn_count": len(turn_results),
+                "turn_results": turn_results,
+            }
+        )
+    run = {
+        "run_id": run_id,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "dataset_name": dataset.get("name"),
+        "dataset_version": dataset.get("version"),
+        "evaluation_type": "multiturn",
+        "execution_mode": execution_mode,
+        "data_source": data_source or {},
+        "selected_case_ids": [case.get("id") for case in cases],
+        "summary": _summarize_multiturn_results(results),
+        "results": results,
+    }
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    json_path = output_path / f"multiturn_evaluation_run_{run_id}.json"
+    json_path.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    run["json_path"] = str(json_path)
+    return run
 
 
 def _source_names(items: list[dict[str, Any]]) -> set[str]:
@@ -224,6 +821,8 @@ def run_evaluation_dataset(
     limit: int | None = None,
     selected_case_ids: list[str] | tuple[str, ...] | set[str] | None = None,
     latency_threshold_seconds: float = 30.0,
+    execution_mode: str = "current_data",
+    data_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the fixed dataset through the graph and persist a JSON experiment run."""
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
@@ -251,6 +850,8 @@ def run_evaluation_dataset(
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "dataset_name": dataset.get("name"),
         "dataset_version": dataset.get("version"),
+        "execution_mode": execution_mode,
+        "data_source": data_source or {},
         "selected_case_ids": [case.get("id") for case in cases],
         "summary": _summarize_eval_results(results),
         "results": results,
@@ -317,6 +918,24 @@ def compare_evaluation_runs(current: dict[str, Any], previous: dict[str, Any] | 
         "citation_valid_rate_delta": _delta(current_summary.get("citation_valid_rate"), previous_summary.get("citation_valid_rate")),
         "no_result_rate_delta": _delta(current_summary.get("no_result_rate"), previous_summary.get("no_result_rate")),
     }
+
+
+def filter_evaluation_runs_by_mode(
+    runs: list[dict[str, Any]],
+    execution_mode: str | None,
+) -> list[dict[str, Any]]:
+    """Return saved evaluation runs matching an execution mode.
+
+    Older artifacts did not record an execution mode; treat them as current-data
+    runs so previous-run comparisons do not mix them with fixed snapshots.
+    """
+    if not execution_mode:
+        return runs
+    return [
+        run
+        for run in runs
+        if (run.get("execution_mode") or "current_data") == execution_mode
+    ]
 
 
 def summarize_all_chat_threads(thread_messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -441,10 +1060,11 @@ def compact_graph_monitoring_metadata(
     *,
     final_state: dict[str, Any],
     latency_seconds: float,
-    rerank_info: list[dict[str, Any]],
+    rerank_info: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     """Build safe per-response monitoring metadata from a completed graph state."""
     route = final_state.get("route")
+    rerank_info = rerank_info or []
     metadata: dict[str, Any] = {
         "route": route,
         "latency_seconds": round(latency_seconds, 3),
@@ -452,6 +1072,7 @@ def compact_graph_monitoring_metadata(
         "temporal_context": final_state.get("temporal_context"),
         "selection_context": final_state.get("selection_context"),
         "scope_decision": final_state.get("scope_decision"),
+        "industry_lookup_context": final_state.get("industry_lookup_context"),
         "monitoring": {
             "query_rewrite": {
                 "rewritten_query": final_state.get("rewritten_query"),

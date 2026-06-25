@@ -425,7 +425,6 @@ def vectordb_node(state: State) -> dict:
 
     if ai_msg.tool_calls:
         return {
-            "faiss_context": context_text,
             "rerank_info": rerank_info,
             "search_filters": search_filters,
             "no_vector_results": False,
@@ -442,7 +441,6 @@ def vectordb_node(state: State) -> dict:
     answer = remove_unavailable_citations(str(answer), source_count=len(rerank_info))
 
     return {
-        "faiss_context": context_text,
         "rerank_info": rerank_info,
         "generation": answer,
         "search_filters": search_filters,
