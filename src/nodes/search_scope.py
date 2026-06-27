@@ -19,7 +19,6 @@ VECTORDB_INTENT_KEYWORDS = (
     "summary",
     "content",
 )
-
 TOP_TARGET_KEYWORDS = ("가장 많이", "최다", "많이 발간", "많이 언급", "top", "most frequent", "most published")
 TARGET_SCOPE_KEYWORDS = ("회사", "종목", "기업", "target")
 FULL_PERIOD_KEYWORDS = ("전체 기간", "전체기간", "전 기간", "전기간", "전체 데이터", "full period", "all period", "all time")
@@ -43,6 +42,13 @@ def _is_full_period_request(text: str) -> bool:
     return any(_normalize_text(keyword) in normalized for keyword in FULL_PERIOD_KEYWORDS)
 
 
+def _has_valid_date_range(filters: dict | None) -> bool:
+    filters = filters or {}
+    start = filters.get("report_date_start")
+    end = filters.get("report_date_end")
+    return bool(start and end and str(start) <= str(end))
+
+
 def _industry_lookup_term(text: str) -> str | None:
     value = str(text or "").strip()
     if not value:
@@ -60,6 +66,28 @@ def _industry_lookup_term(text: str) -> str | None:
         term = before.split()[-1].strip("'\"`.,()[]{}")
         return term or None
     return None
+
+def _date_range_is_inverted(filters: dict | None) -> bool:
+    filters = filters or {}
+    start = filters.get("report_date_start")
+    end = filters.get("report_date_end")
+    return bool(start and end and str(start) > str(end))
+
+
+def _repair_inverted_date_range_from_prior(filters: dict, prior_search_scope: dict | None) -> tuple[dict, dict | None]:
+    if not _date_range_is_inverted(filters):
+        return filters, None
+    prior_context = (prior_search_scope or {}).get("temporal_context") if isinstance(prior_search_scope, dict) else None
+    prior_filters = (prior_search_scope or {}).get("search_filters") if isinstance(prior_search_scope, dict) else None
+    if _has_valid_date_range(prior_filters):
+        repaired = dict(filters)
+        repaired["report_date_start"] = prior_filters["report_date_start"]
+        repaired["report_date_end"] = prior_filters["report_date_end"]
+        return repaired, prior_context
+    repaired = dict(filters)
+    repaired.pop("report_date_start", None)
+    repaired.pop("report_date_end", None)
+    return repaired, None
 
 
 def search_scope_prepare_node(state: State) -> dict:
@@ -134,7 +162,10 @@ def search_scope_node(state: State) -> dict:
     full_period_request = _is_full_period_request(combined_intent_text)
     current_question_filters = _drop_incompatible_target_filter(infer_search_filters(state["question"]))
     current_temporal_context = None if full_period_request else resolve_temporal_context(state["question"])
+    if _date_range_is_inverted(current_temporal_context):
+        current_temporal_context = None
     search_filters = _drop_incompatible_target_filter(infer_search_filters(query))
+    prior_search_scope = state.get("prior_search_scope") or state.get("active_scope") or {}
     if full_period_request:
         search_filters.pop("report_date_start", None)
         search_filters.pop("report_date_end", None)
@@ -148,12 +179,19 @@ def search_scope_node(state: State) -> dict:
                 "report_date_end": temporal_context["report_date_end"],
             }
         )
+    search_filters, repaired_temporal_context = _repair_inverted_date_range_from_prior(
+        search_filters,
+        prior_search_scope,
+    )
+    if repaired_temporal_context is not None:
+        temporal_context = repaired_temporal_context
 
     scope_source = None
     route_hint = None
     scope_decision = None
-    prior_search_scope = state.get("prior_search_scope") or state.get("active_scope") or {}
-    followup_scope_intent = bool(state.get("followup_scope_intent"))
+    followup_scope_intent = bool(state.get("followup_scope_intent")) or bool(
+        isinstance(prior_search_scope, dict) and prior_search_scope.get("search_filters")
+    )
     current_non_temporal_filters = {
         key: value
         for key, value in current_question_filters.items()

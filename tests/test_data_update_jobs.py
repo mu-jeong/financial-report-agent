@@ -6,6 +6,7 @@ import pytest
 from src.core import data_update_jobs
 from src.core.data_update_jobs import (
     build_crawler_env,
+    build_embedding_command,
     build_update_range,
     embedding_file_progress_from_line,
     group_consecutive_dates,
@@ -72,6 +73,11 @@ def test_embedding_file_progress_from_line_ignores_non_file_progress_lines():
     assert embedding_file_progress_from_line("  [3/3] Embedding 42 chunks...") is None
 
 
+def test_build_embedding_command_uses_all_or_limit():
+    assert build_embedding_command(limit=None)[-1] == "--all"
+    assert build_embedding_command(limit=3)[-2:] == ["--limit", "3"]
+
+
 def test_process_is_alive_handles_current_and_missing_pids():
     assert process_is_alive(os.getpid())
     assert not process_is_alive(None)
@@ -115,4 +121,33 @@ def test_start_update_job_passes_parent_pid_and_records_status(monkeypatch, tmp_
     assert command[-2:] == ["--parent-pid", "1234"]
     assert status["pid"] == 4321
     assert status["parent_pid"] == 1234
+    assert data_update_jobs.read_status()["parent_pid"] == 1234
+
+
+def test_start_embedding_job_records_limit_and_parent_pid(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 9876
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "latest.log")
+    monkeypatch.setattr(data_update_jobs.os, "getpid", lambda: 1234)
+    monkeypatch.setattr(data_update_jobs.subprocess, "Popen", fake_popen)
+
+    status = data_update_jobs.start_embedding_job(label="미임베딩 문서 3건", limit=3)
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:3] == [data_update_jobs.sys.executable, "-m", "src.core.data_update_jobs"]
+    assert command[-4:] == ["--limit", "3", "--parent-pid", "1234"]
+    assert status["phase"] == "embed"
+    assert status["embedding_limit"] == 3
+    assert status["pid"] == 9876
     assert data_update_jobs.read_status()["parent_pid"] == 1234

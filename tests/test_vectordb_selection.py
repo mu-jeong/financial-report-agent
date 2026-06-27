@@ -246,6 +246,32 @@ def test_required_file_names_from_prior_scope_keeps_matching_target_period_files
     ]
 
 
+def test_required_file_names_from_prior_scope_keeps_target_files_for_target_with_prior_dates():
+    prior_scope = {
+        "file_names": [
+            "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 전망.pdf",
+            "company_2026-06-22_SK하이닉스_한화투자증권_PE 10배.pdf",
+            "company_2026-06-25_삼성전자_미래에셋증권_생산능력.pdf",
+        ]
+    }
+
+    required = required_file_names_from_prior_scope(
+        "SK하이닉스 알려줘",
+        prior_scope,
+        {
+            "report_date_start": "2026-06-22",
+            "report_date_end": "2026-06-26",
+            "target_name": "SK하이닉스",
+            "report_type": "company",
+        },
+    )
+
+    assert required == [
+        "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 전망.pdf",
+        "company_2026-06-22_SK하이닉스_한화투자증권_PE 10배.pdf",
+    ]
+
+
 def test_select_top_passages_applies_document_coverage_for_section_followup(monkeypatch):
     import src.nodes.vectordb as vectordb
 

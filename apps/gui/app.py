@@ -16,13 +16,25 @@ import streamlit.components.v1 as components
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from src.configs.config import CRAWLER_CATEGORIES, MONITORING_MODE, REPORT_PDF_DIR
+from src.configs import config as config_module
+
+config_module = importlib.reload(config_module)
+CRAWLER_CATEGORIES = config_module.CRAWLER_CATEGORIES
+MONITORING_MODE = config_module.MONITORING_MODE
+REPORT_PDF_DIR = config_module.REPORT_PDF_DIR
+
 from src.core import data_update_jobs
 from src.core import conversation_store
 from src.core import issue_report_store
 from src.core import monitoring
 from src.core import pdf_extraction
 from src.core import compare_pdf_extractors
+from src.core import metadata_filters as metadata_filters_module
+from src.core import status as status_module
+from src.graphs import main_graph as main_graph_module
+from src.nodes import query_rewrite as query_rewrite_module
+from src.nodes import search_scope as search_scope_module
+from src.nodes import vectordb as vectordb_module
 from src.core.chat_ui_helpers import (
     build_clipboard_copy_html,
     build_no_result_suggestions,
@@ -36,6 +48,12 @@ issue_report_store = importlib.reload(issue_report_store)
 monitoring = importlib.reload(monitoring)
 pdf_extraction = importlib.reload(pdf_extraction)
 compare_pdf_extractors = importlib.reload(compare_pdf_extractors)
+metadata_filters_module = importlib.reload(metadata_filters_module)
+query_rewrite_module = importlib.reload(query_rewrite_module)
+search_scope_module = importlib.reload(search_scope_module)
+vectordb_module = importlib.reload(vectordb_module)
+main_graph_module = importlib.reload(main_graph_module)
+status_module = importlib.reload(status_module)
 append_message = conversation_store.append_message
 create_thread = conversation_store.create_thread
 create_issue_report = issue_report_store.create_issue_report
@@ -44,6 +62,9 @@ build_evaluation_failure_actions = monitoring.build_evaluation_failure_actions
 build_chat_trace_debug_hints = monitoring.build_chat_trace_debug_hints
 build_chat_trace_issue_context = monitoring.build_chat_trace_issue_context
 build_issue_report_rows = monitoring.build_issue_report_rows
+build_regression_candidate_dataset = monitoring.build_regression_candidate_dataset
+build_regression_candidate_rows = monitoring.build_regression_candidate_rows
+list_regression_candidates = monitoring.list_regression_candidates
 build_message_monitoring_rows = monitoring.build_message_monitoring_rows
 build_message_trace_detail = monitoring.build_message_trace_detail
 build_message_trace_summary = monitoring.build_message_trace_summary
@@ -77,7 +98,9 @@ summarize_evaluation_dataset = monitoring.summarize_evaluation_dataset
 update_message = conversation_store.update_message
 user_question_before_message = monitoring.user_question_before_message
 validate_evaluation_snapshot = monitoring.validate_evaluation_snapshot
-from src.core.status import get_data_status
+build_unembedded_report_rows = status_module.build_unembedded_report_rows
+get_data_status = status_module.get_data_status
+list_unembedded_reports = status_module.list_unembedded_reports
 from src.utils import citations
 
 citations = importlib.reload(citations)
@@ -88,7 +111,7 @@ remove_unavailable_citations = citations.remove_unavailable_citations
 document_rank_aliases = citations.document_rank_aliases
 group_sources_by_document = citations.group_sources_by_document
 source_anchor_id = citations.source_anchor_id
-from src.graphs.main_graph import graph_app
+graph_app = main_graph_module.graph_app
 
 WEEKDAY_LABELS = ["월", "화", "수", "목", "금"]
 MONITORING_EVAL_RUN_DIR = Path("debug") / "evaluation_runs"
@@ -210,6 +233,8 @@ def _repair_interrupted_chat_jobs() -> int:
 
 def _search_scope_from_graph_state(final_state: dict) -> dict | None:
     """Build a reusable retrieval scope from the completed graph state."""
+    if final_state.get("no_vector_results"):
+        return None
     search_filters = dict(final_state.get("search_filters") or {})
     temporal_context = final_state.get("temporal_context")
     rerank_info = final_state.get("rerank_info") or final_state.get("rdb_sources") or []
@@ -242,7 +267,7 @@ def _latest_search_scope(messages: list[dict]) -> dict | None:
         if message.get("role") != "assistant":
             continue
         metadata = message.get("metadata") or {}
-        if metadata.get("status") in {"running", "failed"}:
+        if metadata.get("status") in {"running", "failed"} or metadata.get("no_vector_results"):
             continue
         scope = metadata.get("search_scope")
         if isinstance(scope, dict):
@@ -1020,7 +1045,6 @@ def _render_no_result_actions(message: dict, *, index: int) -> None:
     )
     if not suggestions:
         return
-    st.caption("검색 조건을 바꿔 다시 시도할 수 있습니다.")
     columns = st.columns(len(suggestions), gap="small")
     for suggestion, column in zip(suggestions, columns):
         if column.button(
@@ -1028,10 +1052,7 @@ def _render_no_result_actions(message: dict, *, index: int) -> None:
             key=f"no_result_suggestion_{message.get('id', index)}_{suggestion['label']}",
             use_container_width=True,
         ):
-            if suggestion["query"] == "__open_data_update__":
-                st.session_state.show_data_update_hint = True
-            else:
-                st.session_state.pending_suggested_query = suggestion["query"]
+            st.session_state.pending_suggested_query = suggestion["query"]
             _app_rerun()
 
 
@@ -1739,6 +1760,67 @@ def _render_issue_report_monitoring() -> None:
     else:
         st.caption("저장된 issue report가 없습니다.")
 
+    st.markdown("#### Regression candidates")
+    candidates = list_regression_candidates(MONITORING_REGRESSION_CANDIDATE_DIR)
+    candidate_rows = build_regression_candidate_rows(candidates)
+    if not candidate_rows:
+        st.caption("저장된 regression candidate가 없습니다.")
+        return
+
+    st.dataframe(candidate_rows, use_container_width=True, hide_index=True)
+    draft_candidates = [candidate for candidate in candidates if candidate.get("eval_case_draft")]
+    if not draft_candidates:
+        st.info("아직 evaluation case draft가 있는 candidate가 없습니다. Chat Monitoring trace issue를 후보로 저장하면 draft가 생성됩니다.")
+        return
+
+    candidate_ids = [str(candidate.get("id")) for candidate in draft_candidates]
+    selected_candidate_ids = st.multiselect(
+        "실행할 regression candidate draft",
+        options=candidate_ids,
+        default=candidate_ids,
+        format_func=lambda candidate_id: next(
+            (
+                f"{candidate_id} · {(candidate.get('eval_case_draft') or {}).get('question', '')}"
+                for candidate in draft_candidates
+                if str(candidate.get("id")) == candidate_id
+            ),
+            candidate_id,
+        ),
+        help="정식 fixture 반영 전, 선택한 candidate draft만 current data 기준으로 재현 실행합니다.",
+    )
+    selected_dataset = build_regression_candidate_dataset(draft_candidates, selected_candidate_ids)
+    st.caption(f"선택된 draft: {len(selected_dataset['cases'])}개")
+    if selected_dataset["cases"]:
+        with st.expander("선택된 evaluation case draft JSON", expanded=False):
+            st.json(selected_dataset)
+    if st.button("Run selected regression candidate drafts", use_container_width=True, disabled=not selected_dataset["cases"]):
+        with st.spinner("Regression candidate draft 실행 중..."):
+            try:
+                run = run_evaluation_dataset(
+                    selected_dataset,
+                    graph_app.invoke,
+                    output_dir=MONITORING_EVAL_RUN_DIR,
+                    selected_case_ids=[case.get("id") for case in selected_dataset["cases"]],
+                    execution_mode="regression_candidate_current_data",
+                    data_source={
+                        "db_path": "data/reports.db",
+                        "faiss_dir": "data/vector_db",
+                        "candidate_ids": selected_candidate_ids,
+                    },
+                )
+            except Exception as exc:
+                st.error(f"Regression candidate run failed: {exc}")
+            else:
+                st.session_state.latest_regression_candidate_run = run
+                st.success("Regression candidate run saved.")
+                st.code(run.get("json_path") or "", language="text")
+
+    latest_candidate_run = st.session_state.get("latest_regression_candidate_run")
+    if latest_candidate_run:
+        st.markdown("#### Latest regression candidate run")
+        st.json(latest_candidate_run.get("summary") or {})
+        st.dataframe(latest_candidate_run.get("results") or [], use_container_width=True, hide_index=True)
+
 def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
     """Render metrics for the currently selected chat only."""
     st.header("Chat Monitoring")
@@ -1822,14 +1904,10 @@ def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
                 st.markdown("##### Routing")
                 st.json(detail["routing"])
             with trace_tabs[2]:
+                with st.expander("State transitions", expanded=True):
+                    st.json(detail["state_transitions"])
                 with st.expander("Retrieval / rerank", expanded=False):
                     st.json(detail["retrieval"])
-                with st.expander("Sources", expanded=False):
-                    sources = detail["sources"]
-                    if sources:
-                        st.dataframe(sources, use_container_width=True, hide_index=True)
-                    else:
-                        st.caption("선택된 응답에 source metadata가 없습니다.")
                 with st.expander("Answer / citations", expanded=False):
                     st.json(detail["answer"])
 
@@ -1851,6 +1929,73 @@ def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
     else:
         st.caption("상세 trace를 표시할 assistant 응답이 없습니다.")
 
+def _render_unembedded_reports(status: dict) -> None:
+    """Render DB reports that have not been embedded yet and allow embedding retry."""
+    db_status = status["db"]
+    db_path = (status.get("paths") or {}).get("db_path")
+    pending_count = int(db_status.get("pending_reports") or 0)
+    st.subheader("DB에는 있지만 임베딩되지 않은 문서")
+    st.caption(
+        "RDB에는 존재하지만 VectorDB 검색/상세 답변에는 아직 사용되지 않는 리포트입니다. "
+        "이 목록이 남아 있으면 RDB 목록과 VectorDB 상세 답변의 source coverage가 달라질 수 있습니다."
+    )
+
+    col1, col2 = st.columns(2)
+    col1.metric("미임베딩 문서", f"{pending_count}건")
+    col2.metric("검색 커버리지", f"{status['search_coverage_ratio'] * 100:.1f}%")
+
+    display_limit = st.number_input(
+        "표시할 미임베딩 문서 수",
+        min_value=10,
+        max_value=1000,
+        value=min(max(pending_count, 10), 200),
+        step=10,
+        key="unembedded_report_display_limit",
+        help="최근 report_date 순으로 표시합니다. 전체 임베딩 버튼은 표시 개수와 무관하게 모든 pending 문서를 대상으로 합니다.",
+    )
+    rows = build_unembedded_report_rows(
+        list_unembedded_reports(db_path, limit=int(display_limit)) if db_path else []
+    )
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.success("현재 미임베딩 문서가 없습니다.")
+
+    status_payload = data_update_jobs.read_status()
+    job_active = _is_update_job_active(status_payload)
+    if job_active:
+        st.info("이미 데이터 업데이트/임베딩 작업이 실행 중입니다.")
+    if status.get("embedding_limit_active"):
+        st.warning("TEST_LIMIT가 설정되어 있습니다. 전체 처리 버튼은 --all로 실행하지만, 설정값을 확인해 주세요.")
+
+    st.markdown("#### 임베딩 시도")
+    embed_limit = st.number_input(
+        "이번에 처리할 최대 문서 수 (0 = 전체)",
+        min_value=0,
+        max_value=max(pending_count, 1),
+        value=min(pending_count, 20) if pending_count else 0,
+        step=1,
+        key="unembedded_embedding_limit",
+        help="작게 시작해 로그를 확인하거나, 0을 선택해 모든 미임베딩 문서를 처리합니다.",
+    )
+    button_label = "미임베딩 문서 전체 임베딩 시도" if int(embed_limit) == 0 else f"미임베딩 문서 {int(embed_limit)}건 임베딩 시도"
+    if st.button(
+        button_label,
+        key="start_unembedded_embedding_job",
+        disabled=job_active or pending_count == 0,
+        use_container_width=True,
+    ):
+        limit = None if int(embed_limit) == 0 else int(embed_limit)
+        data_update_jobs.start_embedding_job(
+            label=button_label,
+            limit=limit,
+        )
+        st.success("임베딩 작업을 시작했습니다. 아래 진행 상태를 확인하세요.")
+        _app_rerun()
+
+    _render_update_progress()
+
+
 def render_global_monitoring_page() -> None:
     """Render global Monitoring Mode pages that do not depend on a selected chat."""
     st.header("Monitoring Mode")
@@ -1866,6 +2011,7 @@ def render_global_monitoring_page() -> None:
 
     (
         data_tab,
+        unembedded_tab,
         experiment_tab,
         eval_tab,
         parsing_tab,
@@ -1893,6 +2039,7 @@ def render_global_monitoring_page() -> None:
                 "generation_model": config["generation_model"],
                 "embedding_model": config["embedding_model"],
                 "extraction_engine": config["extraction_engine"],
+                "unembedded_extraction_engine": config.get("unembedded_extraction_engine"),
                 "use_parent_child": config["use_parent_child"],
                 "use_reranker": config["use_reranker"],
                 "search_top_k": config["search_top_k"],
@@ -1910,6 +2057,9 @@ def render_global_monitoring_page() -> None:
             for report_date, count in (db_status.get("report_date_counts") or {}).items()
         ]
         st.dataframe(date_counts, use_container_width=True, hide_index=True)
+
+    with unembedded_tab:
+        _render_unembedded_reports(status)
 
     with experiment_tab:
         _render_experiment_monitoring()

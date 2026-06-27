@@ -70,7 +70,8 @@ RERANK_PROVIDER=openrouter
 RERANK_MODEL=cohere/rerank-v3.5
 SEARCH_TOP_K=20
 RECENCY_WEIGHT=0.15
-EXTRACTION_ENGINE=pymupdf
+PDF_EXTRACTION_ENGINE=pymupdf
+UNEMBEDDED_PDF_EXTRACTION_ENGINE=opendataloader
 ```
 
 약 2,000건의 리포트를 임베딩 벡터화하는 데 약 **$0.05**가 소요되었습니다. 실제 비용은 문서 길이, 청크 수, 호출량, 모델 가격에 따라 달라질 수 있습니다.
@@ -215,7 +216,7 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## PDF 추출 엔진 비교
 
-`EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있습니다. `pymupdf`가 기본값이고, `docling`과 `pdf-to-markdown`은 각각 별도 설치/CLI가 필요한 선택형 엔진입니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다.
+`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있습니다. `pymupdf`가 기본값이고, `docling`과 `pdf-to-markdown`은 각각 별도 설치/CLI가 필요한 선택형 엔진입니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`을 설정하면 미임베딩/재시도 문서만 별도 엔진으로 처리할 수 있습니다. 빈 값이면 `PDF_EXTRACTION_ENGINE`을 그대로 사용합니다. 기존 `EXTRACTION_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE` 환경변수도 alias로 동작합니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다.
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10

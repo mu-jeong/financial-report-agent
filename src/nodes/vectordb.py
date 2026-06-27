@@ -281,12 +281,14 @@ def required_file_names_from_prior_scope(
     prior_search_scope: dict | None,
     search_filters: dict | None,
 ) -> list[str]:
-    """지시적 기간 질문에 필요한 prior scope 파일을 반환합니다."""
+    """현재 질문이 prior scope의 특정 파일 집합을 좁혀 봐야 하는 경우 필요한 파일명을 반환합니다."""
     if not prior_search_scope or not search_filters:
         return []
-    if not _normalized_contains(question, DEICTIC_PERIOD_MARKERS):
-        return []
     if not search_filters.get("target_name"):
+        return []
+    uses_prior_period = _normalized_contains(question, DEICTIC_PERIOD_MARKERS)
+    target_with_prior_dates = _filters_have_date_range(search_filters)
+    if not uses_prior_period and not target_with_prior_dates:
         return []
 
     file_names = prior_search_scope.get("file_names") or []
@@ -444,6 +446,16 @@ def vectordb_node(state: State) -> dict:
             supplemental_filters,
         )
         docs_with_scores = _merge_docs_with_scores(docs_with_scores, supplemental_docs_with_scores)
+        matched_required_file_names = {
+            str((getattr(doc, "metadata", {}) or {}).get("file_name") or "")
+            for doc, _score in docs_with_scores
+            if (getattr(doc, "metadata", {}) or {}).get("file_name") in prior_required_file_names
+        }
+        missing_required_file_names = [
+            file_name
+            for file_name in prior_required_file_names
+            if file_name not in matched_required_file_names
+        ]
     candidate_count_after_filter = len(docs_with_scores)
     retrieval_metrics = {
         "fetch_k": fetch_k,
@@ -454,6 +466,9 @@ def vectordb_node(state: State) -> dict:
     }
     if prior_required_file_names:
         retrieval_metrics["prior_scope_required_file_names"] = prior_required_file_names
+        retrieval_metrics["prior_scope_required_file_count"] = len(prior_required_file_names)
+        retrieval_metrics["prior_scope_required_file_names_missing_after_filter"] = missing_required_file_names
+        retrieval_metrics["prior_scope_required_file_count_after_filter"] = len(matched_required_file_names)
     if not docs_with_scores:
         if search_filters:
             filter_text = ", ".join(f"{key}={value}" for key, value in search_filters.items())

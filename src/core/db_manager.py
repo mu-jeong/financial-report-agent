@@ -37,6 +37,13 @@ from src.configs.config import DB_PATH, SAVE_DIR, get_logger
 logger = get_logger(__name__)
 
 
+EMBEDDING_FAILURE_COLUMNS = {
+    "embedding_last_error": "TEXT",
+    "embedding_last_attempt_at": "TEXT",
+    "embedding_extraction_engine": "TEXT",
+}
+
+
 def get_connection() -> sqlite3.Connection:
     """DB 커넥션 반환. Row를 dict처럼 접근 가능하도록 설정."""
     conn = sqlite3.connect(DB_PATH)
@@ -56,9 +63,13 @@ def init_db() -> None:
                 title       TEXT     NOT NULL,
                 broker      TEXT     NOT NULL,
                 file_name   TEXT     NOT NULL UNIQUE,
-                is_embedded INTEGER  NOT NULL DEFAULT 0
+                is_embedded INTEGER  NOT NULL DEFAULT 0,
+                embedding_last_error TEXT,
+                embedding_last_attempt_at TEXT,
+                embedding_extraction_engine TEXT
             )
         """)
+        _ensure_reports_failure_columns(conn)
         # Parent-Child Chunking을 위한 부모 청크 저장 테이블
         conn.execute("""
             CREATE TABLE IF NOT EXISTS parent_chunks (
@@ -70,6 +81,17 @@ def init_db() -> None:
         """)
         conn.commit()
     logger.info(f"[DB] 초기화 완료 → {DB_PATH}")
+
+
+def _ensure_reports_failure_columns(conn: sqlite3.Connection) -> None:
+    """Add embedding failure diagnostics columns to existing reports tables."""
+    existing_columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in conn.execute("PRAGMA table_info(reports)").fetchall()
+    }
+    for column_name, column_type in EMBEDDING_FAILURE_COLUMNS.items():
+        if column_name not in existing_columns:
+            conn.execute(f"ALTER TABLE reports ADD COLUMN {column_name} {column_type}")
 
 
 # ── Parent-Child Chunking 관리 ──────────────────────────────────────────────────
@@ -163,14 +185,57 @@ def upsert_report(file_name: str) -> bool:
             return False
 
 
-def mark_embedded(file_name: str) -> None:
+def mark_embedded(file_name: str, *, extraction_engine: str | None = None) -> None:
     """Vector DB 임베딩 완료 후 호출 — is_embedded 를 1로 업데이트."""
     with get_connection() as conn:
+        _ensure_reports_failure_columns(conn)
         conn.execute(
-            "UPDATE reports SET is_embedded = 1 WHERE file_name = ?",
-            (file_name,),
+            """
+            UPDATE reports
+            SET is_embedded = 1,
+                embedding_last_error = NULL,
+                embedding_last_attempt_at = NULL,
+                embedding_extraction_engine = COALESCE(?, embedding_extraction_engine)
+            WHERE file_name = ?
+            """,
+            (_compact_optional_text(extraction_engine, 120), file_name),
         )
         conn.commit()
+
+
+def mark_embedding_failed(
+    file_name: str,
+    error_message: str,
+    *,
+    extraction_engine: str | None = None,
+) -> None:
+    """Record the latest per-file embedding failure while keeping it pending."""
+    compact_error = " ".join(str(error_message or "Unknown error").split())
+    compact_engine = _compact_optional_text(extraction_engine, 120)
+    with get_connection() as conn:
+        _ensure_reports_failure_columns(conn)
+        conn.execute(
+            """
+            UPDATE reports
+            SET is_embedded = 0,
+                embedding_last_error = ?,
+                embedding_last_attempt_at = ?,
+                embedding_extraction_engine = ?
+            WHERE file_name = ?
+            """,
+            (
+                compact_error[:1000],
+                datetime.now().isoformat(timespec="seconds"),
+                compact_engine,
+                file_name,
+            ),
+        )
+        conn.commit()
+
+
+def _compact_optional_text(value: str | None, max_chars: int) -> str | None:
+    compact = " ".join(str(value or "").split())
+    return compact[:max_chars] if compact else None
 
 
 def sync_from_directory(directory: str = SAVE_DIR) -> None:

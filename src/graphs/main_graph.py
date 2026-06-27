@@ -16,6 +16,8 @@ from src.core.followup_scope import build_answer_scope_index
 
 def build_active_scope_from_state(state: State) -> dict | None:
     """Build the durable search scope that should carry to the next thread turn."""
+    if state.get("no_vector_results"):
+        return None
     search_filters = dict(state.get("search_filters") or {})
     temporal_context = state.get("temporal_context")
     sources = state.get("rerank_info") or state.get("rdb_sources") or []

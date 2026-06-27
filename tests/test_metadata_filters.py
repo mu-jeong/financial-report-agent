@@ -32,6 +32,19 @@ def test_infer_search_filters_from_known_metadata_values():
     }
 
 
+def test_infer_search_filters_does_not_match_target_inside_broker_name():
+    filters = infer_search_filters(
+        "한화투자증권에서 발표한 내용에 대해 좀 더 상세하게 알려줘",
+        {
+            "target_name": ["증권", "SK하이닉스"],
+            "broker": ["한화투자증권"],
+            "target_report_types": {"증권": ("industry",), "SK하이닉스": ("company",)},
+        },
+    )
+
+    assert filters == {"broker": "한화투자증권"}
+
+
 def test_infer_search_filters_detects_report_type_keywords():
     filters = infer_search_filters(
         "경제 리포트에서 금리 전망 알려줘",
@@ -290,6 +303,253 @@ def test_query_rewrite_marks_report_type_only_followup_for_router(question, expe
         "followup_scope_intent": True,
     }
     assert infer_search_filters(question)["report_type"] == expected_report_type
+
+
+def test_query_rewrite_leaves_explicit_target_questions_independent_of_keyword_followup_rules():
+    question = "sk하이닉스에 대한 내용을 더 자세히 알려줘"
+
+    result = query_rewrite.query_rewrite_node(
+        {
+            "question": question,
+            "chat_history": [],
+        }
+    )
+
+    assert result == {
+        "rewritten_query": question,
+        "uses_chat_history": False,
+        "followup_scope_intent": False,
+    }
+
+
+def test_search_scope_reuses_prior_period_for_target_detail_drilldown(monkeypatch):
+    def fake_infer_search_filters(query):
+        if "sk하이닉스" in query.casefold():
+            return {"target_name": "SK하이닉스", "report_type": "company"}
+        return {}
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    for question in [
+        "sk하이닉스에 대한 내용 좀 더 자세히 알려줘",
+        "sk하이닉스에 대한 내용을 더 자세히 알려줘",
+    ]:
+        for followup_scope_intent in [True, None]:
+            result = search_scope.search_scope_node(
+                {
+                    "question": question,
+                    "rewritten_query": question,
+                    "chat_history": [],
+                    "followup_scope_intent": followup_scope_intent,
+                    "prior_search_scope": {
+                        "route": "vectordb",
+                        "search_filters": {
+                            "report_date_start": "2026-06-22",
+                            "report_date_end": "2026-06-27",
+                        },
+                        "temporal_context": {
+                            "expression": "이번 주",
+                            "report_date_start": "2026-06-22",
+                            "report_date_end": "2026-06-27",
+                        },
+                        "file_names": ["weekly-a.pdf", "weekly-b.pdf"],
+                    },
+                }
+            )
+
+            assert result["scope_source"] == "prior_search_scope"
+            assert result["temporal_context"] == {
+                "expression": "이번 주",
+                "report_date_start": "2026-06-22",
+                "report_date_end": "2026-06-27",
+            }
+            assert result["search_filters"] == {
+                "report_date_start": "2026-06-22",
+                "report_date_end": "2026-06-27",
+                "target_name": "SK하이닉스",
+                "report_type": "company",
+            }
+
+
+def test_search_scope_broker_followup_preserves_prior_target_and_files(monkeypatch):
+    def fake_infer_search_filters(query):
+        if "한화투자증권" in query:
+            return {"broker": "한화투자증권"}
+        return {}
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "한화투자증권에서 발표한 내용에 대해 좀 더 상세하게 알려줘",
+            "rewritten_query": "한화투자증권에서 발표한 내용에 대해 좀 더 상세하게 알려줘",
+            "chat_history": [],
+            "followup_scope_intent": False,
+            "prior_search_scope": {
+                "route": "rdb",
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-27",
+                    "target_name": "SK하이닉스",
+                    "report_type": "company",
+                },
+                "temporal_context": {
+                    "expression": "이번주",
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-27",
+                },
+                "file_names": [
+                    "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 63.7 조원 전망.pdf",
+                    "company_2026-06-22_SK하이닉스_한화투자증권_PE 10배는 테크 주식의 기본 배수다.pdf",
+                ],
+            },
+        }
+    )
+
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-27",
+        "target_name": "SK하이닉스",
+        "report_type": "company",
+        "file_names": [
+            "company_2026-06-22_SK하이닉스_iM증권_2Q26 영업이익 63.7 조원 전망.pdf",
+            "company_2026-06-22_SK하이닉스_한화투자증권_PE 10배는 테크 주식의 기본 배수다.pdf",
+        ],
+        "broker": "한화투자증권",
+    }
+
+
+def test_search_scope_sticky_thread_scope_merges_current_target_without_detail_keywords(monkeypatch):
+    def fake_infer_search_filters(query):
+        if "sk하이닉스" in query.casefold():
+            return {"target_name": "SK하이닉스", "report_type": "company"}
+        return {}
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "SK하이닉스 알려줘",
+            "rewritten_query": "SK하이닉스 알려줘",
+            "chat_history": [],
+            "followup_scope_intent": None,
+            "prior_search_scope": {
+                "route": "rdb",
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-27",
+                },
+                "temporal_context": {
+                    "expression": "이번주",
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-27",
+                },
+                "file_names": ["weekly-a.pdf", "weekly-b.pdf"],
+            },
+        }
+    )
+
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-27",
+        "target_name": "SK하이닉스",
+        "report_type": "company",
+    }
+    assert result["temporal_context"]["report_date_end"] == "2026-06-27"
+
+
+def test_search_scope_full_period_clears_prior_dates_but_keeps_current_target(monkeypatch):
+    def fake_infer_search_filters(query):
+        if "삼성전자" in query.casefold():
+            return {"target_name": "삼성전자", "report_type": "company"}
+        return {}
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "삼성전자 전체 기간 리포트 알려줘",
+            "rewritten_query": "삼성전자 전체 기간 리포트 알려줘",
+            "chat_history": [],
+            "followup_scope_intent": None,
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-27",
+                    "target_name": "SK하이닉스",
+                    "report_type": "company",
+                },
+                "temporal_context": {
+                    "expression": "이번주",
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-27",
+                },
+                "file_names": ["skhynix.pdf"],
+            },
+        }
+    )
+
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["temporal_context"] is None
+    assert result["search_filters"] == {
+        "target_name": "삼성전자",
+        "report_type": "company",
+    }
+
+
+def test_search_scope_repairs_inverted_date_range_from_prior_scope(monkeypatch):
+    def fake_infer_search_filters(query):
+        if "sk하이닉스" in query.casefold():
+            return {
+                "report_date_start": "2026-06-22",
+                "report_date_end": "2026-06-06",
+                "target_name": "SK하이닉스",
+                "report_type": "company",
+            }
+        return {}
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: {
+        "expression": "명시 날짜 범위",
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-06",
+    })
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "sk하이닉스에 대한 내용 더 자세히 알려줘",
+            "rewritten_query": "sk하이닉스에 대한 내용 더 자세히 알려줘",
+            "chat_history": [],
+            "followup_scope_intent": None,
+            "prior_search_scope": {
+                "route": "rdb",
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-27",
+                },
+                "temporal_context": {
+                    "expression": "이번주",
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-27",
+                },
+            },
+        }
+    )
+
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-27",
+        "target_name": "SK하이닉스",
+        "report_type": "company",
+    }
+    assert result["temporal_context"]["report_date_end"] == "2026-06-27"
 
 
 def test_search_scope_reuses_prior_search_scope_for_summary_followup():

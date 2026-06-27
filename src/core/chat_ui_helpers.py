@@ -57,13 +57,6 @@ def build_no_result_suggestions(question: str, search_filters: dict[str, Any] | 
         no_date_query = _strip_temporal_phrases(base_question)
         if no_date_query and no_date_query != base_question:
             suggestions.append({"label": "날짜 조건 없이 다시 검색", "query": no_date_query})
-    suggestions.extend(
-        [
-            {"label": "기업 리포트만 검색", "query": f"{base_question} 기업 리포트"},
-            {"label": "산업 리포트까지 포함", "query": f"{base_question} 산업 리포트도 포함"},
-            {"label": "데이터 업데이트 열기", "query": "__open_data_update__"},
-        ]
-    )
     deduped: list[dict[str, str]] = []
     seen_labels: set[str] = set()
     for suggestion in suggestions:

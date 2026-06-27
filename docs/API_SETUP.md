@@ -66,7 +66,8 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | `CHILD_CHUNK_SIZE` | child chunk 크기 |
 | `CHUNK_SIZE` | parent-child 미사용 시 fallback/general chunk 크기 |
 | `CHUNK_OVERLAP` | fallback/general chunk overlap |
-| `EXTRACTION_ENGINE` | PDF 추출 엔진. `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 선택 |
+| `PDF_EXTRACTION_ENGINE` | 일반 임베딩 run의 PDF 파싱/추출 엔진. `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 선택. 기존 `EXTRACTION_ENGINE`도 alias로 동작 |
+| `UNEMBEDDED_PDF_EXTRACTION_ENGINE` | 미임베딩/재시도 문서에 사용할 PDF 파싱 엔진. 빈 값이면 `PDF_EXTRACTION_ENGINE` 사용. 기존 `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 동작 |
 
 ## 크롤러 설정
 

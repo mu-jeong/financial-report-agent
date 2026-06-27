@@ -47,7 +47,11 @@ RERANK_MODEL = get_config_value("RERANK_MODEL")
 RERANK_TIMEOUT = get_config_value("RERANK_TIMEOUT")
 RERANK_CANDIDATE_MULTIPLIER = get_config_value("RERANK_CANDIDATE_MULTIPLIER")
 RECENCY_WEIGHT = get_config_value("RECENCY_WEIGHT")
-EXTRACTION_ENGINE = get_config_value("EXTRACTION_ENGINE")
+PDF_EXTRACTION_ENGINE = get_config_value("PDF_EXTRACTION_ENGINE")
+UNEMBEDDED_PDF_EXTRACTION_ENGINE = get_config_value("UNEMBEDDED_PDF_EXTRACTION_ENGINE")
+# Backward-compatible constants used by existing modules.
+EXTRACTION_ENGINE = PDF_EXTRACTION_ENGINE
+UNEMBEDDED_EXTRACTION_ENGINE = UNEMBEDDED_PDF_EXTRACTION_ENGINE
 USE_PARENT_CHILD = get_config_value("USE_PARENT_CHILD")
 
 # ==============================================================================

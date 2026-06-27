@@ -38,6 +38,7 @@ Sidebar
    │  └─ Chat Monitoring tab
    └─ 전체 Monitoring
       ├─ 데이터/설정
+      ├─ 미임베딩 문서
       ├─ 실험 실행
       ├─ 고정 테스트셋
       ├─ Parsing engines
@@ -70,7 +71,27 @@ Sidebar
 
 이 tab은 검색 품질 문제가 실제 retrieval 로직 때문인지, DB/index/PDF 준비 상태 때문인지 먼저 확인하는 진입점이다.
 
-### 3.2 실험 실행 tab
+### 3.2 미임베딩 문서 tab
+
+`미임베딩 문서` tab은 SQLite `reports`에는 존재하지만 `is_embedded=0`이라 VectorDB 상세 검색에는 아직 사용되지 않는 리포트를 보여준다. RDB 목록/집계에는 문서가 보이는데 follow-up 상세 답변이 적은 source만 사용하는 경우, 이 tab에서 DB/VectorDB coverage 차이를 확인한다.
+
+표시 metadata:
+
+- `report_date`
+- `report_type`
+- `target_name`
+- `broker`
+- `title`
+- `file_name`
+
+`미임베딩 문서 ... 임베딩 시도` 버튼은 `src.core.data_update_jobs.start_embedding_job()`으로 embedding-only background job을 시작한다.
+
+- 처리 건수 0: `python -m src.core.embed_pipeline --all`
+- 처리 건수 N: `python -m src.core.embed_pipeline --limit N`
+- 진행 상태는 기존 data update progress box를 재사용하며 `(현재/전체) 파일명`을 표시한다.
+- 이미 데이터 업데이트/임베딩 job이 실행 중이면 버튼은 비활성화된다.
+
+### 3.3 실험 실행 tab
 
 `_render_experiment_monitoring()`은 고정 evaluation dataset을 실제 graph에 통과시켜 pass/fail 결과를 저장한다.
 
@@ -115,7 +136,7 @@ Sidebar
 - latency 실패: latency budget 확인
 - no-result: filter 완화 retry 또는 데이터 업데이트 확인
 
-### 3.3 고정 테스트셋 tab
+### 3.4 고정 테스트셋 tab
 
 `고정 테스트셋` tab은 `tests/fixtures/evaluation_dataset.json`의 coverage를 요약한다.
 
@@ -133,7 +154,7 @@ Sidebar
 
 `docs/EVALUATION_DATASET.md`에 정의된 정책처럼, 이 fixture는 성능 개선 전후를 비교하기 위한 기준선이다. source PDF 본문은 포함하지 않고 question, expected route/filter/source/RDB expectation 같은 재현 가능한 기대값만 저장한다.
 
-### 3.4 Parsing engines tab
+### 3.5 Parsing engines tab
 
 `_render_parsing_engine_evaluation()`은 PDF extraction engine 비교를 실행한다.
 
@@ -159,7 +180,7 @@ Sidebar
 
 이 tab은 retrieval 이전 단계인 PDF parsing 품질과 latency를 비교하기 위한 것이다. parsing 품질 변화가 chunking/retrieval 품질 변화로 이어질 수 있으므로 전체 개선 루프의 앞단 지표로 둔다.
 
-### 3.5 전체 Monitoring tab
+### 3.6 전체 Monitoring tab
 
 `_render_global_monitoring()`은 모든 thread의 assistant 응답 metadata를 집계한다. 원문을 기본 노출하지 않고 운영 품질 신호만 보여준다.
 
@@ -189,7 +210,7 @@ Sidebar
 | `pdf_vs_db` | 다운로드 PDF 수가 embedded report 수 이상이면 pass |
 | `search_coverage` | 전체 report 중 embedded 비율이 95% 이상이면 pass |
 
-### 3.6 Issue reports tab
+### 3.7 Issue reports tab
 
 `_render_issue_report_monitoring()`은 `debug/issue_report_*.txt`로 저장된 사용자 신고를 전체 개선 루프의 입력으로 모아 보여준다.
 
@@ -202,11 +223,23 @@ Sidebar
 - report rows: created_at, id, category, thread, file path, preview
 - 선택 report 상세 원문
 
-선택한 report는 `promote_issue_report_to_eval_candidate()`를 통해 regression 후보 artifact로 저장할 수 있다.
+선택한 report는 `promote_issue_report_to_eval_candidate()`를 통해 regression 후보 artifact로 저장할 수 있다. Chat Monitoring trace에서 생성된 신고처럼 구조화된 `context.trace_detail`이 있는 경우에는 운영자가 검토·수정할 수 있는 `eval_case_draft`도 함께 만든다.
 
 저장 위치:
 
-- `debug/regression_candidates/<candidate_id>.json`
+- 신고 원문: `debug/issue_report_*.txt`
+- 구조화 sidecar: `debug/issue_report_*.json`
+- regression 후보: `debug/regression_candidates/<candidate_id>.json`
+
+Regression 후보 artifact에는 초기 운영 lifecycle 필드가 포함된다.
+
+- `triage_status`: 기본값 `new`
+- `operator_decision`: 기본값 `unreviewed`
+- `severity`: 기본값 `untriaged`
+- `impact_area`: debug hint/category/content 기반 추정값 (`filter_scope`, `routing`, `retrieval_source`, `citation`, `latency`, `ui`, `answer_quality`)
+- `eval_case_draft`: trace 기반 case 초안. `question`, `expected_route`, `expected_filters`, `expected_sources`, `expected_state`, `monitoring_dimensions`를 포함하며 정식 fixture 반영 전 운영자 검토가 필요하다.
+
+Issue reports tab의 `Regression candidates` 영역은 저장된 후보 artifact를 다시 로드해 lifecycle field와 draft 유무를 표시한다. `eval_case_draft`가 있는 후보는 선택해서 `regression_candidate_current_data` execution mode로 즉시 실행할 수 있으며, run artifact는 기존 evaluation run과 같은 `debug/evaluation_runs/evaluation_run_*.json` 경로에 저장된다. 이 실행은 정식 baseline 편입 전 재현성 확인용이므로 fixed snapshot baseline과는 별도 mode로 비교한다.
 
 이 단계는 수동 신고를 이후 evaluation dataset case로 승격하기 전의 중간 저장소 역할을 한다.
 
@@ -266,7 +299,7 @@ Sidebar
 
 `previous_message`는 `previous_successful_assistant()`가 선택 응답 직전의 성공한 assistant 응답을 찾는다. 따라서 diff는 단순 직전 row가 아니라 직전 성공 응답 기준이다.
 
-Trace viewer는 선택 응답을 세 개의 목적별 tab으로 나누어 보여준다. 자주 보는 판단 근거는 기본 tab에 모으고, raw retrieval/source/citation detail은 `Advanced diagnostics` 안에 접어 둔다.
+Trace viewer는 선택 응답을 세 개의 목적별 tab으로 나누어 보여준다. 자주 보는 판단 근거는 기본 tab에 모으고, state 변화와 raw retrieval/citation detail은 `Advanced diagnostics` 안에 접어 둔다.
 
 #### 4.3.1 Trace summary
 
@@ -284,6 +317,7 @@ Trace viewer는 선택 응답을 세 개의 목적별 tab으로 나누어 보여
 - `search_filters`
 - `candidate_count_after_filter`
 - source count
+- prior/search scope file count
 - citation valid 여부
 - debug hint 수
 - 직전 성공 응답과의 diff 존재 여부
@@ -320,7 +354,41 @@ Trace viewer는 선택 응답을 세 개의 목적별 tab으로 나누어 보여
 
 #### 4.3.3 Advanced diagnostics
 
-`Advanced diagnostics`는 평소에는 잘 보지 않는 raw detail을 expander로 접어 둔다. 정밀 디버깅이나 issue report 작성 시에만 펼쳐 보면 된다.
+`Advanced diagnostics`는 평소에는 잘 보지 않는 raw detail을 expander로 접어 둔다. 정밀 디버깅이나 issue report 작성 시에만 펼쳐 보면 된다. Sources 표는 일반 답변 영역과 monitoring row에서 이미 확인할 수 있으므로 여기서는 중복 노출하지 않는다.
+
+##### State transitions
+
+`State transitions`는 선택 응답의 compact state 흐름을 보여준다. query rewrite 전 입력 state와 query rewrite/search scope/routing/retrieval 이후의 핵심 state를 나눠서 확인할 수 있다.
+
+표시 metadata:
+
+- input
+  - 원질문
+  - `prior_search_scope`
+  - `prior_search_scope_file_count`
+- after_query_rewrite
+  - rewritten query
+  - chat history 사용 여부
+  - `followup_scope_intent`
+- after_search_scope
+  - `search_filters`
+  - `temporal_context`
+  - `scope_source`
+  - `scope_decision`
+  - `search_scope`
+  - `search_scope_file_count`
+- after_routing
+  - route
+  - routing context
+- after_retrieval
+  - `candidate_count_after_filter`
+  - `document_coverage_applied`
+  - `document_coverage_reason`
+  - `selected_file_names`
+- suspect_transitions
+  - `prior_scope_files_dropped`: query rewrite 전 prior scope의 파일 수보다 현재 search scope 파일 수가 줄었는지 여부
+
+이 화면은 “query rewrite 전에는 정상 scope였는가?”, “rewrite 이후 search scope에서 file_names가 줄었는가?”, “retrieval 이후 selected_file_names가 더 줄었는가?”를 turn 단위로 확인하기 위한 디버깅 기준점이다.
 
 ##### Retrieval / rerank
 
@@ -338,12 +406,6 @@ Trace viewer는 선택 응답을 세 개의 목적별 tab으로 나누어 보여
 - score summary: `score`, `rerank_score`, `recency_score`, `final_score`의 min/max/avg
 
 이 raw detail은 metadata filter가 과도했는지, rerank 이후 source가 특정 문서에 편중됐는지, document coverage가 적용됐는지 확인할 때 사용한다.
-
-##### Sources
-
-`rerank_info`를 표로 보여준다. VectorDB source에는 rank, target name, report date, title, broker, file name, report type 등 검색 source metadata가 들어간다. RDB route에서는 `rdb_sources`를 `rerank_info` 위치에 넣어 동일 UI에서 source를 볼 수 있게 한다.
-
-특히 `report_type`은 섹션 follow-up에서 company/industry/market source가 섞였는지 확인하는 데 사용된다.
 
 ##### Answer / citations
 

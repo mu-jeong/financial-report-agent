@@ -1,4 +1,4 @@
-﻿"""
+"""
 PDF embedding pipeline.
 
 Flow:
@@ -32,12 +32,19 @@ from src.core.db_manager import (
     init_db,
     insert_parent_chunks,
     mark_embedded,
+    mark_embedding_failed,
     sync_from_directory,
 )
 from src.core.pdf_extraction import extract_pdf_text
 from src.llms.embeddings import build_embeddings_model
 
 logger = config.get_logger(__name__)
+
+
+def unembedded_extraction_engine() -> str:
+    """Return the PDF extractor for pending/unembedded embedding jobs."""
+    override = str(getattr(config, "UNEMBEDDED_EXTRACTION_ENGINE", "") or "").strip()
+    return override or config.EXTRACTION_ENGINE
 
 
 def sync_report_pdf_dir_env(pdf_dir: str | os.PathLike = config.SAVE_DIR) -> None:
@@ -70,9 +77,16 @@ def node_extract_pdf(state: dict) -> dict:
     """Extract text from a PDF and attach it to the graph state."""
     file_name = state["file_name"]
     pdf_path = os.path.join(config.SAVE_DIR, file_name)
+    extraction_engine = state.get("extraction_engine") or unembedded_extraction_engine()
 
+    allow_fallback = extraction_engine == config.EXTRACTION_ENGINE
     try:
-        result = extract_pdf_text(pdf_path, config.EXTRACTION_ENGINE, clean=True)
+        result = extract_pdf_text(
+            pdf_path,
+            extraction_engine,
+            clean=True,
+            allow_fallback=allow_fallback,
+        )
     except Exception as exc:
         logger.error(f"  PDF extraction failed: {exc}")
         raise ValueError(f"Could not extract text from PDF: {file_name}") from exc
@@ -85,7 +99,7 @@ def node_extract_pdf(state: dict) -> dict:
         raise ValueError(f"Extracted text is empty: {file_name}")
 
     logger.info(f"  [1/3] Extracted {len(raw_text):,} characters")
-    return {**state, "raw_text": raw_text}
+    return {**state, "raw_text": raw_text, "extraction_engine": extraction_engine}
 
 
 def node_split_documents(state: dict) -> dict:
@@ -239,7 +253,10 @@ def node_embed_and_store(state: dict, embeddings_fn) -> dict:
 
 def node_mark_complete(state: dict) -> dict:
     """Mark a source report as embedded in SQLite."""
-    mark_embedded(state["file_name"])
+    mark_embedded(
+        state["file_name"],
+        extraction_engine=state.get("extraction_engine"),
+    )
     logger.info("  SQLite updated: is_embedded=1")
     return state
 
@@ -249,8 +266,8 @@ def build_embeddings_fn():
     return build_embeddings_model()
 
 
-def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
-    """Run the embedding pipeline for pending reports."""
+def run_pipeline(test_limit: int = config.TEST_LIMIT) -> int:
+    """Run the embedding pipeline for pending reports. Return process-style exit code."""
     print("=" * 60)
     print("  Finance LLM Embedding Pipeline")
     print("=" * 60)
@@ -277,6 +294,11 @@ def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
 
         if not os.path.exists(os.path.join(config.SAVE_DIR, file_name)):
             logger.warning("  File is missing; skipping.\n")
+            mark_embedding_failed(
+                file_name,
+                "FileNotFoundError: PDF file is missing",
+                extraction_engine=unembedded_extraction_engine(),
+            )
             failed += 1
             continue
 
@@ -287,6 +309,7 @@ def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
             "report_date": row["report_date"],
             "report_type": row["report_type"],
             "broker": row["broker"],
+            "extraction_engine": unembedded_extraction_engine(),
         }
 
         try:
@@ -299,7 +322,13 @@ def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
             logger.warning("[Interrupted] Stopping at user request.")
             break
         except Exception as exc:
-            logger.error(f"  Error ({type(exc).__name__}): {exc}")
+            error_message = f"{type(exc).__name__}: {exc}"
+            logger.error(f"  Error ({error_message})")
+            mark_embedding_failed(
+                file_name,
+                error_message,
+                extraction_engine=state.get("extraction_engine") or unembedded_extraction_engine(),
+            )
             failed += 1
 
         if idx < len(targets):
@@ -320,6 +349,7 @@ def run_pipeline(test_limit: int = config.TEST_LIMIT) -> None:
     print(f"  FAISS index size: {faiss_size / 1024:.1f} KB")
     print(f"  Saved at: {os.path.abspath(config.FAISS_DIR)}/")
     print("=" * 60)
+    return 1 if failed else 0
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -339,7 +369,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Process every pending file. Equivalent to --limit 0.",
     )
     args = parser.parse_args(argv)
-    run_pipeline(test_limit=0 if args.all else args.limit)
+    raise SystemExit(run_pipeline(test_limit=0 if args.all else args.limit))
 
 
 if __name__ == "__main__":

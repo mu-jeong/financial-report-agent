@@ -3,7 +3,14 @@ import sqlite3
 
 from src.core import issue_report_store
 from src.core.data_update_jobs import build_crawler_env, missing_update_dates_by_category
-from src.core.status import assess_readiness, format_readiness_text, format_status_text, get_data_status
+from src.core.status import (
+    assess_readiness,
+    build_unembedded_report_rows,
+    format_readiness_text,
+    format_status_text,
+    get_data_status,
+    list_unembedded_reports,
+)
 
 
 def test_get_data_status_reports_db_pdf_and_vector_counts(tmp_path):
@@ -71,6 +78,58 @@ def test_get_data_status_reports_db_pdf_and_vector_counts(tmp_path):
     assert status["vector_db"]["has_faiss_index"] is True
     assert status["vector_db"]["total_size_bytes"] == 6
     assert "SQLite 리포트: 3건" in format_status_text(status)
+
+
+def test_list_unembedded_reports_returns_recent_pending_rows_and_safe_previews(tmp_path):
+    db_path = tmp_path / "reports.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_type TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                target_name TEXT,
+                title TEXT NOT NULL,
+                broker TEXT NOT NULL,
+                file_name TEXT NOT NULL UNIQUE,
+                is_embedded INTEGER NOT NULL DEFAULT 0,
+                embedding_last_error TEXT,
+                embedding_last_attempt_at TEXT,
+                embedding_extraction_engine TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO reports
+                (report_type, report_date, target_name, title, broker, file_name, is_embedded, embedding_last_error, embedding_last_attempt_at, embedding_extraction_engine)
+            VALUES
+                ('company', '2026-06-20', '삼성전자', '이미 처리됨', '미래에셋증권', 'embedded.pdf', 1, NULL, NULL, 'pymupdf'),
+                ('company', '2026-06-22', 'SK하이닉스', '2Q26 영업이익 전망', 'iM증권', 'sk_a.pdf', 0, NULL, NULL, NULL),
+                ('industry', '2026-06-23', '반도체', '업황 업데이트', '하나증권', 'semi.pdf', 0, 'FileNotFoundError: PDF missing', '2026-06-27T10:00:00', 'opendataloader'),
+                ('company', '2026-06-24', 'SK하이닉스', 'ADR 발행 관련 리포트', 'IBK투자증권', 'sk_b.pdf', 0, NULL, NULL, NULL)
+            """
+        )
+
+    rows = list_unembedded_reports(str(db_path), limit=2)
+    table_rows = build_unembedded_report_rows(rows)
+
+    assert [row["file_name"] for row in rows] == ["sk_b.pdf", "semi.pdf"]
+    assert table_rows[0] == {
+        "report_date": "2026-06-24",
+        "report_type": "company",
+        "target_name": "SK하이닉스",
+        "broker": "IBK투자증권",
+        "title": "ADR 발행 관련 리포트",
+        "file_name": "sk_b.pdf",
+        "embedding_extraction_engine": "-",
+        "embedding_last_error": "-",
+        "embedding_last_attempt_at": "-",
+    }
+    assert table_rows[1]["embedding_extraction_engine"] == "opendataloader"
+    assert table_rows[1]["embedding_last_error"] == "FileNotFoundError: PDF missing"
+    assert table_rows[1]["embedding_last_attempt_at"] == "2026-06-27T10:00:00"
 
 
 def test_assess_readiness_blocks_when_index_is_missing():
@@ -209,6 +268,11 @@ def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch
     assert '"rerank_count": 1' in saved_report
     assert "파일 내용을 복사하여 이메일의 내용에 첨부" in saved_report
 
+    sidecar_json = report_files[0].with_suffix(".json")
+    assert sidecar_json.exists()
+
     reports = issue_report_store.list_issue_reports("thread-1")
     assert reports[0]["id"] == report_result["id"]
     assert reports[0]["file_path"].endswith(".txt")
+    assert reports[0]["description"] == "출처와 답변이 맞지 않습니다."
+    assert reports[0]["context"]["thread_name"] == "테스트 대화"

@@ -304,6 +304,101 @@ def _metadata_query_rewrite(metadata: dict[str, Any]) -> dict[str, Any]:
     return (metadata.get("monitoring") or {}).get("query_rewrite") or {}
 
 
+def _scope_file_count(scope: dict[str, Any] | None) -> int:
+    if not isinstance(scope, dict):
+        return 0
+    if isinstance(scope.get("file_count"), int):
+        return int(scope["file_count"])
+    file_names = scope.get("file_names") or []
+    return len(file_names) if isinstance(file_names, list) else 0
+
+
+def _compact_scope_for_state_trace(scope: dict[str, Any] | None) -> dict[str, Any] | None:
+    """State trace에서 볼 핵심 scope만 작게 보존합니다."""
+    if not isinstance(scope, dict):
+        return None
+    compact: dict[str, Any] = {
+        "route": scope.get("route"),
+        "search_filters": scope.get("search_filters") or {},
+        "temporal_context": scope.get("temporal_context"),
+        "scope_source": scope.get("scope_source"),
+        "file_count": _scope_file_count(scope),
+    }
+    file_names = scope.get("file_names") or []
+    if isinstance(file_names, list):
+        compact["file_names"] = file_names[:10]
+        if len(file_names) > 10:
+            compact["file_names_truncated"] = len(file_names) - 10
+    answer_scope_index = scope.get("answer_scope_index") or {}
+    sections = answer_scope_index.get("sections") if isinstance(answer_scope_index, dict) else None
+    if isinstance(sections, list):
+        compact["answer_scope_sections"] = [
+            {
+                "id": section.get("id"),
+                "label": section.get("label"),
+                "filters": section.get("filters") or {},
+                "file_count": _scope_file_count(section),
+                "file_names": (section.get("file_names") or [])[:10],
+            }
+            for section in sections
+            if isinstance(section, dict)
+        ]
+    return compact
+
+
+def _build_state_transition_trace(metadata: dict[str, Any]) -> dict[str, Any]:
+    monitoring = metadata.get("monitoring") or {}
+    state_trace = monitoring.get("state_trace") or {}
+    if not isinstance(state_trace, dict):
+        state_trace = {}
+    state_trace_input = state_trace.get("input", {})
+    if not isinstance(state_trace_input, dict):
+        state_trace_input = {}
+    prior_scope = state_trace.get("input", {}).get("prior_search_scope") if isinstance(state_trace, dict) else None
+    current_scope = metadata.get("search_scope")
+    query_rewrite = _metadata_query_rewrite(metadata)
+    retrieval = _metadata_retrieval(metadata)
+    followup_scope_intent = query_rewrite.get("followup_scope_intent")
+    if followup_scope_intent is None:
+        followup_scope_intent = metadata.get("followup_scope_intent")
+    return {
+        "input": {
+            "question": metadata.get("question") or state_trace_input.get("question"),
+            "prior_search_scope": prior_scope,
+            "prior_search_scope_file_count": _scope_file_count(prior_scope),
+        },
+        "after_query_rewrite": {
+            "rewritten_query": query_rewrite.get("rewritten_query"),
+            "uses_chat_history": query_rewrite.get("uses_chat_history"),
+            "followup_scope_intent": followup_scope_intent,
+        },
+        "after_search_scope": {
+            "search_filters": _metadata_search_filters(metadata),
+            "temporal_context": metadata.get("temporal_context"),
+            "scope_source": metadata.get("scope_source"),
+            "scope_decision": metadata.get("scope_decision"),
+            "search_scope": _compact_scope_for_state_trace(current_scope),
+            "search_scope_file_count": _scope_file_count(current_scope),
+        },
+        "after_routing": {
+            "route": metadata.get("route"),
+            "routing_context": monitoring.get("routing") or metadata.get("routing_context"),
+        },
+        "after_retrieval": {
+            "candidate_count_after_filter": retrieval.get("candidate_count_after_filter"),
+            "document_coverage_applied": retrieval.get("document_coverage_applied"),
+            "document_coverage_reason": retrieval.get("document_coverage_reason"),
+            "prior_scope_required_file_count": retrieval.get("prior_scope_required_file_count"),
+            "prior_scope_required_file_names": retrieval.get("prior_scope_required_file_names"),
+            "prior_scope_required_file_names_missing_after_filter": retrieval.get("prior_scope_required_file_names_missing_after_filter"),
+            "selected_file_names": retrieval.get("selected_file_names"),
+        },
+        "suspect_transitions": {
+            "prior_scope_files_dropped": _scope_file_count(prior_scope) > _scope_file_count(current_scope),
+        },
+    }
+
+
 def build_message_trace_detail(message: dict[str, Any], *, user_question: str | None = None) -> dict[str, Any]:
     """assistant 응답을 Chat Monitoring용 trace section으로 나눕니다."""
     metadata = _message_metadata(message)
@@ -337,6 +432,7 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
             "has_vector_intent": (monitoring.get("routing") or {}).get("has_vector_intent"),
             "full_period_request": (monitoring.get("routing") or {}).get("full_period_request"),
         },
+        "state_transitions": _build_state_transition_trace(metadata),
         "retrieval": retrieval,
         "sources": rerank_info,
         "answer": {
@@ -373,6 +469,8 @@ def build_message_trace_summary(
         "search_filters": scope.get("search_filters") or {},
         "candidate_count_after_filter": retrieval.get("candidate_count_after_filter"),
         "source_count": answer.get("source_count") or retrieval.get("source_count"),
+        "prior_scope_file_count": (detail.get("state_transitions") or {}).get("input", {}).get("prior_search_scope_file_count"),
+        "search_scope_file_count": (detail.get("state_transitions") or {}).get("after_search_scope", {}).get("search_scope_file_count"),
         "citation_valid": answer.get("citation_valid"),
         "debug_hint_count": len(hints or []),
         "diff_available": bool(diff),
@@ -405,6 +503,13 @@ def build_response_diff(current: dict[str, Any], previous: dict[str, Any] | None
         "temporal_context_changed": current_metadata.get("temporal_context") != previous_metadata.get("temporal_context"),
         "scope_source_changed": current_metadata.get("scope_source") != previous_metadata.get("scope_source"),
         "scope_decision_changed": current_metadata.get("scope_decision") != previous_metadata.get("scope_decision"),
+        "state": {
+            "prior_to_current_file_count": {
+                "input_prior_search_scope": _scope_file_count(((current_metadata.get("monitoring") or {}).get("state_trace") or {}).get("input", {}).get("prior_search_scope")),
+                "current_search_scope": _scope_file_count(current_metadata.get("search_scope")),
+            },
+            "search_scope_file_count_delta_vs_previous": _scope_file_count(current_metadata.get("search_scope")) - _scope_file_count(previous_metadata.get("search_scope")),
+        },
         "sources": {
             "previous_count": len(previous_files),
             "current_count": len(current_files),
@@ -1000,6 +1105,168 @@ def build_issue_report_rows(reports: list[dict[str, Any]], *, thread_names: dict
     ]
 
 
+def infer_issue_impact_area(report: dict[str, Any]) -> str:
+    """issue report의 trace/hint/category에서 운영 triage 영역을 추정합니다."""
+    context = report.get("context") or {}
+    hints_text = "\n".join(str(hint) for hint in context.get("debug_hints") or [])
+    content = "\n".join(
+        str(value or "")
+        for value in [
+            report.get("category"),
+            report.get("description"),
+            report.get("content"),
+            hints_text,
+        ]
+    )
+    if any(term in content for term in ("날짜 필터", "필터", "scope", "prior_search_scope", "검색 범위")):
+        return "filter_scope"
+    if any(term in content for term in ("route", "라우팅", "router", "RDB")):
+        return "routing"
+    if any(term in content for term in ("source", "출처", "문서 편중", "coverage", "candidate_count", "no-result")):
+        return "retrieval_source"
+    if any(term in content for term in ("citation", "인용", "참조")):
+        return "citation"
+    if any(term in content for term in ("latency", "지연", "느림", "멈춤")):
+        return "latency"
+    if any(term in content for term in ("화면", "사용성", "UI")):
+        return "ui"
+    return "answer_quality"
+
+
+def _draft_expected_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    expected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in sources or []:
+        file_name = str((source or {}).get("file_name") or "").strip()
+        if not file_name or file_name == "-" or file_name in seen:
+            continue
+        seen.add(file_name)
+        row = {"file_name": file_name}
+        if source.get("report_type"):
+            row["report_type"] = source.get("report_type")
+        expected.append(row)
+    return expected
+
+
+def build_eval_case_draft_from_issue_report(report: dict[str, Any]) -> dict[str, Any] | None:
+    """Chat Monitoring trace issue를 운영자가 수정 가능한 evaluation case 초안으로 변환합니다."""
+    context = report.get("context") or {}
+    trace = context.get("trace_detail") or {}
+    if not trace:
+        return None
+    query_rewrite = trace.get("query_rewrite") or {}
+    scope = trace.get("scope") or {}
+    routing = trace.get("routing") or {}
+    route = routing.get("route")
+    question = context.get("selected_user_question") or query_rewrite.get("original_question")
+    if not question or not route:
+        return None
+
+    scope_decision = query_rewrite.get("scope_decision") or {}
+    impact_area = infer_issue_impact_area(report)
+    expected_state: dict[str, Any] = {}
+    if query_rewrite.get("followup_scope_intent") is not None:
+        expected_state["followup_scope_intent"] = query_rewrite.get("followup_scope_intent")
+    if query_rewrite.get("scope_source") is not None:
+        expected_state["scope_source"] = query_rewrite.get("scope_source")
+    if scope_decision.get("reason") is not None:
+        expected_state["scope_decision_reason"] = scope_decision.get("reason")
+    if scope_decision.get("matched_section_id") is not None:
+        expected_state["scope_decision_matched_section_id"] = scope_decision.get("matched_section_id")
+
+    monitoring_dimensions = list(
+        dict.fromkeys(
+            [
+                impact_area,
+                "routing",
+                "filter" if scope.get("search_filters") else "scope",
+                "retrieval" if route == "vectordb" else "rdb",
+            ]
+        )
+    )
+    draft = {
+        "id": f"issue_{report.get('id') or uuid.uuid4().hex[:8]}",
+        "type": "vectordb_retrieval" if route == "vectordb" else "rdb_aggregate",
+        "question": question,
+        "expected_route": route,
+        "expected_filters": scope.get("search_filters") or {},
+        "expected_sources": _draft_expected_sources(trace.get("sources") or []),
+        "expected_state": expected_state,
+        "criteria_tags": ["issue_report_regression"],
+        "monitoring_dimensions": monitoring_dimensions,
+        "checks": ["route_pass", "filter_pass", "source_hit", "citation_valid"],
+        "source_issue_report_id": report.get("id"),
+        "review_required": True,
+    }
+    return draft
+
+
+def list_regression_candidates(candidate_dir: str | Path) -> list[dict[str, Any]]:
+    """저장된 regression candidate artifact를 최신순으로 반환합니다."""
+    root = Path(candidate_dir)
+    if not root.exists():
+        return []
+    candidates: list[dict[str, Any]] = []
+    for path in root.glob("candidate_*.json"):
+        try:
+            candidate = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        candidate.setdefault("json_path", str(path))
+        candidates.append(candidate)
+    return sorted(
+        candidates,
+        key=lambda candidate: (str(candidate.get("created_at") or ""), str(candidate.get("id") or "")),
+        reverse=True,
+    )
+
+
+def build_regression_candidate_rows(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Regression candidate table에 표시할 안전한 요약 row를 만듭니다."""
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        draft = candidate.get("eval_case_draft") or {}
+        rows.append(
+            {
+                "id": candidate.get("id"),
+                "created_at": candidate.get("created_at"),
+                "triage_status": candidate.get("triage_status", "new"),
+                "operator_decision": candidate.get("operator_decision", "unreviewed"),
+                "severity": candidate.get("severity", "untriaged"),
+                "impact_area": candidate.get("impact_area"),
+                "category": candidate.get("category"),
+                "thread_id": candidate.get("thread_id"),
+                "has_eval_case_draft": bool(draft),
+                "draft_question": _safe_preview(draft.get("question"), 100),
+                "expected_route": draft.get("expected_route"),
+                "expected_filters": draft.get("expected_filters") or {},
+                "expected_source_count": len(draft.get("expected_sources") or []),
+                "recommended_next_step": candidate.get("recommended_next_step"),
+                "json_path": candidate.get("json_path"),
+            }
+        )
+    return rows
+
+
+def build_regression_candidate_dataset(
+    candidates: list[dict[str, Any]],
+    selected_candidate_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, Any]:
+    """선택한 candidate draft를 evaluation runner가 사용할 dataset 형태로 변환합니다."""
+    selected = set(selected_candidate_ids or [])
+    cases = [
+        candidate["eval_case_draft"]
+        for candidate in candidates
+        if candidate.get("eval_case_draft") and (not selected or candidate.get("id") in selected)
+    ]
+    return {
+        "name": "finance_llm_regression_candidate_dataset",
+        "version": 1,
+        "description": "Issue report regression candidate에서 생성한 임시 evaluation dataset입니다. 정식 fixture 반영 전 운영자 검토가 필요합니다.",
+        "cases": cases,
+    }
+
+
 def promote_issue_report_to_eval_candidate(
     report: dict[str, Any],
     *,
@@ -1007,18 +1274,26 @@ def promote_issue_report_to_eval_candidate(
 ) -> dict[str, Any]:
     """issue report를 regression/evaluation candidate artifact로 저장합니다."""
     candidate_id = f"candidate_{report.get('id') or uuid.uuid4().hex[:8]}"
+    eval_case_draft = build_eval_case_draft_from_issue_report(report)
     candidate = {
         "id": candidate_id,
         "status": "candidate",
+        "triage_status": "new",
+        "operator_decision": "unreviewed",
+        "severity": "untriaged",
+        "impact_area": infer_issue_impact_area(report),
         "source": "issue_report",
         "source_report_id": report.get("id"),
         "thread_id": report.get("thread_id"),
         "category": report.get("category"),
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source_file_path": report.get("file_path"),
+        "source_json_path": report.get("json_path"),
         "preview": _issue_report_preview(report.get("content") or "", max_chars=500),
-        "recommended_next_step": "convert_to_evaluation_dataset_case",
+        "recommended_next_step": "review_eval_case_draft" if eval_case_draft else "convert_to_evaluation_dataset_case",
     }
+    if eval_case_draft:
+        candidate["eval_case_draft"] = eval_case_draft
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     json_path = output_path / f"{candidate_id}.json"
@@ -1044,7 +1319,16 @@ def summarize_data_integrity(status: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_monitoring_tab_labels() -> list[str]:
-    return ["데이터/설정", "실험 실행", "고정 테스트셋", "Parsing engines", "전체 Monitoring", "Chat Monitoring", "Issue reports"]
+    return [
+        "데이터/설정",
+        "미임베딩 문서",
+        "실험 실행",
+        "고정 테스트셋",
+        "Parsing engines",
+        "전체 Monitoring",
+        "Chat Monitoring",
+        "Issue reports",
+    ]
 
 
 def build_monitoring_page_labels() -> list[str]:
@@ -1067,6 +1351,8 @@ def compact_graph_monitoring_metadata(
         "search_filters": final_state.get("search_filters") or {},
         "temporal_context": final_state.get("temporal_context"),
         "selection_context": final_state.get("selection_context"),
+        "scope_source": final_state.get("scope_source"),
+        "routing_context": final_state.get("routing_context"),
         "scope_decision": final_state.get("scope_decision"),
         "industry_lookup_context": final_state.get("industry_lookup_context"),
         "monitoring": {
@@ -1074,6 +1360,13 @@ def compact_graph_monitoring_metadata(
                 "rewritten_query": final_state.get("rewritten_query"),
                 "uses_chat_history": final_state.get("uses_chat_history"),
                 "followup_scope_intent": final_state.get("followup_scope_intent"),
+            },
+            "state_trace": {
+                "input": {
+                    "question": final_state.get("question"),
+                    "prior_search_scope": _compact_scope_for_state_trace(final_state.get("prior_search_scope")),
+                    "active_scope": _compact_scope_for_state_trace(final_state.get("active_scope")),
+                }
             },
             "retrieval": {
                 "source_count": len(rerank_info),

@@ -263,6 +263,47 @@ def _popen_creation_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
+def build_embedding_command(limit: int | None = None) -> list[str]:
+    """Build the embed_pipeline command for pending reports."""
+    command = [sys.executable, "-m", "src.core.embed_pipeline"]
+    if limit is None:
+        command.append("--all")
+    else:
+        command.extend(["--limit", str(max(0, int(limit)))])
+    return command
+
+
+def start_embedding_job(*, label: str, limit: int | None = None) -> dict[str, Any]:
+    """Start a detached embedding-only job and return the initial status."""
+    JOB_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_PATH.write_text("", encoding="utf-8")
+    parent_pid = os.getpid()
+    command = [sys.executable, "-m", "src.core.data_update_jobs", "embed", "--label", label]
+    if limit is not None:
+        command.extend(["--limit", str(max(0, int(limit)))])
+    command.extend(["--parent-pid", str(parent_pid)])
+    process = subprocess.Popen(
+        command,
+        cwd=BASE_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **_popen_creation_kwargs(),
+    )
+    status = {
+        "state": "running",
+        "phase": "embed",
+        "percent": 1,
+        "message": f"{label}: 임베딩 작업을 시작했습니다.",
+        "pid": process.pid,
+        "label": label,
+        "embedding_limit": limit,
+        "log_path": str(LOG_PATH),
+        "parent_pid": parent_pid,
+    }
+    _write_status(status)
+    return status
+
+
 def start_update_job(
     *,
     label: str,
@@ -373,6 +414,91 @@ def _run_subprocess_stream(
         log_file.write(f"\n[exit] {return_code}\n")
         _raise_if_parent_exited(parent_pid)
         return return_code, "".join(output_parts)
+
+
+def run_embedding_job(
+    *,
+    label: str,
+    limit: int | None = None,
+    parent_pid: int | None = None,
+) -> int:
+    """Run an embedding-only job and persist progress status for the GUI."""
+    try:
+        _write_status(
+            {
+                "state": "running",
+                "phase": "embed",
+                "percent": 5,
+                "message": f"{label}: 미임베딩 문서 임베딩 중...",
+                "label": label,
+                "embedding_limit": limit,
+                "log_path": str(LOG_PATH),
+                "pid": os.getpid(),
+                "parent_pid": parent_pid,
+            }
+        )
+
+        def on_embed_line(line: str) -> None:
+            progress = embedding_file_progress_from_line(line)
+            if not progress:
+                return
+            current, total, file_label = progress
+            total = max(total, 1)
+            _write_status(
+                {
+                    "state": "running",
+                    "phase": "embed",
+                    "percent": min(98, 5 + int((current / total) * 90)),
+                    "message": f"{label}: 처리 중 ({current}/{total}) {file_label}",
+                    "label": label,
+                    "embedding_limit": limit,
+                    "log_path": str(LOG_PATH),
+                    "pid": os.getpid(),
+                    "embedding_current": current,
+                    "embedding_total": total,
+                    "embedding_file": file_label,
+                    "parent_pid": parent_pid,
+                }
+            )
+
+        code, _ = _run_subprocess_stream(
+            build_embedding_command(limit),
+            on_line=on_embed_line,
+            parent_pid=parent_pid,
+        )
+        if code != 0:
+            raise RuntimeError(f"embedding failed with exit code {code}")
+
+        _write_status(
+            {
+                "state": "succeeded",
+                "phase": "done",
+                "percent": 100,
+                "message": f"{label}: 임베딩 작업이 완료되었습니다.",
+                "label": label,
+                "embedding_limit": limit,
+                "log_path": str(LOG_PATH),
+                "pid": os.getpid(),
+                "parent_pid": parent_pid,
+            }
+        )
+        return 0
+    except Exception as exc:
+        _write_status(
+            {
+                "state": "failed",
+                "phase": "failed",
+                "percent": 100,
+                "message": f"{label}: 임베딩 작업 실패 - {exc}",
+                "label": label,
+                "embedding_limit": limit,
+                "log_path": str(LOG_PATH),
+                "pid": os.getpid(),
+                "parent_pid": parent_pid,
+                "error": str(exc),
+            }
+        )
+        return 1
 
 
 def _processed_report_count(output: str) -> int:
@@ -567,6 +693,10 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--dates", nargs="*")
     run_parser.add_argument("--categories", default="")
     run_parser.add_argument("--parent-pid", type=int)
+    embed_parser = subparsers.add_parser("embed")
+    embed_parser.add_argument("--label", required=True)
+    embed_parser.add_argument("--limit", type=int)
+    embed_parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -576,6 +706,12 @@ def main(argv: list[str] | None = None) -> int:
             label=args.label,
             selected_dates=args.dates,
             categories=args.categories or None,
+            parent_pid=args.parent_pid,
+        )
+    if args.command == "embed":
+        return run_embedding_job(
+            label=args.label,
+            limit=args.limit,
             parent_pid=args.parent_pid,
         )
     return 1

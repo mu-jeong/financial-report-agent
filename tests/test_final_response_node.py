@@ -97,6 +97,26 @@ def test_final_response_node_commits_active_scope_for_next_turn():
     assert result["active_scope"]["file_names"] == ["samsung.pdf"]
 
 
+def test_final_response_node_does_not_commit_no_result_scope():
+    result = main_graph.final_response_node(
+        {
+            "question": "SK하이닉스 상세",
+            "generation": "지정된 조건에 맞는 임베딩 완료 리포트를 찾지 못했습니다.",
+            "route": "vectordb",
+            "search_filters": {
+                "report_date_start": "2026-06-22",
+                "report_date_end": "2026-06-06",
+                "target_name": "SK하이닉스",
+                "report_type": "company",
+            },
+            "no_vector_results": True,
+            "rerank_info": [],
+        }
+    )
+
+    assert "active_scope" not in result
+
+
 def test_clear_short_term_memory_retry_keeps_metadata_filters():
     result = main_graph.clear_short_term_memory_retry_node(
         {

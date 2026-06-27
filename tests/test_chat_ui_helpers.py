@@ -5,6 +5,12 @@ from src.core.chat_ui_helpers import (
 )
 
 
+def test_chat_window_no_result_actions_do_not_show_retry_caption():
+    app_source = open("apps/gui/app.py", encoding="utf-8").read()
+
+    assert "검색 조건을 바꿔 다시 시도할 수 있습니다." not in app_source
+
+
 def test_build_scope_notice_explains_prior_scope_reuse():
     notice = build_scope_notice(
         {
@@ -35,9 +41,7 @@ def test_build_no_result_suggestions_returns_actionable_retry_queries():
         {"report_date_start": "2026-06-01", "report_date_end": "2026-06-30"},
     )
 
-    assert suggestions[0] == {"label": "날짜 조건 없이 다시 검색", "query": "NAVER 리포트 요약해줘"}
-    assert {"label": "기업 리포트만 검색", "query": "2026년 6월 NAVER 리포트 요약해줘 기업 리포트"} in suggestions
-    assert {"label": "산업 리포트까지 포함", "query": "2026년 6월 NAVER 리포트 요약해줘 산업 리포트도 포함"} in suggestions
+    assert suggestions == [{"label": "날짜 조건 없이 다시 검색", "query": "NAVER 리포트 요약해줘"}]
 
 
 def test_build_clipboard_copy_html_escapes_text_and_invokes_clipboard_api():

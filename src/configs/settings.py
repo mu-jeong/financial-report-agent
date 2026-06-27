@@ -61,9 +61,11 @@ class ConfigSpec:
     section: str
     env_example: str | None = None
     include_in_env_example: bool = True
+    env_aliases: tuple[str, ...] = ()
 
     def default_value(self) -> Any:
         return self.default() if callable(self.default) else self.default
+
 
     def example_value(self) -> str:
         value = self.env_example if self.env_example is not None else self.default_value()
@@ -293,13 +295,33 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
             ),
         ),
         (
-            "EXTRACTION_ENGINE",
+            "PDF_EXTRACTION_ENGINE",
             ConfigSpec(
-                name="EXTRACTION_ENGINE",
+                name="PDF_EXTRACTION_ENGINE",
                 default="pymupdf",
                 parser=as_lower_str,
-                description="PDF extraction engine: pymupdf, marker, opendataloader, docling, or pdf-to-markdown.",
+                description=(
+                    "PDF parsing/extraction engine for normal embedding runs: "
+                    "pymupdf, marker, opendataloader, docling, or pdf-to-markdown. "
+                    "Legacy env alias: EXTRACTION_ENGINE."
+                ),
                 section="Embedding",
+                env_aliases=("EXTRACTION_ENGINE",),
+            ),
+        ),
+        (
+            "UNEMBEDDED_PDF_EXTRACTION_ENGINE",
+            ConfigSpec(
+                name="UNEMBEDDED_PDF_EXTRACTION_ENGINE",
+                default="",
+                parser=as_lower_str,
+                env_example="opendataloader",
+                description=(
+                    "PDF parsing/extraction engine used when embedding pending/unembedded reports. "
+                    "Set empty to reuse PDF_EXTRACTION_ENGINE. Legacy env alias: UNEMBEDDED_EXTRACTION_ENGINE."
+                ),
+                section="Embedding",
+                env_aliases=("UNEMBEDDED_EXTRACTION_ENGINE",),
             ),
         ),
         (
@@ -461,6 +483,11 @@ def get_config_value(name: str, environ: dict[str, str] | None = None) -> Any:
     spec = CONFIG_SPECS[name]
     env = os.environ if environ is None else environ
     raw = env.get(name)
+    if raw is None:
+        for alias in spec.env_aliases:
+            raw = env.get(alias)
+            if raw is not None:
+                break
     if raw is None or raw.strip() == "":
         return spec.default_value()
     return spec.parser(raw)

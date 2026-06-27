@@ -155,7 +155,9 @@ def create_issue_report(
         _format_issue_report_text(report),
         encoding="utf-8",
     )
-    return {"id": report_id, "file_path": str(report_path)}
+    json_path = report_path.with_suffix(".json")
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"id": report_id, "file_path": str(report_path), "json_path": str(json_path)}
 
 
 def list_issue_reports(thread_id: str | None = None) -> list[dict[str, Any]]:
@@ -178,15 +180,33 @@ def list_issue_reports(thread_id: str | None = None) -> list[dict[str, Any]]:
             "file_path": str(report_path),
             "content": text,
         }
+        json_path = report_path.with_suffix(".json")
+        if json_path.exists():
+            try:
+                sidecar = json.loads(json_path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                sidecar = {}
+            if sidecar:
+                report.update(
+                    {
+                        "id": sidecar.get("id") or report["id"],
+                        "thread_id": sidecar.get("thread_id") or report["thread_id"],
+                        "category": sidecar.get("category") or report["category"],
+                        "created_at": sidecar.get("created_at") or report["created_at"],
+                        "description": sidecar.get("description"),
+                        "context": sidecar.get("context") or {},
+                        "json_path": str(json_path),
+                    }
+                )
         for line in text.splitlines():
             if line.startswith("Report ID: "):
-                report["id"] = line.removeprefix("Report ID: ").strip()
+                report["id"] = report["id"] or line.removeprefix("Report ID: ").strip()
             elif line.startswith("Thread ID: "):
-                report["thread_id"] = line.removeprefix("Thread ID: ").strip()
+                report["thread_id"] = report["thread_id"] or line.removeprefix("Thread ID: ").strip()
             elif line.startswith("Category: "):
-                report["category"] = line.removeprefix("Category: ").strip()
+                report["category"] = report["category"] or line.removeprefix("Category: ").strip()
             elif line.startswith("Created At (UTC): "):
-                report["created_at"] = line.removeprefix("Created At (UTC): ").strip()
+                report["created_at"] = report["created_at"] or line.removeprefix("Created At (UTC): ").strip()
         if thread_id is not None and report.get("thread_id") != thread_id:
             continue
         reports.append(report)

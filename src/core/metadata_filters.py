@@ -63,6 +63,18 @@ def _pick_longest_mentioned(query: str, candidates: Iterable[str]) -> str | None
     return max(mentioned, key=len)
 
 
+def _target_is_only_part_of_broker(query: str, target: str | None, broker: str | None) -> bool:
+    """증권사명 내부의 일반 target 조각을 별도 검색 대상으로 보지 않습니다."""
+    if not target or not broker:
+        return False
+    normalized_target = _normalize_text(target)
+    normalized_broker = _normalize_text(broker)
+    if not normalized_target or normalized_target not in normalized_broker:
+        return False
+    query_without_broker = _normalize_text(query).replace(normalized_broker, "")
+    return normalized_target not in query_without_broker
+
+
 def _month_bounds(report_month: str) -> tuple[str, str]:
     """Return inclusive date bounds for a YYYY-MM month string."""
     year, month = map(int, report_month.split("-"))
@@ -435,6 +447,10 @@ def infer_search_filters(
     broker = _pick_longest_mentioned(query, values.get("broker", ()))
     if broker:
         filters["broker"] = broker
+
+    if _target_is_only_part_of_broker(query, target, broker):
+        filters.pop("target_name", None)
+        target = None
 
     for report_type, keywords in PLAIN_REPORT_TYPE_KEYWORDS.items():
         if any(_contains_report_type_keyword(query, keyword, allow_nospace=False) for keyword in keywords):

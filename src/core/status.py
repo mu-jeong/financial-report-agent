@@ -12,18 +12,19 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from src.configs.config import (
-    DB_PATH,
-    EMBEDDING_MODEL,
-    EXTRACTION_ENGINE,
-    FAISS_DIR,
-    GENERATION_MODEL,
-    SAVE_DIR,
-    SEARCH_TOP_K,
-    TEST_LIMIT,
-    USE_PARENT_CHILD,
-    USE_RERANKER,
-)
+from src.configs import config
+
+DB_PATH = config.DB_PATH
+EMBEDDING_MODEL = config.EMBEDDING_MODEL
+EXTRACTION_ENGINE = config.EXTRACTION_ENGINE
+FAISS_DIR = config.FAISS_DIR
+GENERATION_MODEL = config.GENERATION_MODEL
+SAVE_DIR = config.SAVE_DIR
+SEARCH_TOP_K = config.SEARCH_TOP_K
+TEST_LIMIT = config.TEST_LIMIT
+UNEMBEDDED_EXTRACTION_ENGINE = getattr(config, "UNEMBEDDED_EXTRACTION_ENGINE", "")
+USE_PARENT_CHILD = config.USE_PARENT_CHILD
+USE_RERANKER = config.USE_RERANKER
 
 
 def _safe_count_pdfs(save_dir: str) -> int:
@@ -154,6 +155,71 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
     return info
 
 
+def _reports_columns(conn: sqlite3.Connection) -> set[str]:
+    return {row["name"] for row in conn.execute("PRAGMA table_info(reports)").fetchall()}
+
+
+def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list[dict[str, Any]]:
+    """Return recent reports that exist in SQLite but are not embedded yet."""
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    safe_limit = max(1, int(limit or 1))
+    db_uri = f"file:{os.path.abspath(db_path)}?mode=ro"
+    with sqlite3.connect(db_uri, uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        columns = _reports_columns(conn)
+        error_expr = "TRIM(embedding_last_error)" if "embedding_last_error" in columns else "NULL"
+        attempted_expr = "TRIM(embedding_last_attempt_at)" if "embedding_last_attempt_at" in columns else "NULL"
+        engine_expr = "TRIM(embedding_extraction_engine)" if "embedding_extraction_engine" in columns else "NULL"
+        rows = conn.execute(
+            f"""
+            SELECT
+                id,
+                SUBSTR(TRIM(report_date), 1, 10) AS report_date,
+                TRIM(report_type) AS report_type,
+                TRIM(target_name) AS target_name,
+                TRIM(title) AS title,
+                TRIM(broker) AS broker,
+                TRIM(file_name) AS file_name,
+                {engine_expr} AS embedding_extraction_engine,
+                {error_expr} AS embedding_last_error,
+                {attempted_expr} AS embedding_last_attempt_at
+            FROM reports
+            WHERE COALESCE(is_embedded, 0) = 0
+            ORDER BY SUBSTR(TRIM(report_date), 1, 10) DESC, id DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _preview_text(value: Any, max_chars: int = 120) -> str:
+    compact = " ".join(str(value or "").split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 1] + "…"
+
+
+def build_unembedded_report_rows(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build safe table rows for the unembedded-report Monitoring tab."""
+    return [
+        {
+            "report_date": report.get("report_date"),
+            "report_type": report.get("report_type"),
+            "target_name": _preview_text(report.get("target_name"), 80),
+            "broker": report.get("broker"),
+            "title": _preview_text(report.get("title"), 120),
+            "file_name": report.get("file_name"),
+            "embedding_extraction_engine": _preview_text(report.get("embedding_extraction_engine") or "-", 80),
+            "embedding_last_error": _preview_text(report.get("embedding_last_error") or "-", 200),
+            "embedding_last_attempt_at": report.get("embedding_last_attempt_at") or "-",
+        }
+        for report in reports
+    ]
+
+
 def get_data_status(
     *,
     save_dir: str = SAVE_DIR,
@@ -189,6 +255,7 @@ def get_data_status(
             "use_reranker": USE_RERANKER,
             "use_parent_child": USE_PARENT_CHILD,
             "extraction_engine": EXTRACTION_ENGINE,
+            "unembedded_extraction_engine": UNEMBEDDED_EXTRACTION_ENGINE,
         },
         "embedding_limit_active": embedding_limit_active,
         "search_coverage_ratio": search_coverage_ratio,

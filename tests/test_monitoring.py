@@ -3,6 +3,10 @@ from pathlib import Path
 from src.core.monitoring import (
     build_chat_trace_debug_hints,
     build_chat_trace_issue_context,
+    build_eval_case_draft_from_issue_report,
+    build_regression_candidate_dataset,
+    build_regression_candidate_rows,
+    list_regression_candidates,
     build_message_trace_detail,
     build_message_trace_summary,
     build_issue_report_rows,
@@ -220,6 +224,11 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
             "selection_context": None,
             "scope_source": "prior_search_scope",
             "scope_decision": {"reason": "matched_prior_section_alias"},
+            "search_scope": {
+                "route": "vectordb",
+                "search_filters": {"report_type": "company"},
+                "file_names": ["company.pdf"],
+            },
             "rerank_info": [{"rank": 1, "file_name": "company.pdf", "report_type": "company"}],
             "monitoring": {
                 "query_rewrite": {
@@ -233,6 +242,17 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
                     "document_coverage_reason": "section_followup_scope",
                     "selected_file_names": ["company.pdf"],
                 },
+                "state_trace": {
+                    "input": {
+                        "question": "개별 종목 자세히",
+                        "prior_search_scope": {
+                            "route": "vectordb",
+                            "search_filters": {"report_type": "company"},
+                            "file_count": 92,
+                            "file_names": ["company.pdf", "industry.pdf"],
+                        },
+                    }
+                },
             },
         },
     }
@@ -242,6 +262,9 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
     assert detail["query_rewrite"]["original_question"] == "개별 종목 자세히"
     assert detail["scope"]["search_filters"] == {"report_type": "company"}
     assert detail["routing"]["route"] == "vectordb"
+    assert detail["state_transitions"]["input"]["prior_search_scope_file_count"] == 92
+    assert detail["state_transitions"]["after_search_scope"]["search_scope_file_count"] == 1
+    assert detail["state_transitions"]["suspect_transitions"]["prior_scope_files_dropped"] is True
     assert detail["retrieval"]["document_coverage_reason"] == "section_followup_scope"
     assert detail["sources"][0]["report_type"] == "company"
     assert detail["answer"]["citation_ranks_used"] == [1]
@@ -277,6 +300,8 @@ def test_message_trace_summary_flattens_common_debug_fields():
     assert summary["scope_reason"] == "industry_company_universe_intersection"
     assert summary["industry_term"] == "반도체"
     assert summary["source_count"] == 2
+    assert "prior_scope_file_count" in summary
+    assert "search_scope_file_count" in summary
     assert summary["search_filters"] == {"report_type": "company", "file_names": ["a.pdf", "b.pdf"]}
     assert summary["debug_hint_count"] == 1
     assert summary["diff_available"] is True
@@ -288,6 +313,7 @@ def test_response_diff_reports_filter_source_and_retrieval_changes():
         "metadata": {
             "route": "vectordb",
             "search_filters": {"report_date_start": "2026-06-15", "report_date_end": "2026-06-21"},
+            "search_scope": {"file_names": ["a.pdf", "b.pdf"]},
             "rerank_info": [{"file_name": "a.pdf"}, {"file_name": "b.pdf"}],
             "monitoring": {"retrieval": {"candidate_count_after_filter": 33}},
         },
@@ -302,8 +328,14 @@ def test_response_diff_reports_filter_source_and_retrieval_changes():
                 "report_type": "company",
             },
             "scope_decision": {"reason": "matched_prior_section_alias"},
+            "search_scope": {"file_names": ["b.pdf"]},
             "rerank_info": [{"file_name": "b.pdf"}, {"file_name": "c.pdf"}],
-            "monitoring": {"retrieval": {"candidate_count_after_filter": 8}},
+            "monitoring": {
+                "state_trace": {
+                    "input": {"prior_search_scope": {"file_names": ["a.pdf", "b.pdf"]}}
+                },
+                "retrieval": {"candidate_count_after_filter": 8},
+            },
         },
     }
 
@@ -316,6 +348,11 @@ def test_response_diff_reports_filter_source_and_retrieval_changes():
     assert diff["search_filters"]["added"] == {"report_type": "company"}
     assert diff["sources"]["added"] == ["c.pdf"]
     assert diff["sources"]["removed"] == ["a.pdf"]
+    assert diff["state"]["prior_to_current_file_count"] == {
+        "input_prior_search_scope": 2,
+        "current_search_scope": 1,
+    }
+    assert diff["state"]["search_scope_file_count_delta_vs_previous"] == -1
     assert diff["retrieval"]["candidate_count_after_filter_delta"] == -25
 
 
@@ -404,6 +441,13 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
             "followup_scope_intent": False,
             "search_filters": {"target_name": "NAVER"},
             "temporal_context": None,
+            "scope_source": "prior_search_scope",
+            "routing_context": {"route_hint": "vectordb"},
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {"report_date_start": "2026-06-22"},
+                "file_names": ["a.pdf", "b.pdf"],
+            },
             "scope_decision": {"reason": "matched_prior_section_alias"},
         },
         latency_seconds=1.23456,
@@ -416,7 +460,17 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
     assert metadata["route"] == "vectordb"
     assert metadata["latency_seconds"] == 1.235
     assert metadata["search_filters"] == {"target_name": "NAVER"}
+    assert metadata["scope_source"] == "prior_search_scope"
+    assert metadata["routing_context"] == {"route_hint": "vectordb"}
     assert metadata["scope_decision"] == {"reason": "matched_prior_section_alias"}
+    assert metadata["monitoring"]["state_trace"]["input"]["prior_search_scope"] == {
+        "route": "vectordb",
+        "search_filters": {"report_date_start": "2026-06-22"},
+        "temporal_context": None,
+        "scope_source": None,
+        "file_count": 2,
+        "file_names": ["a.pdf", "b.pdf"],
+    }
     assert metadata["monitoring"]["retrieval"]["source_count"] == 2
     assert metadata["monitoring"]["retrieval"]["score_summary"]["rerank_score"]["avg"] == 0.7
 
@@ -588,6 +642,7 @@ def test_summarize_data_integrity_flags_missing_indexes_and_pending_embeddings()
 def test_monitoring_tab_labels_separate_global_and_chat_monitoring():
     assert build_monitoring_tab_labels() == [
         "데이터/설정",
+        "미임베딩 문서",
         "실험 실행",
         "고정 테스트셋",
         "Parsing engines",
@@ -611,8 +666,98 @@ def test_promote_issue_report_to_eval_candidate_saves_regression_candidate(tmp_p
 
     assert candidate["source_report_id"] == "r1"
     assert candidate["status"] == "candidate"
+    assert candidate["triage_status"] == "new"
+    assert candidate["operator_decision"] == "unreviewed"
+    assert candidate["severity"] == "untriaged"
     assert candidate["recommended_next_step"] == "convert_to_evaluation_dataset_case"
     assert Path(candidate["json_path"]).exists()
+
+
+def test_promote_trace_issue_report_to_eval_candidate_carries_draft_and_impact_area(tmp_path):
+    report = {
+        "id": "r2",
+        "thread_id": "thread-b",
+        "category": "Chat Monitoring trace",
+        "created_at": "2026-06-22",
+        "file_path": "debug/r2.txt",
+        "content": "Finance LLM 문제 신고\nDescription:\n날짜 필터가 사라졌습니다.",
+        "context": {
+            "selected_user_question": "개별 종목에 대해 자세히 알려줘",
+            "trace_detail": {
+                "query_rewrite": {
+                    "followup_scope_intent": True,
+                    "scope_source": "prior_search_scope",
+                    "scope_decision": {"reason": "matched_prior_section_alias"},
+                },
+                "scope": {"search_filters": {"report_type": "company", "report_date_start": "2026-06-09"}},
+                "routing": {"route": "vectordb"},
+                "sources": [
+                    {"file_name": "naver-company.pdf", "report_type": "company", "rank": 1},
+                    {"file_name": "naver-industry.pdf", "report_type": "industry", "rank": 2},
+                ],
+                "answer": {"citation_valid": True, "source_count": 2},
+            },
+            "debug_hints": ["⚠️ 직전 응답에는 날짜 필터가 있었는데 현재 응답에서 날짜 필터가 사라졌습니다."],
+        },
+    }
+
+    candidate = promote_issue_report_to_eval_candidate(report, output_dir=tmp_path)
+
+    assert candidate["impact_area"] == "filter_scope"
+    assert candidate["eval_case_draft"]["question"] == "개별 종목에 대해 자세히 알려줘"
+    assert candidate["eval_case_draft"]["expected_route"] == "vectordb"
+    assert candidate["eval_case_draft"]["expected_filters"] == {"report_type": "company", "report_date_start": "2026-06-09"}
+    assert candidate["eval_case_draft"]["expected_sources"] == [
+        {"file_name": "naver-company.pdf", "report_type": "company"},
+        {"file_name": "naver-industry.pdf", "report_type": "industry"},
+    ]
+    assert candidate["eval_case_draft"]["expected_state"]["scope_decision_reason"] == "matched_prior_section_alias"
+    assert "filter_scope" in candidate["eval_case_draft"]["monitoring_dimensions"]
+
+
+def test_build_eval_case_draft_from_issue_report_returns_none_without_trace_context():
+    assert build_eval_case_draft_from_issue_report({"id": "r3", "content": "manual report"}) is None
+
+
+def test_regression_candidate_helpers_list_rows_and_build_draft_dataset(tmp_path):
+    candidate_a = promote_issue_report_to_eval_candidate(
+        {
+            "id": "r10",
+            "thread_id": "thread-a",
+            "category": "Chat Monitoring trace",
+            "content": "출처 문제",
+            "context": {
+                "selected_user_question": "NAVER 요약",
+                "trace_detail": {
+                    "query_rewrite": {"original_question": "NAVER 요약"},
+                    "scope": {"search_filters": {"target_name": "NAVER"}},
+                    "routing": {"route": "vectordb"},
+                    "sources": [{"file_name": "naver.pdf"}],
+                },
+            },
+        },
+        output_dir=tmp_path,
+    )
+    promote_issue_report_to_eval_candidate(
+        {
+            "id": "r11",
+            "thread_id": "thread-b",
+            "category": "답변 품질",
+            "content": "manual only",
+        },
+        output_dir=tmp_path,
+    )
+
+    candidates = list_regression_candidates(tmp_path)
+    rows = build_regression_candidate_rows(candidates)
+    dataset = build_regression_candidate_dataset(candidates, selected_candidate_ids=[candidate_a["id"]])
+
+    assert [candidate["id"] for candidate in candidates] == ["candidate_r11", "candidate_r10"]
+    assert rows[0]["triage_status"] == "new"
+    assert rows[1]["has_eval_case_draft"] is True
+    assert dataset["name"] == "finance_llm_regression_candidate_dataset"
+    assert dataset["cases"] == [candidate_a["eval_case_draft"]]
+
 
 def test_monitoring_page_labels_make_global_monitoring_directly_accessible():
     assert build_monitoring_page_labels() == [
