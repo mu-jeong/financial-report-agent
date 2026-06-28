@@ -1083,20 +1083,64 @@ def summarize_issue_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _conversation_draft_inputs(report: dict[str, Any]) -> dict[str, Any] | None:
+    messages = (report.get("context") or {}).get("conversation_messages") or []
+    last_user: dict[str, Any] | None = None
+    selected_user: dict[str, Any] | None = None
+    selected_assistant: dict[str, Any] | None = None
+    for message in messages:
+        role = message.get("role")
+        if role == "user":
+            last_user = message
+        elif role == "assistant" and last_user:
+            selected_user = last_user
+            selected_assistant = message
+    if not selected_user or not selected_assistant:
+        return None
+    metadata = selected_assistant.get("metadata") or {}
+    route = metadata.get("route")
+    search_scope = metadata.get("search_scope") or {}
+    filters = search_scope.get("search_filters") or metadata.get("search_filters") or {}
+    question = str(selected_user.get("content") or "").strip()
+    if not question or not route:
+        return None
+    sources = metadata.get("rerank_info") or []
+    if not sources and search_scope.get("file_names"):
+        sources = [{"file_name": file_name} for file_name in search_scope.get("file_names") or []]
+    return {"question": question, "route": route, "filters": filters, "sources": sources}
+
+
+def classify_issue_report_draft_readiness(report: dict[str, Any]) -> dict[str, str]:
+    """Describe whether an issue report can become an executable regression draft."""
+    context = report.get("context") or {}
+    if context.get("trace_detail"):
+        return {"status": "trace_ready", "recommended_next_step": "Promote to regression candidate"}
+    if _conversation_draft_inputs(report):
+        return {"status": "conversation_ready", "recommended_next_step": "Promote to regression candidate"}
+    if report.get("content"):
+        return {"status": "raw_text_only", "recommended_next_step": "Manual eval case review needed"}
+    return {"status": "needs_manual_review", "recommended_next_step": "Manual eval case review needed"}
+
+
 def build_issue_report_rows(reports: list[dict[str, Any]], *, thread_names: dict[str, str] | None = None) -> list[dict[str, Any]]:
     thread_names = thread_names or {}
-    return [
-        {
+    rows: list[dict[str, Any]] = []
+    for report in reports:
+        readiness = classify_issue_report_draft_readiness(report)
+        rows.append({
             "created_at": report.get("created_at"),
             "id": report.get("id"),
             "category": report.get("category"),
+            "source": report.get("source") or "local_chat",
+            "app_version": report.get("app_version"),
+            "draft_readiness": readiness["status"],
+            "recommended_next_step": readiness["recommended_next_step"],
             "thread_id": str(report.get("thread_id") or ""),
             "thread_name": thread_names.get(str(report.get("thread_id") or ""), "-"),
             "file_path": report.get("file_path"),
             "preview": _issue_report_preview(report.get("content") or ""),
-        }
-        for report in reports
-    ]
+        })
+    return rows
 
 
 def infer_issue_impact_area(report: dict[str, Any]) -> str:
@@ -1147,7 +1191,25 @@ def build_eval_case_draft_from_issue_report(report: dict[str, Any]) -> dict[str,
     context = report.get("context") or {}
     trace = context.get("trace_detail") or {}
     if not trace:
-        return None
+        conversation_inputs = _conversation_draft_inputs(report)
+        if not conversation_inputs:
+            return None
+        route = conversation_inputs["route"]
+        impact_area = infer_issue_impact_area(report)
+        return {
+            "id": f"issue_{report.get('id') or uuid.uuid4().hex[:8]}",
+            "type": "vectordb_retrieval" if route == "vectordb" else "rdb_aggregate",
+            "question": conversation_inputs["question"],
+            "expected_route": route,
+            "expected_filters": conversation_inputs["filters"],
+            "expected_sources": _draft_expected_sources(conversation_inputs["sources"]),
+            "expected_state": {"draft_source": "conversation_messages"},
+            "criteria_tags": ["issue_report_regression", "email_import"],
+            "monitoring_dimensions": list(dict.fromkeys([impact_area, "routing", "filter", "retrieval" if route == "vectordb" else "rdb"])),
+            "checks": ["route_pass", "filter_pass", "source_hit", "citation_valid"],
+            "source_issue_report_id": report.get("id"),
+            "review_required": True,
+        }
     query_rewrite = trace.get("query_rewrite") or {}
     scope = trace.get("scope") or {}
     routing = trace.get("routing") or {}
@@ -1284,7 +1346,7 @@ def promote_issue_report_to_eval_candidate(
         "source_file_path": report.get("file_path"),
         "source_json_path": report.get("json_path"),
         "preview": _issue_report_preview(report.get("content") or "", max_chars=500),
-        "recommended_next_step": "review_eval_case_draft" if eval_case_draft else "convert_to_evaluation_dataset_case",
+        "recommended_next_step": "review_eval_case_draft" if eval_case_draft else "manual_eval_case_required",
     }
     if eval_case_draft:
         candidate["eval_case_draft"] = eval_case_draft

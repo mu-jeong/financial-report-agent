@@ -10,6 +10,7 @@ from src.core.monitoring import (
     build_message_trace_detail,
     build_message_trace_summary,
     build_issue_report_rows,
+    classify_issue_report_draft_readiness,
     build_monitoring_page_labels,
     build_response_diff,
     run_multiturn_evaluation_dataset,
@@ -610,7 +611,15 @@ def test_summarize_all_chat_threads_and_issue_reports_for_global_monitoring():
         }
     ]
     reports = [
-        {"id": "r1", "thread_id": "thread-a", "category": "답변 품질", "created_at": "2026-06-21", "file_path": "debug/r1.txt", "content": "Finance LLM 문제 신고\nDescription:\n오답"}
+        {
+            "id": "r1",
+            "thread_id": "thread-a",
+            "category": "답변 품질",
+            "created_at": "2026-06-21",
+            "file_path": "debug/r1.txt",
+            "source": "email_import",
+            "content": "Finance LLM 문제 신고\nDescription:\n오답",
+        }
     ]
 
     chat_summary = summarize_all_chat_threads(thread_messages)
@@ -622,6 +631,7 @@ def test_summarize_all_chat_threads_and_issue_reports_for_global_monitoring():
     assert chat_summary["no_result_rate"] == 1.0
     assert report_summary["categories"] == {"답변 품질": 1}
     assert rows[0]["thread_name"] == "NAVER"
+    assert rows[0]["source"] == "email_import"
     assert "Description" in rows[0]["preview"]
 
 
@@ -672,7 +682,7 @@ def test_promote_issue_report_to_eval_candidate_saves_regression_candidate(tmp_p
     assert candidate["triage_status"] == "new"
     assert candidate["operator_decision"] == "unreviewed"
     assert candidate["severity"] == "untriaged"
-    assert candidate["recommended_next_step"] == "convert_to_evaluation_dataset_case"
+    assert candidate["recommended_next_step"] == "manual_eval_case_required"
     assert Path(candidate["json_path"]).exists()
 
 
@@ -722,6 +732,62 @@ def test_build_eval_case_draft_from_issue_report_returns_none_without_trace_cont
     assert build_eval_case_draft_from_issue_report({"id": "r3", "content": "manual report"}) is None
 
 
+def test_build_eval_case_draft_from_imported_conversation_report():
+    report = {
+        "id": "email-1",
+        "source": "email_import",
+        "content": "Finance LLM 문제 신고",
+        "context": {
+            "conversation_messages": [
+                {"role": "user", "content": "올해 삼성전자 리포트 시기별 요약해줘", "metadata": {}},
+                {
+                    "role": "assistant",
+                    "content": "일부 리포트만 요약했습니다.",
+                    "metadata": {
+                        "route": "vectordb",
+                        "search_scope": {
+                            "search_filters": {"target_name": "삼성전자"},
+                            "file_names": ["samsung-a.pdf", "samsung-b.pdf"],
+                        },
+                    },
+                },
+            ]
+        },
+    }
+
+    draft = build_eval_case_draft_from_issue_report(report)
+
+    assert draft["question"] == "올해 삼성전자 리포트 시기별 요약해줘"
+    assert draft["expected_route"] == "vectordb"
+    assert draft["expected_filters"] == {"target_name": "삼성전자"}
+    assert draft["expected_sources"] == [{"file_name": "samsung-a.pdf"}, {"file_name": "samsung-b.pdf"}]
+    assert draft["expected_state"]["draft_source"] == "conversation_messages"
+
+
+def test_issue_report_rows_show_draft_readiness_and_next_action():
+    reports = [
+        {
+            "id": "ready",
+            "source": "email_import",
+            "context": {
+                "conversation_messages": [
+                    {"role": "user", "content": "질문", "metadata": {}},
+                    {"role": "assistant", "content": "답", "metadata": {"route": "vectordb", "search_scope": {"search_filters": {"target_name": "NAVER"}}}},
+                ]
+            },
+        },
+        {"id": "raw", "source": "email_import", "content": "Finance LLM 문제 신고"},
+    ]
+
+    rows = build_issue_report_rows(reports)
+
+    assert classify_issue_report_draft_readiness(reports[0])["status"] == "conversation_ready"
+    assert rows[0]["draft_readiness"] == "conversation_ready"
+    assert rows[0]["recommended_next_step"] == "Promote to regression candidate"
+    assert rows[1]["draft_readiness"] == "raw_text_only"
+    assert rows[1]["recommended_next_step"] == "Manual eval case review needed"
+
+
 def test_regression_candidate_helpers_list_rows_and_build_draft_dataset(tmp_path):
     candidate_a = promote_issue_report_to_eval_candidate(
         {
@@ -757,7 +823,9 @@ def test_regression_candidate_helpers_list_rows_and_build_draft_dataset(tmp_path
 
     assert [candidate["id"] for candidate in candidates] == ["candidate_r11", "candidate_r10"]
     assert rows[0]["triage_status"] == "new"
+    assert rows[0]["recommended_next_step"] == "manual_eval_case_required"
     assert rows[1]["has_eval_case_draft"] is True
+    assert rows[1]["recommended_next_step"] == "review_eval_case_draft"
     assert dataset["name"] == "finance_llm_regression_candidate_dataset"
     assert dataset["cases"] == [candidate_a["eval_case_draft"]]
 

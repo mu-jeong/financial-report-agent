@@ -57,10 +57,10 @@ status_module = importlib.reload(status_module)
 append_message = conversation_store.append_message
 create_thread = conversation_store.create_thread
 create_issue_report = issue_report_store.create_issue_report
+import_issue_report_text = issue_report_store.import_issue_report_text
 build_issue_report_context = issue_report_store.build_issue_report_context
 build_evaluation_failure_actions = monitoring.build_evaluation_failure_actions
 build_chat_trace_debug_hints = monitoring.build_chat_trace_debug_hints
-build_chat_trace_issue_context = monitoring.build_chat_trace_issue_context
 build_issue_report_rows = monitoring.build_issue_report_rows
 build_regression_candidate_dataset = monitoring.build_regression_candidate_dataset
 build_regression_candidate_rows = monitoring.build_regression_candidate_rows
@@ -291,8 +291,7 @@ def _render_issue_report_control(
 ) -> None:
     if report_result := st.session_state.pop("issue_report_success", None):
         st.success(
-            "문제 신고 텍스트 파일을 저장했습니다. 아래 경로의 파일 내용을 복사하여 "
-            "내용을 이메일에 작성해주세요."
+            "문제 신고 텍스트 파일을 저장했습니다. 아래 내용을 복사해 btr0813@naver.com 으로 보내주세요."
         )
         st.code(report_result["file_path"], language="text")
         try:
@@ -300,6 +299,7 @@ def _render_issue_report_control(
         except OSError:
             report_text = ""
         if report_text:
+            st.caption("이메일 제목은 신고 텍스트의 '사용 안내'에 포함된 제목 예시를 사용하세요.")
             components.html(
                 build_clipboard_copy_html(report_text, button_label="신고 내용 복사"),
                 height=48,
@@ -1719,6 +1719,23 @@ def _render_global_monitoring(status: dict) -> None:
 def _render_issue_report_monitoring() -> None:
     st.subheader("Issue reports")
     st.caption("사용자 신고를 전체 개선 루프의 입력으로 모아 봅니다. 필요하면 실패 케이스를 regression 후보로 승격할 수 있습니다.")
+
+    st.markdown("#### Import emailed issue report")
+    imported_text = st.text_area(
+        "이메일로 받은 Finance LLM 문제 신고 텍스트",
+        key="email_issue_report_import_text",
+        height=220,
+        placeholder="Finance LLM 문제 신고\n====================\nReport ID: ...",
+    )
+    if st.button("Import emailed issue report", use_container_width=True, disabled=not imported_text.strip()):
+        try:
+            imported_report = import_issue_report_text(imported_text)
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.success(f"Imported issue report: {imported_report['id']}")
+            st.code(imported_report["file_path"], language="text")
+
     reports = list_issue_reports()
     thread_names = {thread["id"]: thread["name"] for thread in list_threads()}
     summary = summarize_issue_reports(reports)
@@ -1743,8 +1760,13 @@ def _render_issue_report_monitoring() -> None:
         selected_report_id = st.selectbox("상세 보기", options=[row["id"] for row in rows])
         selected = next((report for report in reports if report.get("id") == selected_report_id), None)
         if selected:
+            selected_row = next((row for row in rows if row.get("id") == selected_report_id), {})
             st.code(selected.get("file_path") or "", language="text")
-            if st.button("Regression suite 후보로 저장", use_container_width=True):
+            st.caption(
+                f"Draft readiness: {selected_row.get('draft_readiness', '-')} · "
+                f"Next: {selected_row.get('recommended_next_step', '-')}"
+            )
+            if st.button("Promote selected report to regression candidate", use_container_width=True):
                 candidate = promote_issue_report_to_eval_candidate(
                     selected,
                     output_dir=MONITORING_REGRESSION_CANDIDATE_DIR,
@@ -1766,7 +1788,10 @@ def _render_issue_report_monitoring() -> None:
     st.dataframe(candidate_rows, use_container_width=True, hide_index=True)
     draft_candidates = [candidate for candidate in candidates if candidate.get("eval_case_draft")]
     if not draft_candidates:
-        st.info("아직 evaluation case draft가 있는 candidate가 없습니다. Chat Monitoring에서 응답 trace를 선택한 뒤 'Save selected trace as regression candidate'를 누르면 draft가 생성됩니다.")
+        st.info("아직 evaluation case draft가 있는 candidate가 없습니다. 이메일로 받은 issue report를 가져오거나 저장된 report를 검토한 뒤, 이 화면에서 regression suite 후보로 저장하세요.")
+        manual_candidates = [candidate for candidate in candidates if not candidate.get("eval_case_draft")]
+        if manual_candidates:
+            st.warning("draft가 없는 candidate는 자동 실행할 수 없습니다. recommended_next_step=manual_eval_case_required 항목은 수동 eval case 작성/보강이 필요합니다.")
         return
 
     candidate_ids = [str(candidate.get("id")) for candidate in draft_candidates]
@@ -1789,7 +1814,7 @@ def _render_issue_report_monitoring() -> None:
     if selected_dataset["cases"]:
         with st.expander("선택된 evaluation case draft JSON", expanded=False):
             st.json(selected_dataset)
-    if st.button("Run selected regression candidate drafts", use_container_width=True, disabled=not selected_dataset["cases"]):
+    if st.button("Run selected regression candidates", use_container_width=True, disabled=not selected_dataset["cases"]):
         with st.spinner("Regression candidate draft 실행 중..."):
             try:
                 run = run_evaluation_dataset(
@@ -1907,52 +1932,6 @@ def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
                 with st.expander("Answer / citations", expanded=False):
                     st.json(detail["answer"])
 
-            issue_context = build_chat_trace_issue_context(
-                current_thread,
-                messages,
-                selected_message_id=selected_message_id,
-            )
-            issue_description = "Selected response trace from Chat Monitoring"
-            issue_col, candidate_col = st.columns(2)
-            with issue_col:
-                if st.button(
-                    "Create issue report with selected trace",
-                    key=f"chat_monitoring_issue_report_{current_id}_{selected_message_id}",
-                    use_container_width=True,
-                ):
-                    report = create_issue_report(
-                        current_id,
-                        "Chat Monitoring trace",
-                        issue_description,
-                        issue_context,
-                    )
-                    st.success(f"Issue report saved: {report['file_path']}")
-            with candidate_col:
-                if st.button(
-                    "Save selected trace as regression candidate",
-                    key=f"chat_monitoring_regression_candidate_{current_id}_{selected_message_id}",
-                    use_container_width=True,
-                ):
-                    report = create_issue_report(
-                        current_id,
-                        "Chat Monitoring trace",
-                        issue_description,
-                        issue_context,
-                    )
-                    candidate = promote_issue_report_to_eval_candidate(
-                        {
-                            "id": report["id"],
-                            "thread_id": current_id,
-                            "category": "Chat Monitoring trace",
-                            "description": issue_description,
-                            "context": issue_context,
-                            "file_path": report["file_path"],
-                            "json_path": report["json_path"],
-                        },
-                        output_dir=MONITORING_REGRESSION_CANDIDATE_DIR,
-                    )
-                    st.success("Regression candidate draft를 저장했습니다.")
-                    st.code(candidate["json_path"], language="text")
     else:
         st.caption("상세 trace를 표시할 assistant 응답이 없습니다.")
 

@@ -13,6 +13,7 @@ from src.core.app_version import get_app_version
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEBUG_REPORT_DIR = Path(os.getenv("DEBUG_REPORT_DIR", PROJECT_ROOT / "debug"))
+ISSUE_REPORT_CONTACT_EMAIL = "btr0813@naver.com"
 
 
 def _utc_now() -> datetime:
@@ -45,12 +46,14 @@ def _format_issue_report_text(report: dict[str, Any]) -> str:
         if key not in {"conversation_messages", "recent_messages"}
     }
 
+    app_version = report.get("app_version") or get_app_version()
+    subject = f"[Finance LLM Issue][v{app_version}][Report ID: {report['id']}] {report['category']}"
     lines = [
         "Finance LLM 문제 신고",
         "====================",
         f"Report ID: {report['id']}",
         f"Created At (UTC): {report['created_at']}",
-        f"App Version: {report.get('app_version') or get_app_version()}",
+        f"App Version: {app_version}",
         f"Thread ID: {report['thread_id']}",
         f"Category: {report['category']}",
         "",
@@ -84,11 +87,99 @@ def _format_issue_report_text(report: dict[str, Any]) -> str:
         [
             "",
             "사용 안내:",
-            "- 이 파일 내용을 복사하여 이메일의 내용에 첨부해 개발자에게 전달하세요.",
+            f"- 수신: {ISSUE_REPORT_CONTACT_EMAIL}",
+            f"- 제목: {subject}",
+            "- 이 파일 내용을 복사하여 이메일 본문에 그대로 붙여넣어 개발자에게 전달하세요.",
             "- 민감정보가 포함되어 있으면 전달 전에 해당 부분을 삭제하세요.",
         ]
     )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _line_value(text: str, prefix: str) -> str:
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line.removeprefix(prefix).strip()
+    return ""
+
+
+def _section_text(text: str, section: str) -> str:
+    marker = f"{section}:"
+    lines = text.splitlines()
+    try:
+        start = lines.index(marker) + 1
+    except ValueError:
+        return ""
+    collected: list[str] = []
+    for line in lines[start:]:
+        if line.endswith(":") and line.strip() in {"Context:", "Conversation Messages:", "사용 안내:"}:
+            break
+        collected.append(line)
+    return "\n".join(collected).strip()
+
+
+def _parse_context_mapping(text: str) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    for line in _section_text(text, "Context").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- ") or ":" not in stripped:
+            continue
+        key, value = stripped[2:].split(":", 1)
+        context[key.strip()] = value.strip()
+    return context
+
+
+def _parse_json_block(lines: list[str]) -> tuple[dict[str, Any], int]:
+    collected: list[str] = []
+    for offset, line in enumerate(lines):
+        collected.append(line)
+        try:
+            parsed = json.loads("\n".join(collected))
+        except json.JSONDecodeError:
+            continue
+        return (parsed if isinstance(parsed, dict) else {}, offset + 1)
+    return {}, len(lines)
+
+
+def _parse_conversation_messages(text: str) -> list[dict[str, Any]]:
+    lines = text.splitlines()
+    messages: list[dict[str, Any]] = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].startswith("--- Message "):
+            index += 1
+            continue
+        index += 1
+        message: dict[str, Any] = {"metadata": {}, "content": ""}
+        while index < len(lines) and not lines[index].startswith("--- Message "):
+            line = lines[index]
+            if line.startswith("ID: "):
+                message["id"] = line.removeprefix("ID: ").strip()
+                index += 1
+            elif line.startswith("Role: "):
+                message["role"] = line.removeprefix("Role: ").strip()
+                index += 1
+            elif line.startswith("Created At: "):
+                message["created_at"] = line.removeprefix("Created At: ").strip()
+                index += 1
+            elif line == "Metadata:":
+                metadata, consumed = _parse_json_block(lines[index + 1 :])
+                message["metadata"] = metadata
+                index += consumed + 1
+            elif line == "Content:":
+                index += 1
+                content_lines: list[str] = []
+                while index < len(lines) and not lines[index].startswith("--- Message "):
+                    if lines[index] == "사용 안내:":
+                        break
+                    content_lines.append(lines[index])
+                    index += 1
+                message["content"] = "\n".join(content_lines).strip()
+            else:
+                index += 1
+        if message.get("role"):
+            messages.append(message)
+    return messages
 
 
 def _compact_report_metadata(metadata: dict | None) -> dict:
@@ -154,6 +245,7 @@ def create_issue_report(
         "context": context or {},
         "app_version": (context or {}).get("app_version") or get_app_version(),
         "created_at": created_at.isoformat(timespec="seconds"),
+        "source": (context or {}).get("submitted_from") or "local_chat",
     }
     report_path = report_dir / _report_file_name(report_id, created_at)
     report_path.write_text(
@@ -163,6 +255,45 @@ def create_issue_report(
     json_path = report_path.with_suffix(".json")
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"id": report_id, "file_path": str(report_path), "json_path": str(json_path)}
+
+
+def import_issue_report_text(raw_text: str, *, source: str = "email_import") -> dict[str, str]:
+    """Persist an emailed/copied issue report text as an imported local artifact."""
+    text = str(raw_text or "").strip()
+    if not text:
+        raise ValueError("issue report text is empty")
+    report_dir = Path(DEBUG_REPORT_DIR)
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    imported_at = _utc_now()
+    report_id = _line_value(text, "Report ID: ") or f"imported_{uuid.uuid4().hex[:12]}"
+    parsed_context = _parse_context_mapping(text)
+    parsed_context.update(
+        {
+            "submitted_from": source,
+            "raw_import": True,
+            "imported_at": imported_at.isoformat(timespec="seconds"),
+        }
+    )
+    conversation_messages = _parse_conversation_messages(text)
+    if conversation_messages:
+        parsed_context["conversation_messages"] = conversation_messages
+        parsed_context["conversation_message_count"] = len(conversation_messages)
+    report = {
+        "id": report_id,
+        "thread_id": _line_value(text, "Thread ID: ") or "external_email",
+        "category": _line_value(text, "Category: ") or "Imported issue report",
+        "description": _section_text(text, "Description"),
+        "context": parsed_context,
+        "app_version": _line_value(text, "App Version: ") or "unknown",
+        "created_at": _line_value(text, "Created At (UTC): ") or imported_at.isoformat(timespec="seconds"),
+        "source": source,
+    }
+    report_path = report_dir / _report_file_name(report_id, imported_at)
+    report_path.write_text(text.rstrip() + "\n", encoding="utf-8")
+    json_path = report_path.with_suffix(".json")
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"id": report_id, "file_path": str(report_path), "json_path": str(json_path), "source": source}
 
 
 def list_issue_reports(thread_id: str | None = None) -> list[dict[str, Any]]:
@@ -199,6 +330,7 @@ def list_issue_reports(thread_id: str | None = None) -> list[dict[str, Any]]:
                         "category": sidecar.get("category") or report["category"],
                         "created_at": sidecar.get("created_at") or report["created_at"],
                         "app_version": sidecar.get("app_version") or report.get("app_version"),
+                        "source": sidecar.get("source") or report.get("source"),
                         "description": sidecar.get("description"),
                         "context": sidecar.get("context") or {},
                         "json_path": str(json_path),

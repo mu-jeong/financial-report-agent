@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 import sqlite3
 
 from src.core import issue_report_store
@@ -267,7 +268,7 @@ def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch
     assert "끝부분" in saved_report
     assert "--- Message 10 ---" in saved_report
     assert '"rerank_count": 1' in saved_report
-    assert "파일 내용을 복사하여 이메일의 내용에 첨부" in saved_report
+    assert "이메일 본문에 그대로 붙여넣어" in saved_report
 
     sidecar_json = report_files[0].with_suffix(".json")
     assert sidecar_json.exists()
@@ -279,3 +280,112 @@ def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch
     assert reports[0]["description"] == "출처와 답변이 맞지 않습니다."
     assert reports[0]["context"]["thread_name"] == "테스트 대화"
     assert reports[0]["context"]["app_version"] == "0.4.0"
+
+
+def test_import_issue_report_text_persists_emailed_report_with_source(tmp_path, monkeypatch):
+    debug_dir = tmp_path / "debug"
+    monkeypatch.setattr(issue_report_store, "DEBUG_REPORT_DIR", debug_dir)
+    raw_text = """Finance LLM 문제 신고
+====================
+Report ID: emailed123
+Created At (UTC): 2026-06-28T04:53:33+00:00
+App Version: 0.4.0
+Thread ID: remote-thread
+Category: 답변 품질 문제
+
+Description:
+마지막 답변이 일부 리포트만 참고했습니다.
+
+Context:
+- submitted_from: streamlit_chat
+
+Conversation Messages:
+- 첨부된 대화 없음
+"""
+
+    imported = issue_report_store.import_issue_report_text(raw_text)
+
+    assert imported["id"] == "emailed123"
+    assert imported["source"] == "email_import"
+    assert Path(imported["file_path"]).exists()
+    reports = issue_report_store.list_issue_reports()
+    assert reports[0]["id"] == "emailed123"
+    assert reports[0]["thread_id"] == "remote-thread"
+    assert reports[0]["category"] == "답변 품질 문제"
+    assert reports[0]["app_version"] == "0.4.0"
+    assert reports[0]["source"] == "email_import"
+    assert reports[0]["description"] == "마지막 답변이 일부 리포트만 참고했습니다."
+
+
+def test_issue_report_email_guidance_uses_support_address(tmp_path, monkeypatch):
+    debug_dir = tmp_path / "debug"
+    monkeypatch.setattr(issue_report_store, "DEBUG_REPORT_DIR", debug_dir)
+
+    report = issue_report_store.create_issue_report(
+        "thread-1",
+        "검색/출처 문제",
+        "출처가 누락됐습니다.",
+        {"app_version": "0.4.0"},
+    )
+
+    text = Path(report["file_path"]).read_text(encoding="utf-8")
+    assert "btr0813@naver.com" in text
+    assert "[Finance LLM Issue][v0.4.0]" in text
+
+
+def test_import_issue_report_text_restores_conversation_messages(tmp_path, monkeypatch):
+    debug_dir = tmp_path / "debug"
+    monkeypatch.setattr(issue_report_store, "DEBUG_REPORT_DIR", debug_dir)
+    raw_text = """Finance LLM 문제 신고
+====================
+Report ID: emailed456
+Created At (UTC): 2026-06-28T04:53:33+00:00
+App Version: 0.4.0
+Thread ID: remote-thread
+Category: 답변 품질 문제
+
+Description:
+삼성전자 요약이 이상합니다.
+
+Context:
+- submitted_from: streamlit_chat
+- conversation_message_count: 2
+
+Conversation Messages:
+
+--- Message 1 ---
+ID: 1
+Role: user
+Created At: 2026-06-28T04:00:00+00:00
+Metadata:
+{}
+Content:
+올해 삼성전자 리포트 시기별로 요약해줘
+
+--- Message 2 ---
+ID: 2
+Role: assistant
+Created At: 2026-06-28T04:00:05+00:00
+Metadata:
+{
+  "status": "succeeded",
+  "route": "vectordb",
+  "search_scope": {
+    "search_filters": {"target_name": "삼성전자"},
+    "file_names": ["samsung-a.pdf"]
+  }
+}
+Content:
+일부 리포트만 요약했습니다.
+"""
+
+    issue_report_store.import_issue_report_text(raw_text)
+
+    report = issue_report_store.list_issue_reports()[0]
+    messages = report["context"]["conversation_messages"]
+    assert report["context"]["submitted_from"] == "email_import"
+    assert len(messages) == 2
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == "올해 삼성전자 리포트 시기별로 요약해줘"
+    assert messages[1]["metadata"]["route"] == "vectordb"
+    assert messages[1]["metadata"]["search_scope"]["search_filters"] == {"target_name": "삼성전자"}
