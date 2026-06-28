@@ -1,5 +1,7 @@
 ﻿# Finance LLM
 
+> Version: `0.5.0`
+
 ## Quick Start: 간편하게 실행하기
 
 Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면 설치, OpenRouter API 키 설정, 실행일 포함 이전 7일 범위(총 최대 8일)의 리포트 수집, 임베딩 생성, 웹 화면 실행까지 자동으로 진행됩니다.

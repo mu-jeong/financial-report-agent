@@ -1314,15 +1314,21 @@ def summarize_data_integrity(status: dict[str, Any]) -> dict[str, Any]:
 
 def build_monitoring_tab_labels() -> list[str]:
     return [
-        "데이터/설정",
-        "미임베딩 문서",
-        "실험 실행",
-        "고정 테스트셋",
-        "Parsing engines",
-        "전체 Monitoring",
+        "운영 상태",
+        "평가/실험",
+        "이슈/회귀",
         "Chat Monitoring",
-        "Issue reports",
     ]
+
+
+def build_global_monitoring_section_labels(category: str) -> list[str]:
+    """Return second-level tabs for the selected global monitoring category."""
+    sections = {
+        "운영 상태": ["데이터 상태", "임베딩 누락 문서", "전체 응답 품질"],
+        "평가/실험": ["고정 평가셋", "실험 실행", "Parsing 비교"],
+        "이슈/회귀": ["이슈 신고/회귀 후보"],
+    }
+    return sections.get(category, [])
 
 
 def build_monitoring_page_labels() -> list[str]:

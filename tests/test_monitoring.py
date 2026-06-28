@@ -19,6 +19,7 @@ from src.core.monitoring import (
     build_evaluation_failure_actions,
     filter_evaluation_runs_by_mode,
     build_message_monitoring_rows,
+    build_global_monitoring_section_labels,
     build_monitoring_tab_labels,
     compare_evaluation_runs,
     compact_graph_monitoring_metadata,
@@ -641,15 +642,17 @@ def test_summarize_data_integrity_flags_missing_indexes_and_pending_embeddings()
 
 def test_monitoring_tab_labels_separate_global_and_chat_monitoring():
     assert build_monitoring_tab_labels() == [
-        "데이터/설정",
-        "미임베딩 문서",
-        "실험 실행",
-        "고정 테스트셋",
-        "Parsing engines",
-        "전체 Monitoring",
+        "운영 상태",
+        "평가/실험",
+        "이슈/회귀",
         "Chat Monitoring",
-        "Issue reports",
     ]
+
+
+def test_global_monitoring_section_labels_group_related_pages():
+    assert build_global_monitoring_section_labels("운영 상태") == ["데이터 상태", "임베딩 누락 문서", "전체 응답 품질"]
+    assert build_global_monitoring_section_labels("평가/실험") == ["고정 평가셋", "실험 실행", "Parsing 비교"]
+    assert build_global_monitoring_section_labels("이슈/회귀") == ["이슈 신고/회귀 후보"]
 
 def test_promote_issue_report_to_eval_candidate_saves_regression_candidate(tmp_path):
     candidate = promote_issue_report_to_eval_candidate(

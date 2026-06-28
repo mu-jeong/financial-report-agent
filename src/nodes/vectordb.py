@@ -1,4 +1,5 @@
 import os
+import sqlite3
 from collections import Counter
 from datetime import datetime
 
@@ -6,6 +7,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
 from src.configs.config import (
+    DB_PATH,
     FAISS_DIR,
     RECENCY_WEIGHT,
     RERANK_CANDIDATE_MULTIPLIER,
@@ -113,6 +115,111 @@ def _file_name_for_passage(passage: dict) -> str | None:
     if not file_name or file_name == "-":
         return None
     return str(file_name)
+
+
+def _report_universe_query(filters: dict | None) -> tuple[str, list]:
+    filters = filters or {}
+    clauses = ["is_embedded = 1"]
+    params: list = []
+    for column in ("report_type", "target_name", "broker"):
+        if filters.get(column):
+            clauses.append(f"{column} = ?")
+            params.append(filters[column])
+    if filters.get("report_date_start"):
+        clauses.append("report_date >= ?")
+        params.append(filters["report_date_start"])
+    if filters.get("report_date_end"):
+        clauses.append("report_date <= ?")
+        params.append(filters["report_date_end"])
+    where_sql = " AND ".join(clauses)
+    return (
+        "SELECT report_date, report_type, target_name, broker, title, file_name, is_embedded "
+        f"FROM reports WHERE {where_sql} ORDER BY report_date ASC, broker ASC, title ASC, file_name ASC",
+        params,
+    )
+
+
+def fetch_report_universe_for_filters(filters: dict | None) -> list[dict]:
+    """Return embedded report metadata rows used to plan broad temporal summaries."""
+    query, params = _report_universe_query(filters)
+    db_uri = f"file:{os.path.abspath(DB_PATH)}?mode=ro"
+    conn = sqlite3.connect(db_uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def _month_bucket(report_date: object) -> str:
+    value = str(report_date or "")
+    return value[:7] if len(value) >= 7 else "unknown"
+
+
+def build_temporal_preflight_plan(rows: list[dict], *, max_files: int = SEARCH_TOP_K) -> dict:
+    """Select file coverage for date-bounded target summaries after RDB preflight."""
+    ordered_rows = sorted(
+        [row for row in rows if row.get("file_name")],
+        key=lambda row: (
+            str(row.get("report_date") or ""),
+            str(row.get("broker") or ""),
+            str(row.get("title") or ""),
+            str(row.get("file_name") or ""),
+        ),
+    )
+    all_files = list(dict.fromkeys(str(row["file_name"]) for row in ordered_rows))
+    buckets: dict[str, list[dict]] = {}
+    for row in ordered_rows:
+        buckets.setdefault(_month_bucket(row.get("report_date")), []).append(row)
+
+    if len(all_files) <= max_files:
+        selected_files = all_files
+        selection_reason = "all_files_within_search_top_k"
+    else:
+        selected_files = []
+        seen: set[str] = set()
+        for bucket in sorted(buckets):
+            for row in buckets[bucket]:
+                file_name = str(row["file_name"])
+                if file_name in seen:
+                    continue
+                selected_files.append(file_name)
+                seen.add(file_name)
+                break
+            if len(selected_files) >= max_files:
+                break
+        selection_reason = "month_bucket_representatives"
+
+    return {
+        "file_names": selected_files,
+        "rows": ordered_rows,
+        "metrics": {
+            "preflight_file_count": len(all_files),
+            "preflight_row_count": len(ordered_rows),
+            "selected_file_count": len(selected_files),
+            "bucket_by": "month",
+            "bucket_count": len(buckets),
+            "selection_reason": selection_reason,
+        },
+    }
+
+
+def _format_temporal_preflight_context(plan: dict) -> str:
+    rows = plan.get("rows") or []
+    if not rows:
+        return ""
+    lines = ["\n[검색 대상 리포트 목록 - RDB preflight]"]
+    for row in rows:
+        lines.append(
+            "- "
+            f"{row.get('report_date', '-')} | {row.get('broker', '-')} | "
+            f"{row.get('title', '-')} | {row.get('file_name', '-')}"
+        )
+    lines.append(
+        "위 목록은 기간/종목 조건에 맞는 임베딩 완료 리포트 universe입니다. "
+        "답변에서는 이 전체 범위를 먼저 밝히고, 제공된 본문 문맥은 시기별 대표/선택 문서 기준임을 명시하세요."
+    )
+    return "\n".join(lines) + "\n"
 
 
 def ensure_document_coverage(
@@ -408,10 +515,23 @@ def select_top_passages(
 def vectordb_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
     search_filters = state.get("search_filters") or infer_search_filters(query)
+    retrieval_plan = state.get("retrieval_plan") or {}
+    temporal_preflight_plan = None
+    if retrieval_plan.get("type") == "temporal_report_set_summary":
+        preflight_rows = fetch_report_universe_for_filters(search_filters)
+        temporal_preflight_plan = build_temporal_preflight_plan(
+            preflight_rows,
+            max_files=SEARCH_TOP_K,
+        )
+        if temporal_preflight_plan.get("file_names"):
+            search_filters = dict(search_filters)
+            search_filters["file_names"] = temporal_preflight_plan["file_names"]
     temporal_context = state.get("temporal_context")
     temporal_context_text = ""
     if temporal_context:
         temporal_context_text = f"\n[상대 날짜 해석]\n{temporal_context['description']}\n"
+    if temporal_preflight_plan:
+        temporal_context_text += _format_temporal_preflight_context(temporal_preflight_plan)
     selection_context = state.get("selection_context")
     if selection_context:
         temporal_context_text += f"\n[검색 대상 선정 근거]\n{selection_context}\n"
@@ -464,6 +584,10 @@ def vectordb_node(state: State) -> dict:
         "search_top_k": SEARCH_TOP_K,
         "use_reranker": USE_RERANKER,
     }
+    if retrieval_plan:
+        retrieval_metrics["retrieval_plan"] = retrieval_plan
+    if temporal_preflight_plan:
+        retrieval_metrics["temporal_preflight"] = temporal_preflight_plan["metrics"]
     if prior_required_file_names:
         retrieval_metrics["prior_scope_required_file_names"] = prior_required_file_names
         retrieval_metrics["prior_scope_required_file_count"] = len(prior_required_file_names)

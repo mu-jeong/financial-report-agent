@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from src.core.followup_scope import resolve_section_followup_scope
 from src.core.metadata_filters import get_metadata_candidates, infer_search_filters, resolve_temporal_context
 from src.graphs.state import State
@@ -23,6 +25,17 @@ TOP_TARGET_KEYWORDS = ("가장 많이", "최다", "많이 발간", "많이 언�
 TARGET_SCOPE_KEYWORDS = ("회사", "종목", "기업", "target")
 FULL_PERIOD_KEYWORDS = ("전체 기간", "전체기간", "전 기간", "전기간", "전체 데이터", "full period", "all period", "all time")
 INDUSTRY_COMPANY_KEYWORDS = ("섹터", "분야", "업종", "관련주", "관련 기업", "관련 회사")
+TEMPORAL_REPORT_SET_KEYWORDS = (
+    "시기별",
+    "월별",
+    "분기별",
+    "기간별",
+    "흐름",
+    "추이",
+    "변화",
+)
+LONG_PERIOD_SUMMARY_KEYWORDS = ("정리", "요약")
+LONG_PERIOD_MIN_DAYS = 60
 
 
 def _normalize_text(value: str) -> str:
@@ -47,6 +60,40 @@ def _has_valid_date_range(filters: dict | None) -> bool:
     start = filters.get("report_date_start")
     end = filters.get("report_date_end")
     return bool(start and end and str(start) <= str(end))
+
+
+def _date_span_days(filters: dict | None) -> int:
+    filters = filters or {}
+    try:
+        start = datetime.strptime(str(filters.get("report_date_start")), "%Y-%m-%d").date()
+        end = datetime.strptime(str(filters.get("report_date_end")), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return 0
+    return max((end - start).days, 0)
+
+
+def build_retrieval_plan(question: str, filters: dict | None, *, has_vector_intent: bool) -> dict | None:
+    """Choose a VectorDB-internal retrieval strategy for broad temporal summaries."""
+    if not has_vector_intent or not _has_valid_date_range(filters):
+        return None
+    filters = filters or {}
+    if not filters.get("target_name"):
+        return None
+    normalized = _normalize_text(question)
+    explicit_temporal_breakdown = any(
+        _normalize_text(keyword) in normalized for keyword in TEMPORAL_REPORT_SET_KEYWORDS
+    )
+    long_period_summary = (
+        _date_span_days(filters) >= LONG_PERIOD_MIN_DAYS
+        and any(_normalize_text(keyword) in normalized for keyword in LONG_PERIOD_SUMMARY_KEYWORDS)
+    )
+    if not explicit_temporal_breakdown and not long_period_summary:
+        return None
+    return {
+        "type": "temporal_report_set_summary",
+        "preflight": "rdb_file_universe",
+        "bucket_by": "month",
+    }
 
 
 def _industry_lookup_term(text: str) -> str | None:
@@ -285,6 +332,13 @@ def search_scope_node(state: State) -> dict:
             "full_period_request": full_period_request,
         },
     }
+    retrieval_plan = build_retrieval_plan(
+        combined_intent_text,
+        search_filters,
+        has_vector_intent=has_vector_intent,
+    )
+    if retrieval_plan is not None:
+        result["retrieval_plan"] = retrieval_plan
     if scope_selection_request is not None:
         result["scope_selection_request"] = scope_selection_request
     if scope_decision is not None:

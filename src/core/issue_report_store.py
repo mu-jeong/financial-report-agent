@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.core.app_version import get_app_version
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEBUG_REPORT_DIR = Path(os.getenv("DEBUG_REPORT_DIR", PROJECT_ROOT / "debug"))
 
@@ -48,6 +50,7 @@ def _format_issue_report_text(report: dict[str, Any]) -> str:
         "====================",
         f"Report ID: {report['id']}",
         f"Created At (UTC): {report['created_at']}",
+        f"App Version: {report.get('app_version') or get_app_version()}",
         f"Thread ID: {report['thread_id']}",
         f"Category: {report['category']}",
         "",
@@ -114,6 +117,7 @@ def build_issue_report_context(
         "thread_id": thread["id"],
         "thread_name": thread["name"],
         "submitted_from": "streamlit_chat",
+        "app_version": get_app_version(),
         "conversation_message_count": len(messages) if include_conversation else 0,
     }
     if include_conversation:
@@ -148,6 +152,7 @@ def create_issue_report(
         "category": category,
         "description": description,
         "context": context or {},
+        "app_version": (context or {}).get("app_version") or get_app_version(),
         "created_at": created_at.isoformat(timespec="seconds"),
     }
     report_path = report_dir / _report_file_name(report_id, created_at)
@@ -193,6 +198,7 @@ def list_issue_reports(thread_id: str | None = None) -> list[dict[str, Any]]:
                         "thread_id": sidecar.get("thread_id") or report["thread_id"],
                         "category": sidecar.get("category") or report["category"],
                         "created_at": sidecar.get("created_at") or report["created_at"],
+                        "app_version": sidecar.get("app_version") or report.get("app_version"),
                         "description": sidecar.get("description"),
                         "context": sidecar.get("context") or {},
                         "json_path": str(json_path),
@@ -207,6 +213,8 @@ def list_issue_reports(thread_id: str | None = None) -> list[dict[str, Any]]:
                 report["category"] = report["category"] or line.removeprefix("Category: ").strip()
             elif line.startswith("Created At (UTC): "):
                 report["created_at"] = report["created_at"] or line.removeprefix("Created At (UTC): ").strip()
+            elif line.startswith("App Version: "):
+                report["app_version"] = report.get("app_version") or line.removeprefix("App Version: ").strip()
         if thread_id is not None and report.get("thread_id") != thread_id:
             continue
         reports.append(report)

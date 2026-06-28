@@ -68,6 +68,7 @@ list_regression_candidates = monitoring.list_regression_candidates
 build_message_monitoring_rows = monitoring.build_message_monitoring_rows
 build_message_trace_detail = monitoring.build_message_trace_detail
 build_message_trace_summary = monitoring.build_message_trace_summary
+build_global_monitoring_section_labels = monitoring.build_global_monitoring_section_labels
 build_monitoring_page_labels = monitoring.build_monitoring_page_labels
 build_monitoring_tab_labels = monitoring.build_monitoring_tab_labels
 build_response_diff = monitoring.build_response_diff
@@ -1765,7 +1766,7 @@ def _render_issue_report_monitoring() -> None:
     st.dataframe(candidate_rows, use_container_width=True, hide_index=True)
     draft_candidates = [candidate for candidate in candidates if candidate.get("eval_case_draft")]
     if not draft_candidates:
-        st.info("아직 evaluation case draft가 있는 candidate가 없습니다. Chat Monitoring trace issue를 후보로 저장하면 draft가 생성됩니다.")
+        st.info("아직 evaluation case draft가 있는 candidate가 없습니다. Chat Monitoring에서 응답 trace를 선택한 뒤 'Save selected trace as regression candidate'를 누르면 draft가 생성됩니다.")
         return
 
     candidate_ids = [str(candidate.get("id")) for candidate in draft_candidates]
@@ -1906,21 +1907,52 @@ def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
                 with st.expander("Answer / citations", expanded=False):
                     st.json(detail["answer"])
 
-            if st.button(
-                "Create issue report with selected trace",
-                key=f"chat_monitoring_issue_report_{current_id}_{selected_message_id}",
-            ):
-                report = create_issue_report(
-                    current_id,
-                    "Chat Monitoring trace",
-                    "Selected response trace from Chat Monitoring",
-                    build_chat_trace_issue_context(
-                        current_thread,
-                        messages,
-                        selected_message_id=selected_message_id,
-                    ),
-                )
-                st.success(f"Issue report saved: {report['file_path']}")
+            issue_context = build_chat_trace_issue_context(
+                current_thread,
+                messages,
+                selected_message_id=selected_message_id,
+            )
+            issue_description = "Selected response trace from Chat Monitoring"
+            issue_col, candidate_col = st.columns(2)
+            with issue_col:
+                if st.button(
+                    "Create issue report with selected trace",
+                    key=f"chat_monitoring_issue_report_{current_id}_{selected_message_id}",
+                    use_container_width=True,
+                ):
+                    report = create_issue_report(
+                        current_id,
+                        "Chat Monitoring trace",
+                        issue_description,
+                        issue_context,
+                    )
+                    st.success(f"Issue report saved: {report['file_path']}")
+            with candidate_col:
+                if st.button(
+                    "Save selected trace as regression candidate",
+                    key=f"chat_monitoring_regression_candidate_{current_id}_{selected_message_id}",
+                    use_container_width=True,
+                ):
+                    report = create_issue_report(
+                        current_id,
+                        "Chat Monitoring trace",
+                        issue_description,
+                        issue_context,
+                    )
+                    candidate = promote_issue_report_to_eval_candidate(
+                        {
+                            "id": report["id"],
+                            "thread_id": current_id,
+                            "category": "Chat Monitoring trace",
+                            "description": issue_description,
+                            "context": issue_context,
+                            "file_path": report["file_path"],
+                            "json_path": report["json_path"],
+                        },
+                        output_dir=MONITORING_REGRESSION_CANDIDATE_DIR,
+                    )
+                    st.success("Regression candidate draft를 저장했습니다.")
+                    st.code(candidate["json_path"], language="text")
     else:
         st.caption("상세 trace를 표시할 assistant 응답이 없습니다.")
 
@@ -2003,117 +2035,122 @@ def render_global_monitoring_page() -> None:
     db_status = status["db"]
     vector_status = status["vector_db"]
     config = status["config"]
+    category_labels = [label for label in build_monitoring_tab_labels() if label != "Chat Monitoring"]
+    category = st.radio(
+        "Monitoring category",
+        category_labels,
+        horizontal=True,
+        key="global_monitoring_category",
+    )
+    section_labels = build_global_monitoring_section_labels(category)
 
-    (
-        data_tab,
-        unembedded_tab,
-        experiment_tab,
-        eval_tab,
-        parsing_tab,
-        global_monitoring_tab,
-        issue_tab,
-    ) = st.tabs([label for label in build_monitoring_tab_labels() if label != "Chat Monitoring"])
+    if category == "운영 상태":
+        data_tab, unembedded_tab, global_monitoring_tab = st.tabs(section_labels)
 
-    with data_tab:
-        st.subheader("데이터 준비 상태")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("리포트", f"{db_status['total_reports']}건")
-        col2.metric("임베딩 완료", f"{db_status['embedded_reports']}건")
-        col3.metric("미완료", f"{db_status['pending_reports']}건")
-        col4.metric("검색 커버리지", f"{status['search_coverage_ratio'] * 100:.1f}%")
+        with data_tab:
+            st.subheader("데이터 준비 상태")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("리포트", f"{db_status['total_reports']}건")
+            col2.metric("임베딩 완료", f"{db_status['embedded_reports']}건")
+            col3.metric("미완료", f"{db_status['pending_reports']}건")
+            col4.metric("검색 커버리지", f"{status['search_coverage_ratio'] * 100:.1f}%")
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("FAISS", "있음" if vector_status["has_faiss_index"] else "없음")
-        col2.metric("Vector files", f"{vector_status['file_count']}개")
-        col3.metric("Parent chunks", f"{db_status['parent_chunks']}건")
-        col4.metric("PDF", f"{status['downloaded_pdfs']}개")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("FAISS", "있음" if vector_status["has_faiss_index"] else "없음")
+            col2.metric("Vector files", f"{vector_status['file_count']}개")
+            col3.metric("Parent chunks", f"{db_status['parent_chunks']}건")
+            col4.metric("PDF", f"{status['downloaded_pdfs']}개")
 
-        st.subheader("현재 파이프라인 설정")
-        st.json(
-            {
-                "generation_model": config["generation_model"],
-                "embedding_model": config["embedding_model"],
-                "extraction_engine": config["extraction_engine"],
-                "unembedded_extraction_engine": config.get("unembedded_extraction_engine"),
-                "use_parent_child": config["use_parent_child"],
-                "use_reranker": config["use_reranker"],
-                "search_top_k": config["search_top_k"],
-                "test_limit": config["test_limit"],
-            }
-        )
-
-        st.subheader("날짜별 데이터 캘린더 원천")
-        date_counts = [
-            {
-                "report_date": report_date,
-                "embedded_count": count,
-                **(db_status.get("report_date_type_counts") or {}).get(report_date, {}),
-            }
-            for report_date, count in (db_status.get("report_date_counts") or {}).items()
-        ]
-        st.dataframe(date_counts, use_container_width=True, hide_index=True)
-
-    with unembedded_tab:
-        _render_unembedded_reports(status)
-
-    with experiment_tab:
-        _render_experiment_monitoring()
-
-    with eval_tab:
-        st.subheader("고정 평가 테스트셋")
-        try:
-            dataset = load_evaluation_dataset()
-            summary = summarize_evaluation_dataset(dataset)
-        except FileNotFoundError:
-            st.warning("평가셋 fixture를 찾지 못했습니다: tests/fixtures/evaluation_dataset.json")
-            return
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Version", summary["version"])
-        col2.metric("Cases", summary["case_count"])
-        col3.metric("Expected sources", summary["expected_source_count"])
-        col4.metric("Snapshot", summary["snapshot_date"] or "-")
-
-        stability_policy = summary.get("stability_policy") or {}
-        st.info(
-            "테스트셋은 변경 사유가 생기기 전까지 고정합니다. "
-            f"정책: `{stability_policy.get('policy', '-')}`"
-        )
-
-        left, right = st.columns(2)
-        with left:
-            st.markdown("#### Route case coverage")
-            st.dataframe(_case_type_rows(summary), use_container_width=True, hide_index=True)
-        with right:
-            st.markdown("#### Monitoring dimensions")
-            st.dataframe(_dimension_rows(summary), use_container_width=True, hide_index=True)
-
-        with st.expander("변경 허용 사유"):
-            st.write(stability_policy.get("allowed_change_reasons") or [])
-        with st.expander("평가 케이스 목록"):
-            st.dataframe(
-                [
-                    {
-                        "id": case.get("id"),
-                        "type": case.get("type"),
-                        "route": case.get("expected_route"),
-                        "dimensions": ", ".join(case.get("monitoring_dimensions", [])),
-                        "question": case.get("question"),
-                    }
-                    for case in dataset.get("cases", [])
-                ],
-                use_container_width=True,
-                hide_index=True,
+            st.subheader("현재 파이프라인 설정")
+            st.json(
+                {
+                    "generation_model": config["generation_model"],
+                    "embedding_model": config["embedding_model"],
+                    "extraction_engine": config["extraction_engine"],
+                    "unembedded_extraction_engine": config.get("unembedded_extraction_engine"),
+                    "use_parent_child": config["use_parent_child"],
+                    "use_reranker": config["use_reranker"],
+                    "search_top_k": config["search_top_k"],
+                    "test_limit": config["test_limit"],
+                }
             )
 
-    with parsing_tab:
-        _render_parsing_engine_evaluation()
+            st.subheader("날짜별 데이터 캘린더 원천")
+            date_counts = [
+                {
+                    "report_date": report_date,
+                    "embedded_count": count,
+                    **(db_status.get("report_date_type_counts") or {}).get(report_date, {}),
+                }
+                for report_date, count in (db_status.get("report_date_counts") or {}).items()
+            ]
+            st.dataframe(date_counts, use_container_width=True, hide_index=True)
 
-    with global_monitoring_tab:
-        _render_global_monitoring(status)
+        with unembedded_tab:
+            _render_unembedded_reports(status)
 
-    with issue_tab:
-        _render_issue_report_monitoring()
+        with global_monitoring_tab:
+            _render_global_monitoring(status)
+        return
+
+    if category == "평가/실험":
+        eval_tab, experiment_tab, parsing_tab = st.tabs(section_labels)
+
+        with eval_tab:
+            st.subheader("고정 평가 테스트셋")
+            try:
+                dataset = load_evaluation_dataset()
+                summary = summarize_evaluation_dataset(dataset)
+            except FileNotFoundError:
+                st.warning("평가셋 fixture를 찾지 못했습니다: tests/fixtures/evaluation_dataset.json")
+                return
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Version", summary["version"])
+            col2.metric("Cases", summary["case_count"])
+            col3.metric("Expected sources", summary["expected_source_count"])
+            col4.metric("Snapshot", summary["snapshot_date"] or "-")
+
+            stability_policy = summary.get("stability_policy") or {}
+            st.info(
+                "테스트셋은 변경 사유가 생기기 전까지 고정합니다. "
+                f"정책: `{stability_policy.get('policy', '-')}`"
+            )
+
+            left, right = st.columns(2)
+            with left:
+                st.markdown("#### Route case coverage")
+                st.dataframe(_case_type_rows(summary), use_container_width=True, hide_index=True)
+            with right:
+                st.markdown("#### Monitoring dimensions")
+                st.dataframe(_dimension_rows(summary), use_container_width=True, hide_index=True)
+
+            with st.expander("변경 허용 사유"):
+                st.write(stability_policy.get("allowed_change_reasons") or [])
+            with st.expander("평가 케이스 목록"):
+                st.dataframe(
+                    [
+                        {
+                            "id": case.get("id"),
+                            "type": case.get("type"),
+                            "route": case.get("expected_route"),
+                            "dimensions": ", ".join(case.get("monitoring_dimensions", [])),
+                            "question": case.get("question"),
+                        }
+                        for case in dataset.get("cases", [])
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        with experiment_tab:
+            _render_experiment_monitoring()
+
+        with parsing_tab:
+            _render_parsing_engine_evaluation()
+        return
+
+    _render_issue_report_monitoring()
 
 
 threads = _load_threads()

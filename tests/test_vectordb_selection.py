@@ -1,6 +1,7 @@
 from langchain_core.documents import Document
 
 from src.nodes.vectordb import (
+    build_temporal_preflight_plan,
     ensure_document_coverage,
     required_file_names_from_prior_scope,
     select_top_passages,
@@ -336,3 +337,35 @@ def test_select_top_passages_applies_document_coverage_for_section_followup(monk
         "document_coverage_applied": True,
         "document_coverage_reason": "section_followup_scope",
     }
+
+
+def test_build_temporal_preflight_plan_uses_all_files_when_within_top_k():
+    rows = [
+        {"report_date": "2026-01-10", "file_name": "samsung-jan.pdf", "is_embedded": 1},
+        {"report_date": "2026-02-20", "file_name": "samsung-feb.pdf", "is_embedded": 1},
+    ]
+
+    plan = build_temporal_preflight_plan(rows, max_files=3)
+
+    assert plan["file_names"] == ["samsung-jan.pdf", "samsung-feb.pdf"]
+    assert plan["metrics"]["preflight_file_count"] == 2
+    assert plan["metrics"]["selected_file_count"] == 2
+    assert plan["metrics"]["selection_reason"] == "all_files_within_search_top_k"
+
+
+def test_build_temporal_preflight_plan_selects_month_representatives_when_over_top_k():
+    rows = [
+        {"report_date": "2026-01-10", "file_name": "samsung-jan-a.pdf", "is_embedded": 1},
+        {"report_date": "2026-01-20", "file_name": "samsung-jan-b.pdf", "is_embedded": 1},
+        {"report_date": "2026-02-15", "file_name": "samsung-feb.pdf", "is_embedded": 1},
+        {"report_date": "2026-03-15", "file_name": "samsung-mar.pdf", "is_embedded": 1},
+    ]
+
+    plan = build_temporal_preflight_plan(rows, max_files=3)
+
+    assert plan["file_names"] == ["samsung-jan-a.pdf", "samsung-feb.pdf", "samsung-mar.pdf"]
+    assert plan["metrics"]["preflight_file_count"] == 4
+    assert plan["metrics"]["selected_file_count"] == 3
+    assert plan["metrics"]["bucket_by"] == "month"
+    assert plan["metrics"]["bucket_count"] == 3
+    assert plan["metrics"]["selection_reason"] == "month_bucket_representatives"

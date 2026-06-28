@@ -16,6 +16,7 @@ class State(TypedDict):
     scope_source: Optional[str]  # search_filters가 이전 검색 범위에서 온 경우의 출처 표시
     selection_context: Optional[dict]  # DB aggregation에서 선택된 대상/범위 컨텍스트
     routing_context: Optional[dict]  # search_scope_node가 router에 전달하는 결정 힌트
+    retrieval_plan: Optional[dict]  # VectorDB 경로 내부의 검색 전략(preflight/bucket 등)
     scope_selection_request: Optional[dict]  # 조건부 scope_selection_node 실행 요청
     scope_decision: Optional[dict]  # 후속 질문을 위한 이전 답변 섹션/범위 매칭 결정
     scope_prepare: Optional[dict]  # rewritten_query 생성 전 병렬 범위 준비 결과

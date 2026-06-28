@@ -1114,3 +1114,74 @@ def test_search_scope_full_period_followup_keeps_prior_target_and_drops_dates():
         "target_name": "top-company",
         "report_type": "company",
     }
+
+
+def test_search_scope_marks_long_period_target_summary_for_temporal_retrieval_plan(monkeypatch):
+    def fake_infer_search_filters(query):
+        return {
+            "target_name": "삼성전자",
+            "report_type": "company",
+            "report_date_start": "2026-01-01",
+            "report_date_end": "2026-12-31",
+        }
+
+    def fake_resolve_temporal_context(query):
+        return {
+            "expression": "올해",
+            "report_date_start": "2026-01-01",
+            "report_date_end": "2026-12-31",
+            "current_date": "2026-06-28",
+            "description": "올해=2026-01-01~2026-12-31",
+        }
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", fake_resolve_temporal_context)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "올해 발간된 삼성전자 리포트에 대해 시기별로 요약해서 정리해줘",
+            "rewritten_query": "올해 발간된 삼성전자 리포트에 대해 시기별로 요약해서 정리해줘",
+            "followup_scope_intent": False,
+            "prior_search_scope": None,
+        }
+    )
+
+    assert result["routing_context"]["has_vector_intent"] is True
+    assert result["retrieval_plan"] == {
+        "type": "temporal_report_set_summary",
+        "preflight": "rdb_file_universe",
+        "bucket_by": "month",
+    }
+
+
+def test_search_scope_does_not_mark_short_period_target_summary_for_temporal_plan(monkeypatch):
+    def fake_infer_search_filters(query):
+        return {
+            "target_name": "삼성전자",
+            "report_type": "company",
+            "report_date_start": "2026-06-22",
+            "report_date_end": "2026-06-28",
+        }
+
+    def fake_resolve_temporal_context(query):
+        return {
+            "expression": "이번주",
+            "report_date_start": "2026-06-22",
+            "report_date_end": "2026-06-28",
+            "current_date": "2026-06-28",
+            "description": "이번주=2026-06-22~2026-06-28",
+        }
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", fake_resolve_temporal_context)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "이번주 삼성전자 리포트 요약해줘",
+            "rewritten_query": "이번주 삼성전자 리포트 요약해줘",
+            "followup_scope_intent": False,
+            "prior_search_scope": None,
+        }
+    )
+
+    assert "retrieval_plan" not in result
