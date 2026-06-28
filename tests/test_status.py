@@ -258,7 +258,7 @@ def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch
 
     saved_report = report_files[0].read_text(encoding="utf-8")
     assert f"Report ID: {report_result['id']}" in saved_report
-    assert "App Version: 0.5.0" in saved_report
+    assert "App Version: 0.4.0" in saved_report
     assert "Thread ID: thread-1" in saved_report
     assert "Category: 답변 품질 문제" in saved_report
     assert "출처와 답변이 맞지 않습니다." in saved_report
@@ -274,8 +274,8 @@ def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch
 
     reports = issue_report_store.list_issue_reports("thread-1")
     assert reports[0]["id"] == report_result["id"]
-    assert reports[0]["app_version"] == "0.5.0"
+    assert reports[0]["app_version"] == "0.4.0"
     assert reports[0]["file_path"].endswith(".txt")
     assert reports[0]["description"] == "출처와 답변이 맞지 않습니다."
     assert reports[0]["context"]["thread_name"] == "테스트 대화"
-    assert reports[0]["context"]["app_version"] == "0.5.0"
+    assert reports[0]["context"]["app_version"] == "0.4.0"
