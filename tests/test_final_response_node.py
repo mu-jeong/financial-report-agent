@@ -42,10 +42,7 @@ def test_final_response_node_returns_only_new_message_delta(monkeypatch):
 
     assert result["generation"] == "도구 결과를 반영한 최종 답변"
     assert result["messages"] == [AIMessage(content="도구 결과를 반영한 최종 답변")]
-    assert result["chat_history"] == [
-        ("사용자", "삼성전자 리포트와 현재 주가를 알려줘"),
-        ("AI", "도구 결과를 반영한 최종 답변"),
-    ]
+    assert "chat_history" not in result
 
 
 def test_final_response_node_uses_existing_generation_without_messages():
@@ -59,7 +56,6 @@ def test_final_response_node_uses_existing_generation_without_messages():
 
     assert result == {
         "generation": "총 10건입니다.",
-        "chat_history": [("사용자", "저장된 리포트 수는?"), ("AI", "총 10건입니다.")],
     }
 
 

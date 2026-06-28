@@ -422,6 +422,51 @@ def test_search_scope_broker_followup_preserves_prior_target_and_files(monkeypat
     }
 
 
+def test_search_scope_new_target_drops_stale_prior_broker_and_file_scope(monkeypatch):
+    def fake_infer_search_filters(query):
+        if "DL이앤씨" in query:
+            return {"target_name": "DL이앤씨", "report_type": "company"}
+        return {}
+
+    monkeypatch.setattr(search_scope, "infer_search_filters", fake_infer_search_filters)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "DL이앤씨에 대해서도 좀 더 자세히 알려줘",
+            "rewritten_query": "DL이앤씨에 대해서도 좀 더 자세히 알려줘",
+            "chat_history": [],
+            "followup_scope_intent": False,
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-28",
+                    "target_name": "SK하이닉스",
+                    "report_type": "company",
+                    "broker": "하나증권",
+                },
+                "temporal_context": {
+                    "expression": "이번주",
+                    "report_date_start": "2026-06-22",
+                    "report_date_end": "2026-06-28",
+                },
+                "file_names": [
+                    "company_2026-06-26_SK하이닉스_하나증권_실적과 멀티플 둘 다 열려 있다.pdf"
+                ],
+            },
+        }
+    )
+
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-28",
+        "target_name": "DL이앤씨",
+        "report_type": "company",
+    }
+
+
 def test_search_scope_sticky_thread_scope_merges_current_target_without_detail_keywords(monkeypatch):
     def fake_infer_search_filters(query):
         if "sk하이닉스" in query.casefold():

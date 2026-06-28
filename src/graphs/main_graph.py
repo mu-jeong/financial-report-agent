@@ -78,7 +78,6 @@ def final_response_node(state: State) -> dict:
         answer = remove_unavailable_citations(str(answer), source_count=source_count)
         result = {
             "generation": answer,
-            "chat_history": [("사용자", state["question"]), ("AI", answer)],
         }
         if active_scope := build_active_scope_from_state(state):
             result["active_scope"] = active_scope
@@ -104,7 +103,6 @@ def final_response_node(state: State) -> dict:
 
     result = {
         "generation": answer,
-        "chat_history": [("사용자", state["question"]), ("AI", answer)],
     }
     if message_delta:
         result["messages"] = message_delta

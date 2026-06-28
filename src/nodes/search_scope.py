@@ -149,6 +149,27 @@ def _drop_incompatible_target_filter(filters: dict) -> dict:
     return cleaned
 
 
+def _merge_prior_filters_with_current(prior_filters: dict, current_filters: dict) -> dict:
+    """Merge current explicit filters into thread scope without stale refinements.
+
+    A prior drill-down can contain narrow refinements such as broker/file scope.
+    When the next question explicitly switches to a different target, keep the
+    durable period/report-type context but do not carry over the prior broker.
+    """
+    merged = dict(prior_filters or {})
+    current = dict(current_filters or {})
+    prior_target = merged.get("target_name")
+    current_target = current.get("target_name")
+    if current_target and prior_target and current_target != prior_target:
+        if "broker" not in current:
+            merged.pop("broker", None)
+        merged.pop("file_names", None)
+    merged.update(current)
+    if "target_name" in current:
+        merged.pop("file_names", None)
+    return merged
+
+
 def search_scope_node(state: State) -> dict:
     """Resolve deterministic retrieval scope before route selection.
 
@@ -216,7 +237,7 @@ def search_scope_node(state: State) -> dict:
                 search_filters = section_decision["search_filters"]
                 scope_decision = section_decision
             else:
-                prior_filters.update(current_non_temporal_filters)
+                prior_filters = _merge_prior_filters_with_current(prior_filters, current_non_temporal_filters)
                 if current_temporal_context and not full_period_request:
                     prior_filters["report_date_start"] = current_temporal_context["report_date_start"]
                     prior_filters["report_date_end"] = current_temporal_context["report_date_end"]

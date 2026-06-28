@@ -419,7 +419,7 @@ def vectordb_node(state: State) -> dict:
     if not os.path.exists(FAISS_DIR):
         msg = "faiss_db/ 폴더가 없어 검색을 진행할 수 없습니다. 먼저 임베딩 파이프라인을 실행해 주세요."
         logger.warning(msg)
-        return {"generation": msg, "chat_history": [("사용자", state["question"]), ("AI", msg)]}
+        return {"generation": msg}
 
     embeddings_fn = build_embeddings_fn()
     faiss_store = FAISS.load_local(

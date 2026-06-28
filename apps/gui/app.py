@@ -79,7 +79,7 @@ previous_successful_assistant = monitoring.previous_successful_assistant
 run_pdf_extraction_comparison = compare_pdf_extractors.run_pdf_extraction_comparison
 SUPPORTED_EXTRACTION_ENGINES = compare_pdf_extractors.SUPPORTED_EXTRACTION_ENGINES
 delete_thread = conversation_store.delete_thread
-get_chat_history = conversation_store.get_chat_history
+
 load_evaluation_dataset = monitoring.load_evaluation_dataset
 load_evaluation_snapshot_manifest = monitoring.load_evaluation_snapshot_manifest
 list_issue_reports = issue_report_store.list_issue_reports
@@ -380,14 +380,13 @@ def _run_chat_response_job(
     thread_name: str,
     assistant_message_id: int,
     user_query: str,
-    prior_history: list[tuple[str, str]],
     prior_search_scope: dict | None,
     registry: dict,
 ) -> None:
     started_at = time.perf_counter()
     try:
         config = {"configurable": {"thread_id": thread_id}}
-        graph_input = {"question": user_query, "chat_history": prior_history}
+        graph_input = {"question": user_query}
         if prior_search_scope:
             graph_input["prior_search_scope"] = prior_search_scope
         with registry["graph_lock"]:
@@ -468,7 +467,6 @@ def _start_chat_response_job(
     thread_id: str,
     thread_name: str,
     user_query: str,
-    prior_history: list[tuple[str, str]],
     prior_search_scope: dict | None = None,
 ) -> int:
     job_id = str(uuid.uuid4())
@@ -489,7 +487,6 @@ def _start_chat_response_job(
             "thread_name": thread_name,
             "assistant_message_id": assistant_message_id,
             "user_query": user_query,
-            "prior_history": prior_history,
             "prior_search_scope": prior_search_scope,
             "registry": registry,
         },
@@ -1263,14 +1260,12 @@ def render_chat(current_id: str, current_thread: dict) -> None:
         else:
             thread_name = current_thread["name"]
 
-        prior_history = get_chat_history(current_id)
         prior_search_scope = _latest_search_scope(messages)
         append_message(current_id, "user", user_query)
         assistant_message_id = _start_chat_response_job(
             thread_id=current_id,
             thread_name=thread_name,
             user_query=user_query,
-            prior_history=prior_history,
             prior_search_scope=prior_search_scope,
         )
 

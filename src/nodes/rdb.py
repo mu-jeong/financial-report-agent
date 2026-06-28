@@ -181,7 +181,6 @@ def rdb_execute_node(state: State) -> dict:
         return {
             "rdb_result": str(db_result),
             "generation": err_msg,
-            "chat_history": [("사용자", state["question"]), ("AI", err_msg)],
             "monitoring_metrics": {"rdb": rdb_metrics},
         }
 

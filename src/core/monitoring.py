@@ -754,7 +754,7 @@ def run_multiturn_evaluation_dataset(
     execution_mode: str = "current_data",
     data_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """chat history와 prior retrieval scope를 이어가며 multi-turn case를 실행합니다."""
+    """prior retrieval scope를 이어가며 multi-turn case를 실행합니다."""
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
     cases = select_evaluation_cases(dataset, selected_case_ids)
     if limit:
@@ -763,15 +763,13 @@ def run_multiturn_evaluation_dataset(
     for case in cases:
         case_id = case.get("id", "case")
         thread_id = f"monitoring_multiturn_eval_{run_id}_{case_id}"
-        chat_history: list[tuple[str, str]] = []
         prior_search_scope: dict[str, Any] | None = None
         turn_results: list[dict[str, Any]] = []
         for turn_index, turn in enumerate(case.get("turns") or [], 1):
             payload: dict[str, Any] = {
                 "question": turn.get("question", ""),
-                "chat_history": list(chat_history),
             }
-            input_had_chat_history = bool(payload["chat_history"])
+            input_had_chat_history = False
             input_had_prior_search_scope = prior_search_scope is not None
             if prior_search_scope is not None:
                 payload["prior_search_scope"] = prior_search_scope
@@ -791,10 +789,6 @@ def run_multiturn_evaluation_dataset(
             )
             turn_result["turn_index"] = turn_index
             turn_results.append(turn_result)
-            chat_history.extend([
-                ("???", str(turn.get("question", ""))),
-                ("AI", str(final_state.get("generation") or "")),
-            ])
             prior_search_scope = build_reusable_search_scope(final_state)
         results.append(
             {
@@ -938,7 +932,7 @@ def run_evaluation_dataset(
     for case in cases:
         started = time.perf_counter()
         final_state = invoke_fn(
-            {"question": case.get("question", ""), "chat_history": []},
+            {"question": case.get("question", "")},
             config={"configurable": {"thread_id": f"monitoring_eval_{run_id}_{case.get('id', 'case')}"}},
         )
         latency = time.perf_counter() - started

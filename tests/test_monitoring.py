@@ -908,7 +908,7 @@ def test_evaluate_multiturn_turn_result_scores_context_and_expected_state():
     assert result["expected_state_pass"] is True
 
 
-def test_run_multiturn_evaluation_dataset_carries_history_scope_and_thread(tmp_path):
+def test_run_multiturn_evaluation_dataset_carries_scope_and_thread_without_chat_history(tmp_path):
     dataset = {
         "name": "multiturn_eval",
         "version": 1,
@@ -931,7 +931,7 @@ def test_run_multiturn_evaluation_dataset_carries_history_scope_and_thread(tmp_p
                         "expected_route": "vectordb",
                         "expected_filters": {"target_name": "NAVER", "report_type": "company"},
                         "expected_sources": [{"file_name": "naver-company.pdf"}],
-                        "expected_input": {"chat_history": True, "prior_search_scope": True},
+                        "expected_input": {"chat_history": False, "prior_search_scope": True},
                         "expected_state": {
                             "followup_scope_intent": True,
                             "scope_source": "prior_search_scope",
@@ -968,9 +968,9 @@ def test_run_multiturn_evaluation_dataset_carries_history_scope_and_thread(tmp_p
     assert run["summary"]["turn_count"] == 2
     assert run["summary"]["passed"] == 1
     assert run["summary"]["turn_passed"] == 2
-    assert calls[0]["payload"]["chat_history"] == []
+    assert "chat_history" not in calls[0]["payload"]
     assert "prior_search_scope" not in calls[0]["payload"]
-    assert calls[1]["payload"]["chat_history"] == [("???", "2026? 6? 9? NAVER ??? ??"), ("AI", "? ?? [1]")]
+    assert "chat_history" not in calls[1]["payload"]
     assert calls[1]["payload"]["prior_search_scope"]["search_filters"]["target_name"] == "NAVER"
     assert calls[1]["payload"]["prior_search_scope"]["file_names"] == ["naver-company.pdf"]
     assert calls[0]["config"]["configurable"]["thread_id"] == calls[1]["config"]["configurable"]["thread_id"]

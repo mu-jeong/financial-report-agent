@@ -6,7 +6,7 @@ import argparse
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.configs.config import SEARCH_TOP_K
-from src.core.conversation_store import append_message, delete_thread, ensure_thread, get_chat_history
+from src.core.conversation_store import append_message, delete_thread, ensure_thread
 from src.core.status import format_status_text
 
 
@@ -20,7 +20,7 @@ def print_deprecation_notice() -> None:
     print(CLI_DEPRECATION_NOTICE)
 
 
-def run_search(query: str, thread_id: str = "default_thread", chat_history: list | None = None) -> dict:
+def run_search(query: str, thread_id: str = "default_thread") -> dict:
     """
     주어진 질문(query)에 대해 LangGraph 기반 RAG 파이프라인을 실행합니다.
     - thread_id: 대화 맥락을 유지하기 위한 세션 식별자
@@ -28,7 +28,7 @@ def run_search(query: str, thread_id: str = "default_thread", chat_history: list
     from src.graphs.main_graph import graph_app
 
     config = {"configurable": {"thread_id": thread_id}}
-    return graph_app.invoke({"question": query, "chat_history": chat_history or []}, config=config)
+    return graph_app.invoke({"question": query}, config=config)
 
 def run_cli():
     current_thread_id = "cli_default"
@@ -59,9 +59,8 @@ def run_cli():
             
             # 1. 그래프 실행 (진행 상태 표시)
             print("\n🤖 답변을 생성하고 있습니다...", end="", flush=True)
-            prior_history = get_chat_history(current_thread_id)
             append_message(current_thread_id, "user", user_query)
-            final_state = run_search(user_query, thread_id=current_thread_id, chat_history=prior_history)
+            final_state = run_search(user_query, thread_id=current_thread_id)
             print("\r" + " " * 30 + "\r", end="", flush=True) # 진행 상태 메시지 지우기
             
             # 2. 검색 쿼리 재작성 결과 출력 (디버깅/사용자 확인용)
