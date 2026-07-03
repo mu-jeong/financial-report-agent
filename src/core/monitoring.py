@@ -193,8 +193,8 @@ def summarize_chat_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
         for message in assistant_messages
         if (message.get("metadata") or {}).get("status") == "succeeded"
     )
-    rerank_counts = [
-        len((message.get("metadata") or {}).get("rerank_info") or [])
+    selected_source_counts = [
+        len(_metadata_selected_sources(message.get("metadata") or {}))
         for message in assistant_messages
         if (message.get("metadata") or {}).get("status") == "succeeded"
     ]
@@ -209,9 +209,14 @@ def summarize_chat_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
         "assistant_message_count": len(assistant_messages),
         "statuses": dict(statuses),
         "routes": dict(routes),
+        "avg_selected_source_count": (
+            sum(selected_source_counts) / len(selected_source_counts)
+            if selected_source_counts
+            else 0.0
+        ),
         "avg_rerank_source_count": (
-            sum(rerank_counts) / len(rerank_counts)
-            if rerank_counts
+            sum(selected_source_counts) / len(selected_source_counts)
+            if selected_source_counts
             else 0.0
         ),
         "avg_latency_seconds": (
@@ -235,12 +240,13 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
         metadata = message.get("metadata") or {}
         monitoring = metadata.get("monitoring") or {}
         search_scope = metadata.get("search_scope") or {}
-        rerank_info = metadata.get("rerank_info") or []
+        selected_sources = _metadata_selected_sources(metadata)
         search_filters = search_scope.get("search_filters") or metadata.get("search_filters") or {}
         scope_decision = metadata.get("scope_decision") or {}
         route = metadata.get("route", "-")
         created_at = message.get("created_at")
-        source_names = _ordered_file_names(rerank_info)
+        source_names = _ordered_file_names(selected_sources)
+        source_count = len(group_sources_by_document(selected_sources))
         rows.append(
             {
                 "message_id": message.get("id"),
@@ -250,7 +256,7 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
                 "status": metadata.get("status", "unknown"),
                 "route": route,
                 "latency_seconds": metadata.get("latency_seconds"),
-                "source_count": len(group_sources_by_document(rerank_info)),
+                "source_count": source_count,
                 "search_filters": search_filters,
                 "scope_source": metadata.get("scope_source") or search_scope.get("scope_source"),
                 "scope_decision_reason": scope_decision.get("reason"),
@@ -258,7 +264,7 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
                 "selected_file_names": source_names,
                 "rdb_row_count": (monitoring.get("rdb") or {}).get("row_count"),
                 "error": metadata.get("error"),
-                "label": _response_label(created_at, route, metadata.get("question") or latest_user_question, len(group_sources_by_document(rerank_info)), metadata.get("latency_seconds")),
+                "label": _response_label(created_at, route, metadata.get("question") or latest_user_question, source_count, metadata.get("latency_seconds")),
             }
         )
     return rows
@@ -285,6 +291,15 @@ def _ordered_file_names(items: list[dict[str, Any]]) -> list[str]:
             seen.add(file_name)
             names.append(file_name)
     return names
+
+
+def _metadata_selected_sources(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return persisted selected sources, with legacy rerank_info fallback."""
+    sources = metadata.get("selected_sources")
+    if isinstance(sources, list):
+        return sources
+    legacy_sources = metadata.get("rerank_info")
+    return legacy_sources if isinstance(legacy_sources, list) else []
 
 
 def _message_metadata(message: dict[str, Any] | None) -> dict[str, Any]:
@@ -405,8 +420,8 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
     monitoring = metadata.get("monitoring") or {}
     retrieval = _metadata_retrieval(metadata)
     query_rewrite = _metadata_query_rewrite(metadata)
-    rerank_info = metadata.get("rerank_info") or []
-    source_count = len(group_sources_by_document(rerank_info))
+    selected_sources = _metadata_selected_sources(metadata)
+    source_count = len(group_sources_by_document(selected_sources))
     answer = str(message.get("content") or "")
     citation_ranks = sorted(extract_citation_ranks(answer, source_count=None))
     return {
@@ -434,12 +449,12 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
         },
         "state_transitions": _build_state_transition_trace(metadata),
         "retrieval": retrieval,
-        "sources": rerank_info,
+        "sources": selected_sources,
         "answer": {
             "assistant_preview": _safe_preview(answer, 500),
             "source_count": source_count,
             "citation_ranks_used": citation_ranks,
-            "citation_valid": _citation_valid(answer, rerank_info),
+            "citation_valid": _citation_valid(answer, selected_sources),
         },
     }
 
@@ -494,8 +509,8 @@ def build_response_diff(current: dict[str, Any], previous: dict[str, Any] | None
     previous_metadata = _message_metadata(previous)
     current_retrieval = _metadata_retrieval(current_metadata)
     previous_retrieval = _metadata_retrieval(previous_metadata)
-    current_files = set(_ordered_file_names(current_metadata.get("rerank_info") or []))
-    previous_files = set(_ordered_file_names(previous_metadata.get("rerank_info") or []))
+    current_files = set(_ordered_file_names(_metadata_selected_sources(current_metadata)))
+    previous_files = set(_ordered_file_names(_metadata_selected_sources(previous_metadata)))
     return {
         "rewritten_query_changed": _metadata_query_rewrite(current_metadata).get("rewritten_query") != _metadata_query_rewrite(previous_metadata).get("rewritten_query"),
         "route_changed": current_metadata.get("route") != previous_metadata.get("route"),
@@ -547,8 +562,9 @@ def build_chat_trace_debug_hints(
         if previous_filters.get(key) and not filters.get(key):
             hints.append("⚠️ 직전 응답에는 날짜 필터가 있었는데 현재 응답에서 날짜 필터가 사라졌습니다.")
             break
-    file_names = _ordered_file_names(metadata.get("rerank_info") or [])
-    if len(metadata.get("rerank_info") or []) > 1 and len(set(file_names)) <= 1:
+    selected_sources = _metadata_selected_sources(metadata)
+    file_names = _ordered_file_names(selected_sources)
+    if len(selected_sources) > 1 and len(set(file_names)) <= 1:
         hints.append("⚠️ 복수 문서 요청처럼 보이지만 selected source가 1개 문서에 편중되어 있습니다.")
     if retrieval.get("candidate_count_after_filter") == 0:
         hints.append("⚠️ candidate_count_after_filter=0입니다. metadata filter가 과도할 수 있습니다.")
@@ -600,7 +616,7 @@ def _compact_trace_message(message: dict[str, Any] | None) -> dict[str, Any] | N
             "scope_source": metadata.get("scope_source"),
             "scope_decision": metadata.get("scope_decision"),
             "retrieval": _metadata_retrieval(metadata),
-            "source_files": _ordered_file_names(metadata.get("rerank_info") or []),
+            "source_files": _ordered_file_names(_metadata_selected_sources(metadata)),
         },
     }
 
@@ -1104,7 +1120,7 @@ def _conversation_draft_inputs(report: dict[str, Any]) -> dict[str, Any] | None:
     question = str(selected_user.get("content") or "").strip()
     if not question or not route:
         return None
-    sources = metadata.get("rerank_info") or []
+    sources = _metadata_selected_sources(metadata)
     if not sources and search_scope.get("file_names"):
         sources = [{"file_name": file_name} for file_name in search_scope.get("file_names") or []]
     return {"question": question, "route": route, "filters": filters, "sources": sources}

@@ -43,7 +43,7 @@ RDB_SQL_GEN_PROMPT = """
 오직 SQL 쿼리만 출력하세요. 마크다운(` ```sql `) 기호나 다른 설명은 절대 포함하지 마세요.
 질문에 `[상대 날짜 해석]`이 포함되어 있으면 해당 날짜 범위를 반드시 우선 사용하세요.
 상대 날짜 해석이 제공된 경우 `DATE('now')`로 다시 추측하지 마세요.
-질문에 `[적용해야 할 메타데이터 필터]`가 포함되어 있으면 해당 report_type, target_name, broker, report_date_start/end 조건을 반드시 WHERE 절에 반영하세요.
+질문에 `[적용해야 할 메타데이터 필터]`가 포함되어 있으면 해당 report_type, target_name, target_names, broker, report_date_start/end 조건을 반드시 WHERE 절에 반영하세요. target_names가 여러 개 제공되면 `target_name IN (...)` 조건으로 변환하세요.
 상대 날짜 해석이 없는 경우에만 오늘 날짜는 DATE('now')로 사용할 수 있습니다.
 
 [질문]

@@ -267,7 +267,8 @@ def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch
     assert "앞부분" in saved_report
     assert "끝부분" in saved_report
     assert "--- Message 10 ---" in saved_report
-    assert '"rerank_count": 1' in saved_report
+    assert '"rerank_info"' in saved_report
+    assert '"rank": 10' in saved_report
     assert "이메일 본문에 그대로 붙여넣어" in saved_report
 
     sidecar_json = report_files[0].with_suffix(".json")

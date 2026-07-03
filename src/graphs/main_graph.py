@@ -8,7 +8,12 @@ from src.nodes.query_rewrite import query_rewrite_node
 from src.nodes.rdb import rdb_execute_node, rdb_sql_gen_node
 from src.nodes.router import router_node
 from src.nodes.scope_selection import scope_selection_node
-from src.nodes.search_scope import search_scope_merge_node, search_scope_prepare_node
+from src.nodes.search_scope import (
+    rdb_scope_preflight_node,
+    search_scope_merge_node,
+    search_scope_prepare_node,
+    vectordb_scope_preflight_node,
+)
 from src.nodes.stock_price import stock_price_tool_node
 from src.nodes.vectordb import vectordb_node
 from src.core.followup_scope import build_answer_scope_index
@@ -120,6 +125,8 @@ def build_graph():
     workflow.add_node("search_scope_merge", search_scope_merge_node)
     workflow.add_node("scope_selection", scope_selection_node)
     workflow.add_node("router", router_node)
+    workflow.add_node("rdb_scope_preflight", rdb_scope_preflight_node)
+    workflow.add_node("vectordb_scope_preflight", vectordb_scope_preflight_node)
     workflow.add_node("rdb_sql_gen_node", rdb_sql_gen_node)
     workflow.add_node("rdb_execute_node", rdb_execute_node)
     workflow.add_node("vectordb_node", vectordb_node)
@@ -149,18 +156,20 @@ def build_graph():
 
     def decide_next(state: State) -> str:
         if state["route"] == "rdb":
-            return "rdb_sql_gen_node"
-        return "vectordb_node"
+            return "rdb_scope_preflight"
+        return "vectordb_scope_preflight"
 
     workflow.add_conditional_edges(
         "router",
         decide_next,
         {
-            "rdb_sql_gen_node": "rdb_sql_gen_node",
-            "vectordb_node": "vectordb_node",
+            "rdb_scope_preflight": "rdb_scope_preflight",
+            "vectordb_scope_preflight": "vectordb_scope_preflight",
         },
     )
 
+    workflow.add_edge("rdb_scope_preflight", "rdb_sql_gen_node")
+    workflow.add_edge("vectordb_scope_preflight", "vectordb_node")
     workflow.add_edge("rdb_sql_gen_node", "rdb_execute_node")
 
     def after_generation(state: State) -> str:

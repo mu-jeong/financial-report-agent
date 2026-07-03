@@ -102,16 +102,15 @@ def _report_scope_sql(base_filters: dict[str, Any], company_names: list[str]) ->
     ), params
 
 
-def resolve_industry_report_file_scope(
-    term: str,
+def resolve_report_file_scope_for_companies(
+    company_names: list[str],
     *,
     base_filters: dict[str, Any] | None = None,
-    data_path: str | Path | None = None,
     db_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    """Return embedded company-report files for an already resolved company universe."""
     base_filters = dict(base_filters or {})
-    lookup = lookup_companies_by_industry(term, data_path=data_path)
-    sql, params = _report_scope_sql(base_filters, lookup["company_names"])
+    sql, params = _report_scope_sql(base_filters, list(company_names or []))
     database_path = Path(db_path) if db_path else Path(DB_PATH)
     rows: list[sqlite3.Row]
     if not database_path.exists():
@@ -124,12 +123,34 @@ def resolve_industry_report_file_scope(
     file_names = sorted({row["file_name"] for row in rows if row["file_name"]})
     matched_targets = sorted({row["target_name"] for row in rows if row["target_name"]})
     return {
-        "term": term,
-        "matched_company_count": lookup["matched_company_count"],
-        "matched_companies_preview": lookup["company_names"][:20],
         "matched_report_targets": matched_targets,
         "report_file_count": len(file_names),
         "file_names": file_names,
+        "base_filters": base_filters,
+    }
+
+
+def resolve_industry_report_file_scope(
+    term: str,
+    *,
+    base_filters: dict[str, Any] | None = None,
+    data_path: str | Path | None = None,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    base_filters = dict(base_filters or {})
+    lookup = lookup_companies_by_industry(term, data_path=data_path)
+    report_scope = resolve_report_file_scope_for_companies(
+        lookup["company_names"],
+        base_filters=base_filters,
+        db_path=db_path,
+    )
+    return {
+        "term": term,
+        "matched_company_count": lookup["matched_company_count"],
+        "matched_companies_preview": lookup["company_names"][:20],
+        "matched_report_targets": report_scope["matched_report_targets"],
+        "report_file_count": report_scope["report_file_count"],
+        "file_names": report_scope["file_names"],
         "base_filters": base_filters,
         "source_path": lookup["source_path"],
         "source_url": lookup["source_url"],

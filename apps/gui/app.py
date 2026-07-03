@@ -398,7 +398,7 @@ def _run_chat_response_job(
         answer = final_state.get("generation", "응답을 생성하지 못했습니다.")
         if "Error" in answer or "차단" in answer:
             answer = f"주의: {answer}"
-        rerank_info = (
+        selected_sources = (
             final_state.get("rerank_info") or []
             if final_state.get("route") == "vectordb"
             else final_state.get("rdb_sources") or []
@@ -409,13 +409,13 @@ def _run_chat_response_job(
             "job_id": job_id,
             "question": user_query,
             "no_vector_results": bool(final_state.get("no_vector_results")),
-            "rerank_info": rerank_info,
+            "selected_sources": selected_sources,
         }
         metadata.update(
             compact_graph_monitoring_metadata(
                 final_state=final_state,
                 latency_seconds=time.perf_counter() - started_at,
-                rerank_info=rerank_info,
+                rerank_info=selected_sources,
             )
         )
         if search_scope:
@@ -1075,15 +1075,15 @@ def _render_message(message: dict, *, index: int) -> None:
                 return
             if scope_notice := metadata.get("scope_notice"):
                 st.caption(scope_notice)
-            rerank_info = metadata.get("rerank_info") or []
-            source_count = len(group_sources_by_document(rerank_info))
+            selected_sources = metadata.get("selected_sources") or metadata.get("rerank_info") or []
+            source_count = len(group_sources_by_document(selected_sources))
             display_content = remove_unavailable_citations(
                 message["content"],
-                source_count=len(rerank_info),
+                source_count=len(selected_sources),
             )
             display_content = normalize_citation_ranks(
                 display_content,
-                document_rank_aliases(rerank_info),
+                document_rank_aliases(selected_sources),
             )
             display_content = remove_unavailable_citations(
                 display_content,
@@ -1102,7 +1102,7 @@ def _render_message(message: dict, *, index: int) -> None:
             )
             st.markdown(linked_content)
             _render_sources(
-                rerank_info,
+                selected_sources,
                 key_prefix=f"message_{index}",
                 anchor_prefix=anchor_prefix,
                 used_ranks=source_filter_ranks,

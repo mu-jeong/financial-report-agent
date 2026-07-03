@@ -891,7 +891,7 @@ def test_search_scope_prepare_requests_industry_lookup_for_sector_company_questi
     }
 
 
-def test_search_scope_merge_applies_industry_lookup_file_scope():
+def test_search_scope_merge_keeps_industry_lookup_as_company_universe():
     result = search_scope.search_scope_merge_node(
         {
             "question": "반도체 섹터에 속한 기업에 대한 내용을 좀 더 자세히 작성해줘",
@@ -913,9 +913,73 @@ def test_search_scope_merge_applies_industry_lookup_file_scope():
             "industry_lookup_context": {
                 "term": "반도체",
                 "matched_company_count": 177,
-                "matched_report_targets": ["SK하이닉스", "삼성전자"],
-                "report_file_count": 2,
-                "file_names": ["hynix.pdf", "samsung.pdf"],
+                "matched_companies_preview": ["SK하이닉스", "삼성전자"],
+                "company_names": ["SK하이닉스", "삼성전자"],
+                "source_url": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage",
+            },
+        }
+    )
+
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-25",
+        "report_type": "company",
+    }
+    assert result["scope_decision"]["reason"] == "industry_company_universe"
+    assert result["scope_decision"]["industry_term"] == "반도체"
+    assert result["routing_context"]["has_vector_intent"] is True
+
+
+def test_rdb_scope_preflight_converts_industry_universe_to_sql_constraint():
+    result = search_scope.rdb_scope_preflight_node(
+        {
+            "search_filters": {
+                "report_date_start": "2026-06-22",
+                "report_date_end": "2026-06-25",
+                "report_type": "company",
+            },
+            "industry_lookup_context": {
+                "term": "반도체",
+                "company_names": ["SK하이닉스", "삼성전자"],
+            },
+        }
+    )
+
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-22",
+        "report_date_end": "2026-06-25",
+        "report_type": "company",
+        "target_names": ["SK하이닉스", "삼성전자"],
+    }
+    assert result["scope_decision"]["reason"] == "industry_company_universe_sql_constraint"
+
+
+def test_vectordb_scope_preflight_converts_industry_universe_to_file_scope(monkeypatch):
+    def fake_resolve(company_names, *, base_filters):
+        assert company_names == ["SK하이닉스", "삼성전자"]
+        assert base_filters == {
+            "report_date_start": "2026-06-22",
+            "report_date_end": "2026-06-25",
+            "report_type": "company",
+        }
+        return {
+            "matched_report_targets": ["SK하이닉스", "삼성전자"],
+            "report_file_count": 2,
+            "file_names": ["hynix.pdf", "samsung.pdf"],
+        }
+
+    monkeypatch.setattr(search_scope, "resolve_report_file_scope_for_companies", fake_resolve)
+
+    result = search_scope.vectordb_scope_preflight_node(
+        {
+            "search_filters": {
+                "report_date_start": "2026-06-22",
+                "report_date_end": "2026-06-25",
+                "report_type": "company",
+            },
+            "industry_lookup_context": {
+                "term": "반도체",
+                "company_names": ["SK하이닉스", "삼성전자"],
                 "source_url": "https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage",
             },
         }
@@ -927,8 +991,7 @@ def test_search_scope_merge_applies_industry_lookup_file_scope():
         "report_type": "company",
         "file_names": ["hynix.pdf", "samsung.pdf"],
     }
-    assert result["scope_decision"]["reason"] == "industry_company_universe_intersection"
-    assert result["scope_decision"]["industry_term"] == "반도체"
+    assert result["scope_decision"]["reason"] == "industry_company_universe_file_scope"
 
 
 def test_search_scope_does_not_select_single_top_company_for_company_section_followup():

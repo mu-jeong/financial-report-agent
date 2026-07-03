@@ -142,7 +142,7 @@ def test_chat_monitoring_summary_and_rows_are_safe_metadata_only():
                 "status": "succeeded",
                 "route": "vectordb",
                 "latency_seconds": 1.5,
-                "rerank_info": [{"rank": 1}, {"rank": 2}],
+                "selected_sources": [{"rank": 1}, {"rank": 2}],
                 "search_scope": {"search_filters": {"target_name": "NAVER"}},
             },
         },
@@ -159,6 +159,7 @@ def test_chat_monitoring_summary_and_rows_are_safe_metadata_only():
     assert summary["message_count"] == 3
     assert summary["statuses"] == {"succeeded": 1, "failed": 1}
     assert summary["routes"] == {"vectordb": 1}
+    assert summary["avg_selected_source_count"] == 2.0
     assert summary["avg_rerank_source_count"] == 2.0
     assert rows[0]["search_filters"] == {"target_name": "NAVER"}
     assert rows[0]["user_question_preview"] == "질문 본문"

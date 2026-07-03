@@ -182,28 +182,13 @@ def _parse_conversation_messages(text: str) -> list[dict[str, Any]]:
     return messages
 
 
-def _compact_report_metadata(metadata: dict | None) -> dict:
-    """Keep debugging signals useful without dumping bulky retrieval payloads."""
-    metadata = metadata or {}
-    compact = {
-        key: metadata.get(key)
-        for key in ["status", "job_id", "error", "route", "scope_source"]
-        if metadata.get(key) is not None
-    }
-    if metadata.get("search_scope"):
-        compact["search_scope"] = metadata.get("search_scope")
-    if isinstance(metadata.get("rerank_info"), list):
-        compact["rerank_count"] = len(metadata["rerank_info"])
-    return compact
-
-
 def build_issue_report_context(
     *,
     thread: dict[str, Any],
     messages: list[dict[str, Any]],
     include_conversation: bool,
 ) -> dict[str, Any]:
-    """Build report context while preserving the full selected conversation text."""
+    """Build report context while preserving selected conversation text and metadata."""
     context: dict[str, Any] = {
         "thread_id": thread["id"],
         "thread_name": thread["name"],
@@ -218,7 +203,7 @@ def build_issue_report_context(
                 "role": message.get("role"),
                 "created_at": message.get("created_at"),
                 "content": message.get("content", "") or "",
-                "metadata": _compact_report_metadata(message.get("metadata")),
+                "metadata": dict(message.get("metadata") or {}),
             }
             for message in messages
         ]

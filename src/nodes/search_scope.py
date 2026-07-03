@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from src.core.company_industry import resolve_report_file_scope_for_companies
 from src.core.followup_scope import resolve_section_followup_scope
 from src.core.metadata_filters import get_metadata_candidates, infer_search_filters, resolve_temporal_context
 from src.graphs.state import State
@@ -350,21 +351,20 @@ def search_scope_merge_node(state: State) -> dict:
     """Merge rewritten-query scope with optional industry/company lookup output."""
     result = search_scope_node(state)
     industry_context = state.get("industry_lookup_context") or {}
-    file_names = industry_context.get("file_names") or []
-    if not file_names:
+    company_names = industry_context.get("company_names") or []
+    if not company_names:
         return result
 
     search_filters = dict(result.get("search_filters") or {})
     search_filters.pop("target_name", None)
     search_filters["report_type"] = "company"
-    search_filters["file_names"] = file_names
     scope_decision = {
         "matched": True,
-        "reason": "industry_company_universe_intersection",
+        "reason": "industry_company_universe",
         "industry_term": industry_context.get("term"),
         "matched_company_count": industry_context.get("matched_company_count", 0),
-        "matched_report_targets": industry_context.get("matched_report_targets", []),
-        "report_file_count": industry_context.get("report_file_count", len(file_names)),
+        "matched_companies_preview": industry_context.get("matched_companies_preview", []),
+        "company_count": len(company_names),
         "source_url": industry_context.get("source_url"),
         "search_filters": search_filters,
     }
@@ -372,5 +372,69 @@ def search_scope_merge_node(state: State) -> dict:
     result["scope_decision"] = scope_decision
     result["scope_source"] = "industry_company_lookup"
     result.setdefault("routing_context", {})["route_hint"] = None
-    result["routing_context"]["has_vector_intent"] = True
     return result
+
+
+def rdb_scope_preflight_node(state: State) -> dict:
+    """Convert an industry/company universe into RDB SQL constraints."""
+    industry_context = state.get("industry_lookup_context") or {}
+    company_names = industry_context.get("company_names") or []
+    if not company_names:
+        return {}
+
+    search_filters = dict(state.get("search_filters") or {})
+    search_filters.pop("target_name", None)
+    search_filters.pop("file_names", None)
+    search_filters["report_type"] = "company"
+    search_filters["target_names"] = company_names
+    scope_decision = dict(state.get("scope_decision") or {})
+    scope_decision.update(
+        {
+            "matched": True,
+            "reason": "industry_company_universe_sql_constraint",
+            "industry_term": industry_context.get("term"),
+            "company_count": len(company_names),
+            "search_filters": search_filters,
+        }
+    )
+    return {
+        "search_filters": search_filters,
+        "scope_decision": scope_decision,
+        "scope_source": "industry_company_lookup",
+    }
+
+
+def vectordb_scope_preflight_node(state: State) -> dict:
+    """Convert an industry/company universe into embedded VectorDB file scope."""
+    industry_context = state.get("industry_lookup_context") or {}
+    company_names = industry_context.get("company_names") or []
+    if not company_names:
+        return {}
+
+    search_filters = dict(state.get("search_filters") or {})
+    search_filters.pop("target_name", None)
+    search_filters["report_type"] = "company"
+    report_scope = resolve_report_file_scope_for_companies(
+        company_names,
+        base_filters=search_filters,
+    )
+    if report_scope.get("file_names"):
+        search_filters["file_names"] = report_scope["file_names"]
+    scope_decision = dict(state.get("scope_decision") or {})
+    scope_decision.update(
+        {
+            "matched": True,
+            "reason": "industry_company_universe_file_scope",
+            "industry_term": industry_context.get("term"),
+            "company_count": len(company_names),
+            "matched_report_targets": report_scope.get("matched_report_targets", []),
+            "report_file_count": report_scope.get("report_file_count", 0),
+            "source_url": industry_context.get("source_url"),
+            "search_filters": search_filters,
+        }
+    )
+    return {
+        "search_filters": search_filters,
+        "scope_decision": scope_decision,
+        "scope_source": "industry_company_lookup",
+    }
