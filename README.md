@@ -1,6 +1,6 @@
 ﻿# Finance LLM
 
-> Version: `0.4.0`
+> Version: `0.5.0`
 
 ## Quick Start: 간편하게 실행하기
 

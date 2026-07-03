@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## v0.5.0 - 2026-07-03
+
 ### Added
 - OpenRouter 기반 생성 모델, 임베딩, 선택형 rerank 설정을 정리했습니다.
 - `baai/bge-m3` 임베딩 모델을 기본값으로 사용합니다.
