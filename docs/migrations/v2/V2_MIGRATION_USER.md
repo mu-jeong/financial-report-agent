@@ -21,11 +21,12 @@
 
 전환 도중 창이 강제로 닫히거나 PC가 재시작되어도 다음 실행이 미완료
 `cutover-journal.json`을 먼저 확인합니다. 정확히 같은 snapshot·build·predecessor·
-publication generation·write epoch와 도구 소유 표식을 모두 확인한 경우에만 실행
-검사를 이어서 완료합니다. 검사가 실패하면 같은 신원인 V2만 격리하고 V1으로
-돌아갑니다. 성공 영수증을 기록한 직후 중단된 실행이 나중에 롤백되면 해당 영수증은
-`rolled-back-receipt.json`으로 격리합니다. 신원이나 보존 경로가 달라졌다면 자동
-이동하지 않고 지원이 필요한 상태로 중단합니다.
+publication generation·write epoch와 도구 소유 표식뿐 아니라 V1 DB/FAISS와 전체
+PDF 기준 상태가 그대로인 경우에만 실행 검사를 이어서 완료합니다. 검사가 실패하면
+같은 신원인 V2만 격리하고 V1으로 돌아갑니다. 성공 영수증을 기록한 직후 중단된
+실행이 나중에 롤백되면 해당 영수증은 `rolled-back-receipt.json`으로 격리합니다.
+Native 신원, V1/PDF 기준 상태 또는 보존 경로가 달라졌다면 자동 이동하지 않고
+지원이 필요한 상태로 중단합니다.
 
 ## 자동으로 수행하는 검사
 
@@ -34,7 +35,7 @@ publication generation·write epoch와 도구 소유 표식을 모두 확인한 
 1. SQLite 온라인 백업과 FAISS/pickle 바이트 복사로 V1 백업을 만듭니다.
 2. DB·벡터·문서 매핑 수와 원본 PDF SHA-256을 확인합니다.
 3. 라이브 `data` 밖의 격리된 폴더에서 V1 청크와 벡터를 재사용하는 V2 호환 seed를 변환합니다.
-4. 현재 임베딩 모델로 기존 벡터를 다시 계산해 같은 벡터 공간인지 확인합니다.
+4. 결정적으로 선택한 최대 64개 기존 청크만 현재 임베딩 모델로 다시 계산해 같은 벡터 공간인지 확인합니다.
 5. 검증된 변환 seed의 snapshot과 build는 바꾸지 않고, write epoch를 올리고 V1 fallback을 닫아 쓰기 가능한 V2로 승격합니다.
 6. 격리된 V2에서 읽기와 쓰기 진입점, GUI 실행 검사를 수행합니다.
 7. 크롤러·임베딩 작업과 공유하는 전환 잠금을 잡고 V1 DB·벡터·전체 PDF 목록과 바이트가 바뀌지 않았는지 다시 확인합니다.
@@ -42,7 +43,7 @@ publication generation·write epoch와 도구 소유 표식을 모두 확인한 
 
 전환 전 실패하면 라이브 V1 선택 상태는 바뀌지 않습니다. 전환 직후 실행 검사에 실패하면 도구가 소유 표식뿐 아니라 snapshot·publication generation·write epoch가 정확히 같은지 확인한 뒤에만 실패 폴더로 격리하고 V1으로 자동 복귀합니다. 다른 V2 writer가 이미 새 snapshot을 게시했다면 그 데이터를 임의로 롤백하지 않고 실패 기록을 남깁니다.
 
-실패하더라도 기존 V1 DB와 FAISS 파일은 교체하지 않습니다. 마이그레이션 후 새 PDF가 추가되거나 기존 PDF가 변경되면 해당 파일만 파싱·임베딩하고, 변경되지 않은 V2 청크와 벡터는 다음 snapshot에 그대로 재사용합니다.
+실패하더라도 기존 V1 DB와 FAISS 파일은 교체하지 않습니다. 마이그레이션 후 새 PDF가 추가되거나 기존 PDF가 변경되면 해당 파일만 파싱·임베딩하고, 변경되지 않은 V2 청크와 벡터는 다음 snapshot에 그대로 재사용합니다. 삭제된 PDF는 provider 호출 없이 다음 complete snapshot에서 제외되며, source 변화가 없으면 새 publication을 만들지 않습니다.
 
 ## 데이터 보존 위치
 
@@ -60,11 +61,11 @@ publication generation·write epoch와 도구 소유 표식을 모두 확인한 
 
 ## 완료 후 상태
 
-성공 시에는 첫 후속 snapshot까지 이미 게시된 상태입니다.
+성공 시에는 변환한 seed snapshot 자체가 계속 active이며 `publication_generation=2`, `write_epoch=1`, `predecessor=NULL`인 쓰기 가능 상태입니다. 별도의 첫 후속 snapshot을 만들지 않습니다.
 
 - `RUN_APP.bat` 질문/검색: 사용 가능
 - V2 네이티브 snapshot: 사용 중 (`write_epoch > 0`)
-- V1 복구 브리지: 종료
+- V1 fallback 선택: 영구 폐쇄. Sealed compatibility bundle은 별도 retention 승인 전까지 보존
 - 크롤링·임베딩 등 데이터 갱신: 사용 가능
 
 따라서 완료 후에는 평소처럼 `RUN_APP.bat`으로 앱을 열고, 앱의 데이터 업데이트 기능이나 `RUN_QUICKSTART.bat`을 사용할 수 있습니다. epoch 0만 라이브로 남기는 성공 경로는 없습니다.

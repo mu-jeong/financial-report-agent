@@ -1,9 +1,17 @@
 # V2 native retrieval migration runbook
 
-This runbook executes the approved V2 migration on copied data. It does not
-authorize mutation of the live V1 installation, a version bump, or a release
-commit. Run every command from the repository root with the project virtual
-environment activated.
+This runbook builds developer release-certification evidence on copied data. It
+does not authorize mutation of the live V1 installation, a version bump, or a
+release commit. Run every command from the repository root with the project
+virtual environment activated.
+
+This is a developer release-certification runbook, not the normal user
+migration. `MIGRATE_V2.bat` follows the separate
+[`V2_MIGRATION_USER.md`](V2_MIGRATION_USER.md) contract: it validates and
+directly activates the same converted seed at publication generation 2 and
+write epoch 1, with `predecessor=NULL`. It does not build a new full-corpus
+successor. The distinct-successor steps below are release-only rehearsals and
+must not be presented as part of the one-click path.
 
 ## Lifecycle boundary
 
@@ -69,7 +77,7 @@ python scripts/migrations/v2/migrate_v2_native.py assess `
 
 Assessment must report the same symbolic `N` for the legacy mapping and FAISS
 `ntotal`. Any uncertainty remains explicit evidence and must be resolved by the
-first-successor same-space canary.
+same-space canary before writable seed activation.
 
 ## 2. Seal the epoch-zero compatibility bundle
 
@@ -98,6 +106,7 @@ Prepare these reviewed inputs:
 
 ```powershell
 $BundleId = (Get-Content "$Run/bundle.json" -Raw | ConvertFrom-Json).bundle.bundle_id
+# Omit --canonical-paths when no reviewed optional file was created.
 python scripts/migrations/v2/migrate_v2_native.py convert `
   --copied-root $Copied `
   --data-root $DataRoot `
@@ -171,11 +180,12 @@ once and made read-only; use a new path for every rerun.
 
 ## 5. Run the copied-install performance gate at epoch zero
 
-Run this gate before the first successor. The copied-install adapter deliberately
+Run this gate against the validated epoch-zero release fixture before direct seed
+activation or any distinct successor. The copied-install adapter deliberately
 requires an epoch-zero seed with V1 fallback open, so reusing a data root after
-Step 6 is invalid. If benchmark preparation must continue in parallel, preserve
-an immutable clone of the validated epoch-zero data root and benchmark only that
-clone.
+activation is invalid. If benchmark preparation must continue in parallel,
+preserve an immutable clone of the validated epoch-zero data root and benchmark
+only that clone.
 
 Prepare at least 30 fixed opaque query IDs and vectors. The input must define
 `unfiltered`, `empty`, `narrow`, `broad`, `near_universe`, and `prior_scope`
@@ -206,8 +216,9 @@ run in separate fresh engine-isolated workers, use the same opaque query ID and
 seed, and retain `factory_init_ns + probe.total_ns` as the comparable total.
 Cold data is reported separately and is not folded into the warm p95 gate.
 
-After the first successor closes V1 fallback, run the additional native
-predecessor-versus-successor regression gate. The factory first validates the
+Direct seed activation closes V1 fallback but leaves `predecessor=NULL`. Run the
+additional native predecessor-versus-successor regression gate only after a
+distinct healthy successor has been published. The factory first validates the
 healthy live snapshot pair, then pins both immutable revisions through one
 checkpointed read-only catalog clone. This avoids mutating the runtime pointer
 or comparing the active WAL against a different filesystem cache policy. The
@@ -230,9 +241,12 @@ The same 1.10 confidence-interval and 1.15 per-process caps apply. Retain failed
 runs as diagnostic evidence, but only a new, passing, read-only artifact may be
 used by the aggregate release gate.
 
-## 6. Build and publish the first native successor under launcher race
+## 6. Release-only distinct successor rehearsal under launcher race
 
-Place the complete source corpus in the configured `SAVE_DIR`; it must include
+This section is not part of `MIGRATE_V2.bat`. The release fixture intentionally
+creates a distinct successor so launcher races, predecessor recovery, and
+post-successor performance can be certified. Place the complete source corpus
+in the configured `SAVE_DIR`; it must include
 all converted reports and at least one genuinely new logical report. Prepare two
 independent installs of the same reviewed code: the source checkout and the
 packaged/default installation. They must be distinct directories and each must
@@ -272,25 +286,30 @@ epoch-zero or exact successor identity, or fail closed while the writer lock is
 held. The updater may never become writable on the epoch-zero identity. The
 source and packaged launcher-layout hashes must match and remain unchanged.
 
-The native path ignores per-report limits, validates the same-space canary,
-builds the complete corpus off path, reopens and verifies the raw FAISS snapshot,
-and publishes it. The first publication must atomically install the converted
-seed as predecessor, increase `write_epoch`, close V1 fallback, and enable
-writes. A publication without a new logical report or without an epoch increment
-is rejected before journal creation. `python -m src.core.embed_pipeline --all`
-remains the normal writer, but it does not produce the mandatory installed race
-evidence for this first release transition.
+The release-only race fixture validates the same-space canary, builds a distinct
+complete corpus off path, reopens and verifies the raw FAISS snapshot, and
+publishes it with the converted seed as predecessor. This is different from the
+normal writer. `python -m src.core.embed_pipeline --all` now dispatches to
+`execute_incremental_update`: it scans the complete source inventory, parses and
+embeds only new or changed PDFs, reuses unchanged vectors, reflects deletions,
+and publishes nothing when no source changed. It does not produce the mandatory
+installed race evidence for release certification.
 
-PDF extraction retains the V1 candidate policy: a configured non-PyMuPDF
-extractor may fall back to PyMuPDF when its cleaned output is empty or it fails.
-The successor still includes and chunks that report; it does not require OCR or
-drop the source. V2 fingerprints this DB-visible policy as
+PDF extraction retains the declared candidate policy. PyMuPDF fallback is
+allowed only when the pending extractor is the primary extractor; a distinct
+`UNEMBEDDED_PDF_EXTRACTION_ENGINE` does not silently fall back. The successor
+still includes and chunks a successfully extracted report. V2 fingerprints the
+DB-visible policy as
 `<requested-engine>|fallback=pymupdf`, while an undeclared engine transition
 continues to fail closed. Parent/child split sizes, overlap, Markdown headers,
 and embedding prefixes remain the V1 values; deterministic identities and child
 spans are V2 storage metadata rather than text-processing changes.
 
 ## 7. Post-successor launcher matrix
+
+This gate requires the healthy active+predecessor pair created by the
+release-only distinct-successor rehearsal. The direct one-click activation
+state alone does not satisfy it.
 
 Run the launcher matrix as a non-admin Windows user with source/default,
 packaged/default, and a custom data root containing spaces and Korean
@@ -336,7 +355,9 @@ python -m src.retrieval.support_export `
 ```
 
 Create the Gate D query artifact once, before release transitions. This is the
-only step that calls the embedding provider; it uses `search_query`, validates
+only release-query step that calls the embedding provider to vectorize the Gate
+D query; migration canaries and release-only successor builds may also call the
+provider. It uses `search_query`, validates
 the actual rank-one citation before writing, records the text/vector
 attestation, and makes the output read-only. Never regenerate a retained query
 merely to obtain a different result.
@@ -351,7 +372,8 @@ python scripts/migrations/v2/create_v2_release_query.py `
 ```
 
 Run one installed validation against a fresh dedicated copy of the healthy
-post-successor root, never the protected source installation. The runner
+post-successor root with an active+predecessor pair, never the protected source
+installation and never the direct-activation-only state. The runner
 performs and seals one continuous transition chain: active corruption,
 predecessor recovery, zero-provider-call forward recovery, publication blocked
 by a held lease, lease release, successor publication, retired-predecessor GC,
@@ -395,8 +417,8 @@ required package versions, and Python executable hashes must agree.
 Run the fixed full suite after the final code change with the release runner.
 It performs a sanitized collection pass, reconciles every collected node ID
 against child JUnit testcases, pins the interpreter and source/test layouts,
-and publishes both outputs read-only. Then
-assemble the pending candidate manifest. The assembler reopens, rehashes, and
+and publishes both outputs read-only. Then assemble the schema-version-2 pending
+candidate manifest. The assembler reopens, rehashes, and
 strictly validates conversion, seed validation, reader parity, successor race,
 launcher matrix, compatibility exception and its narrow architect approval,
 both performance gates, the Gate D query, transition chain, installed
@@ -413,7 +435,7 @@ python scripts/migrations/v2/assemble_v2_release_gate.py --pending `
   --conversion "$Run/conversion.json" `
   --validation "$Run/validation.json" `
   --reader-parity "$Run/reader-parity.json" `
-  --successor-race "$Run/first-successor-race.json" `
+  --successor-race "<validated-v2_first_successor_execution_replay.json>" `
   --launcher-matrix "$Run/launcher-matrix.json" `
   --compatibility "$Run/successor-compatibility.json" `
   --compatibility-approval "$Run/successor-compatibility-approval.json" `
@@ -427,10 +449,23 @@ python scripts/migrations/v2/assemble_v2_release_gate.py --pending `
   --output "$Run/release-candidate.json"
 ```
 
+The current command chain has a blocking producer/consumer mismatch:
+`run_v2_first_successor_race.py` emits kind
+`v2_first_successor_execution` without a `replay` object, while
+`assemble_v2_release_gate.py` accepts only kind
+`v2_first_successor_execution_replay` with the exact replay payload and a
+distinct active snapshot whose predecessor is the seed. No repository command
+in this runbook currently produces that accepted artifact. Do not substitute
+`first-successor-race.json`, relabel it, or claim aggregate release completion;
+stop until the producer or an independently validated replay producer is fixed.
+
 Independent Architect, Critic, and Verifier approvals must each use kind
 `v2_release_review_approval`, report zero P0/P1 findings, remain individually
 `release_eligible=false`, and bind the exact `release_bundle_sha256` printed by
 the pending command. Rerun the same assembler without `--pending`, add one
-`--approval ROLE=PATH` argument for each role, and choose a new output path.
+`--approval ROLE=PATH` argument for each role, and choose a new output path. The
+pending and final manifests, together with their bundle-hash basis, are all
+schema version 2. Past soak artifacts, schema-v1 bundles, waivers, or approvals
+bound to an older bundle must not be reused.
 Only that final immutable artifact may contain `release_eligible=true`. Only
 then may the version be raised and a Lore-format release commit be created.

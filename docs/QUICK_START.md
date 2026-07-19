@@ -2,7 +2,7 @@
 
 개발 명령어를 몰라도 처음에는 `RUN_QUICKSTART.bat` 파일 하나만 더블클릭하면 설치, OpenRouter API 키 설정, 실행일 포함 이전 7일 범위(총 최대 8일)의 데이터 준비, 검색 인덱스 생성, 웹 화면 실행까지 자동으로 진행됩니다.
 
-초기 준비가 끝난 뒤 앱만 다시 열 때는 `RUN_APP.bat`을 사용하세요. 이 파일은 설치·수집·임베딩을 반복하지 않고 Streamlit GUI만 실행합니다.
+초기 준비가 끝난 뒤 앱만 다시 열 때는 `RUN_APP.bat`을 사용하세요. 이 파일은 `.venv`와 `.env`를 확인하고 retrieval runtime의 catalog와 active snapshot을 검증한 뒤 Streamlit GUI를 실행하며, 설치·수집·임베딩은 반복하지 않습니다.
 
 기존 V1 데이터의 V2 변환은 `MIGRATE_V2.bat`을 더블클릭합니다. 이 작업은 V1 원본을 유지하면서 기존 청크와 벡터를 V2 형식으로 변환하고, 임베딩 공간 호환성과 실제 GUI 실행을 확인한 뒤 같은 변환 snapshot을 쓰기 가능 상태로 활성화합니다. 전체 corpus 재임베딩은 하지 않으며 이후에는 새 문서와 변경된 문서만 처리합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
@@ -36,10 +36,11 @@ API 키가 없다면 아래 문서를 먼저 따라 발급받으세요.
 4. 실행 산출물 폴더 생성 또는 확인 (`logs/`, `data/`, `data/downloaded/`, `reports/`)
 5. pip 업데이트
 6. `requirements.txt` 패키지 설치 또는 확인
-7. 실행일 포함 이전 7일 범위의 리포트 수집
-8. 수집된 전체 리포트 임베딩과 FAISS 검색 인덱스 생성
-9. 데이터 상태 출력
-10. Streamlit GUI 실행
+7. retrieval runtime의 쓰기 가능 상태 검증
+8. 실행일 포함 이전 7일 범위의 리포트 수집
+9. V1이면 pending 리포트 전체 처리, V2이면 전체 PDF 변경 여부를 검사해 새 문서와 변경된 문서만 파싱·임베딩하고 immutable snapshot 게시
+10. 데이터 상태 출력
+11. Streamlit GUI 실행
 
 ## 4. 데이터 준비 기준
 
@@ -73,6 +74,7 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 ## 6. 처음 실행이 오래 걸리는 이유
 
 처음 실행할 때는 패키지 설치, PDF 다운로드, 텍스트 추출, 임베딩 생성이 함께 진행됩니다.
+배포 템플릿의 미임베딩 문서 추출기는 `opendataloader`이므로 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. Java를 설치하지 않을 경우 데이터 준비 전에 `.env`의 `UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf`로 바꾸세요.
 `RUN_QUICKSTART.bat`을 다시 실행하면 이미 설치된 항목과 이미 임베딩된 리포트를 재사용하므로 처음보다는 빠르지만, 실행일 기준 데이터 수집과 임베딩 확인 단계를 다시 거칩니다. 단순히 앱만 열려면 `RUN_APP.bat`을 사용하세요.
 
 ## 7. 자주 생기는 문제

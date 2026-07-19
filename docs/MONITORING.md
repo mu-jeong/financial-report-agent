@@ -22,6 +22,7 @@ Monitoring Mode의 목적은 단순 사용량 통계가 아니라 RAG 품질 개
 | VectorDB retrieval metadata | `src/nodes/vectordb.py` |
 | RDB 실행 metadata | `src/nodes/rdb.py` |
 | 고정 평가셋 | `tests/fixtures/evaluation_dataset.json` |
+| Multi-turn 평가셋 | `tests/fixtures/multiturn_evaluation_dataset.json` (core helper/test 전용, GUI 미노출) |
 | 고정 snapshot manifest | `tests/fixtures/eval_snapshot/manifest.json` |
 | 평가 실행 산출물 | `debug/evaluation_runs/evaluation_run_*.json` |
 | regression 후보 산출물 | `debug/regression_candidates/*.json` |
@@ -34,16 +35,19 @@ Monitoring Mode의 목적은 단순 사용량 통계가 아니라 RAG 품질 개
 Sidebar
 └─ Page radio
    ├─ Chat
-   │  ├─ Chat tab
-   │  └─ Chat Monitoring tab
+   │  ├─ Chat
+   │  └─ Chat Monitoring
    └─ 전체 Monitoring
-      ├─ 데이터/설정
-      ├─ 미임베딩 문서
-      ├─ 실험 실행
-      ├─ 고정 테스트셋
-      ├─ Parsing engines
-      ├─ 전체 Monitoring
-      └─ Issue reports
+      ├─ 운영 상태
+      │  ├─ 데이터 상태
+      │  ├─ 임베딩 누락 문서
+      │  └─ 전체 응답 품질
+      ├─ 평가/실험
+      │  ├─ 고정 평가셋
+      │  ├─ 실험 실행
+      │  └─ Parsing 비교
+      └─ 이슈/회귀
+         └─ 이슈 신고/회귀 후보
 ```
 
 구현상 상위 page label은 `build_monitoring_page_labels()`가 `Chat`, `전체 Monitoring`을 반환한다. `Chat` page에서는 일반 채팅 tab과 현재 선택 chat 전용 `Chat Monitoring` tab이 같이 표시된다. `전체 Monitoring` page에서는 현재 선택 chat과 무관한 전역 진단 tab만 표시한다. 이 분리는 전체 운영 상태와 개별 대화 trace가 섞이지 않도록 하기 위한 UX 결정이다.
@@ -52,9 +56,9 @@ Sidebar
 
 전체 Monitoring은 선택된 chat 하나가 아니라 저장소, 평가 기준선, 모든 thread, issue report를 기준으로 시스템 상태를 본다.
 
-### 3.1 데이터/설정 tab
+### 3.1 데이터 상태
 
-`render_global_monitoring_page()`의 `데이터/설정` tab은 `get_data_status()` 결과를 표시한다.
+`render_global_monitoring_page()`의 `데이터 상태` 화면은 `get_data_status()` 결과를 표시한다.
 
 주요 지표:
 
@@ -67,13 +71,14 @@ Sidebar
 - parent chunk 수: `db_status['parent_chunks']`
 - 다운로드 PDF 수: `status['downloaded_pdfs']`
 - 현재 파이프라인 설정: generation model, embedding model, extraction engine, parent-child chunk 사용 여부, reranker 사용 여부, search top-k, test limit
+- 미임베딩 문서 전용 추출기: `unembedded_extraction_engine`
 - 날짜별 데이터 캘린더 원천: `report_date_counts`, `report_date_type_counts`
 
-이 tab은 검색 품질 문제가 실제 retrieval 로직 때문인지, DB/index/PDF 준비 상태 때문인지 먼저 확인하는 진입점이다.
+V1의 report/parent/FAISS 수는 legacy DB/index에서, V2의 report/parent/vector 수는 active catalog와 immutable snapshot에서 파생된다. 이 화면은 검색 품질 문제가 실제 retrieval 로직 때문인지 DB/index/PDF 준비 상태 때문인지 먼저 확인하는 진입점이다.
 
-### 3.2 미임베딩 문서 tab
+### 3.2 임베딩 누락 문서
 
-`미임베딩 문서` tab은 SQLite `reports`에는 존재하지만 `is_embedded=0`이라 VectorDB 상세 검색에는 아직 사용되지 않는 리포트를 보여준다. RDB 목록/집계에는 문서가 보이는데 follow-up 상세 답변이 적은 source만 사용하는 경우, 이 tab에서 DB/VectorDB coverage 차이를 확인한다.
+V1에서는 `reports.is_embedded=0` row를 표시한다. V2의 의도된 의미는 latest catalog report object 중 active snapshot의 `active_reports`에 포함되지 않은 object, 즉 active manifest backlog다. RDB 목록/집계에는 문서가 보이는데 follow-up 상세 답변이 적은 source만 사용하는 경우 이 화면에서 DB/VectorDB coverage 차이를 확인한다.
 
 표시 metadata:
 
@@ -84,24 +89,27 @@ Sidebar
 - `title`
 - `file_name`
 
-`미임베딩 문서 ... 임베딩 시도` 버튼은 `src.core.data_update_jobs.start_embedding_job()`으로 embedding-only background job을 시작한다.
+`임베딩 누락 문서 ... 임베딩 시도` 버튼은 `src.core.data_update_jobs.start_embedding_job()`으로 embedding-only background job을 시작한다.
 
-- 처리 건수 0: `python -m src.core.embed_pipeline --all`
-- 처리 건수 N: `python -m src.core.embed_pipeline --limit N`
+- V1 처리 건수 0: `python -m src.core.embed_pipeline --all`
+- V1 처리 건수 N: `python -m src.core.embed_pipeline --limit N`
+- V2: 두 인자 모두 전체 inventory를 스캔하고 신규·변경 파일만 처리하므로 `--limit`을 무시
 - 진행 상태는 기존 data update progress box를 재사용하며 `(현재/전체) 파일명`을 표시한다.
 - 이미 데이터 업데이트/임베딩 job이 실행 중이면 버튼은 비활성화된다.
 
-### 3.3 실험 실행 tab
+> 현재 알려진 제한: native status가 반환한 catalog 경로가 `list_unembedded_reports()`에서 legacy anchor로 다시 해석되어 live V2에서 `OperationalError: no such column: id`가 재현된다. 코드 수정 전에는 V2 `임베딩 누락 문서` 화면이 정상 동작한다고 가정하지 말고 `데이터 상태`의 manifest backlog 지표와 support export를 사용한다.
+
+### 3.3 실험 실행
 
 `_render_experiment_monitoring()`은 고정 evaluation dataset을 실제 graph에 통과시켜 pass/fail 결과를 저장한다.
 
 지원 모드:
 
 1. `current_data`
-   - 현재 `data/reports.db`와 `data/vector_db`를 사용한다.
+   - `DB_PATH`를 legacy anchor로 넘기되 canonical runtime dispatch가 활성 backend를 선택한다. V1이면 `reports.db`/`vector_db`, V2이면 `retrieval/v2/catalog.sqlite3`와 active immutable snapshot을 사용한다.
    - 로컬 데이터가 바뀌면 baseline 비교가 흔들릴 수 있다.
 2. `fixed_snapshot`
-   - `tests/fixtures/eval_snapshot`의 고정 DB/index를 별도 Python 프로세스로 사용한다.
+   - `tests/fixtures/eval_snapshot`의 고정 V1형 `reports.db`/`vector_db` baseline을 별도 Python 프로세스로 사용한다.
    - 실행 전 `validate_evaluation_snapshot()`으로 dataset metadata와 manifest/file 존재 여부를 검증한다.
 
 실행 입력:
@@ -127,6 +135,8 @@ Sidebar
 
 전체 run summary는 pass rate, route/filter/source/citation pass rate, no-result rate, 평균 latency를 제공한다. 같은 execution mode의 직전 run이 있으면 `compare_evaluation_runs()`로 delta를 표시한다. mode가 다른 run끼리는 비교하지 않는다.
 
+`tests/fixtures/multiturn_evaluation_dataset.json`과 `run_multiturn_evaluation_dataset()` helper는 후속 질문 scope 회귀를 programmatic하게 실행한다. 이 multi-turn runner는 현재 GUI에는 연결되지 않았다.
+
 실패 case는 `build_evaluation_failure_actions()`가 다음 조치 후보로 분류한다.
 
 - route 실패: router/query classification 확인
@@ -136,9 +146,9 @@ Sidebar
 - latency 실패: latency budget 확인
 - no-result: filter 완화 retry 또는 데이터 업데이트 확인
 
-### 3.4 고정 테스트셋 tab
+### 3.4 고정 평가셋
 
-`고정 테스트셋` tab은 `tests/fixtures/evaluation_dataset.json`의 coverage를 요약한다.
+`고정 평가셋` 화면은 `tests/fixtures/evaluation_dataset.json`의 coverage를 요약한다.
 
 표시 내용:
 
@@ -154,7 +164,7 @@ Sidebar
 
 `docs/EVALUATION_DATASET.md`에 정의된 정책처럼, 이 fixture는 성능 개선 전후를 비교하기 위한 기준선이다. source PDF 본문은 포함하지 않고 question, expected route/filter/source/RDB expectation 같은 재현 가능한 기대값만 저장한다.
 
-### 3.5 Parsing engines tab
+### 3.5 Parsing 비교
 
 `_render_parsing_engine_evaluation()`은 PDF extraction engine 비교를 실행한다.
 
@@ -180,7 +190,7 @@ Sidebar
 
 이 tab은 retrieval 이전 단계인 PDF parsing 품질과 latency를 비교하기 위한 것이다. parsing 품질 변화가 chunking/retrieval 품질 변화로 이어질 수 있으므로 전체 개선 루프의 앞단 지표로 둔다.
 
-### 3.6 전체 Monitoring tab
+### 3.6 전체 응답 품질
 
 `_render_global_monitoring()`은 모든 thread의 assistant 응답 metadata를 집계한다. 원문을 기본 노출하지 않고 운영 품질 신호만 보여준다.
 
@@ -197,22 +207,27 @@ Sidebar
 - data integrity issue 수
 - status counts
 - route counts
-- recent failed responses
+- recent failures
 
-`recent_failed_responses`는 실패한 assistant 응답의 thread id/name, created_at, status, route, latency, no_vector_results, error를 최근순으로 최대 10개 보여준다.
+`recent_failures`는 실패한 assistant 응답의 thread id/name, created_at, status, route, latency, no_vector_results, error를 최근순으로 최대 10개 보여준다.
 
 데이터 무결성은 `summarize_data_integrity()`가 계산한다.
 
-| check | 기준 |
-| --- | --- |
-| `faiss_index` | FAISS index 존재 여부 |
-| `embedding_backlog` | pending report가 0이면 pass, 남아 있으면 warning |
-| `pdf_vs_db` | 다운로드 PDF 수가 embedded report 수 이상이면 pass |
-| `search_coverage` | 전체 report 중 embedded 비율이 95% 이상이면 pass |
+| backend | check | 기준 |
+| --- | --- | --- |
+| V1 | `faiss_index` | FAISS index 존재 여부 |
+| V1 | `embedding_backlog` | pending report가 0이면 pass, 남아 있으면 warning |
+| V1 | `pdf_vs_db` | 다운로드 PDF 수가 embedded report 수 이상인지 비교 |
+| V2 | `native_snapshot` | build state가 `committed_pending_checkpoint` 또는 `fully_complete`, snapshot state가 `ready` |
+| V2 | `native_membership` | catalog membership 수와 snapshot `ntotal`이 같고 0보다 큼 |
+| V2 | `manifest_backlog` | active manifest 밖 최신 source object 수 |
+| V2 | `pdf_vs_manifest` | PDF 수와 active report 수 비교 |
+| V2 | `search_coverage` | active/latest report 비율 |
+| V2 | `runtime_health` | generation, epoch, degraded, write_enabled |
 
-### 3.7 Issue reports tab
+### 3.7 이슈 신고/회귀 후보
 
-`_render_issue_report_monitoring()`은 `debug/issue_report_*.txt`로 저장된 사용자 신고를 전체 개선 루프의 입력으로 모아 보여준다.
+`_render_issue_report_monitoring()`은 `debug/issue_report_*.txt`와 같은 stem의 구조화 `.json` sidecar로 저장된 사용자 신고를 전체 개선 루프의 입력으로 모아 보여준다. 내부 상세 subheader는 `Issue reports`다.
 
 표시 내용:
 
@@ -239,7 +254,7 @@ Regression 후보 artifact에는 초기 운영 lifecycle 필드가 포함된다.
 - `impact_area`: debug hint/category/content 기반 추정값 (`filter_scope`, `routing`, `retrieval_source`, `citation`, `latency`, `ui`, `answer_quality`)
 - `eval_case_draft`: trace 기반 case 초안. `question`, `expected_route`, `expected_filters`, `expected_sources`, `expected_state`, `monitoring_dimensions`를 포함하며 정식 fixture 반영 전 운영자 검토가 필요하다.
 
-Issue reports tab의 `Regression candidates` 영역은 저장된 후보 artifact를 다시 로드해 lifecycle field와 draft 유무를 표시한다. `eval_case_draft`가 있는 후보는 선택해서 `regression_candidate_current_data` execution mode로 즉시 실행할 수 있으며, run artifact는 기존 evaluation run과 같은 `debug/evaluation_runs/evaluation_run_*.json` 경로에 저장된다. 이 실행은 정식 baseline 편입 전 재현성 확인용이므로 fixed snapshot baseline과는 별도 mode로 비교한다.
+`이슈 신고/회귀 후보` 화면의 `Regression candidates` 영역은 저장된 후보 artifact를 다시 로드해 lifecycle field와 draft 유무를 표시한다. `eval_case_draft`가 있는 후보는 선택해서 `regression_candidate_current_data` execution mode로 즉시 실행할 수 있으며, run artifact는 기존 evaluation run과 같은 `debug/evaluation_runs/evaluation_run_*.json` 경로에 저장된다. 이 실행은 정식 baseline 편입 전 재현성 확인용이므로 fixed snapshot baseline과는 별도 mode로 비교한다.
 
 이 단계는 수동 신고를 이후 evaluation dataset case로 승격하기 전의 중간 저장소 역할을 한다.
 
@@ -404,6 +419,11 @@ Trace viewer는 선택 응답을 세 개의 목적별 tab으로 나누어 보여
 - `selected_source_count`
 - `selected_file_names`
 - score summary: `score`, `rerank_score`, `recency_score`, `final_score`의 min/max/avg
+- backend: `runtime_mode`, `requested_k`, `fetch_k`
+- native corpus/search: `native_candidate_count`, `native_eligible_count`, `native_snapshot_total`, `native_search_strategy`, `native_faiss_calls`
+- native hydration: `native_hydration_batches`, `native_hydration_rows`, `native_hydration_cache_hits`, `native_hydration_cache_misses`
+- native revision: `snapshot_id`, `publication_generation`
+- native timings(ns): `native_scope_compile_ns`, `native_eligibility_ns`, `native_faiss_ns`, `native_hydration_ns`, `native_lease_ns`, `native_total_ns`
 
 이 raw detail은 metadata filter가 과도했는지, rerank 이후 source가 특정 문서에 편중됐는지, document coverage가 적용됐는지 확인할 때 사용한다.
 
@@ -443,7 +463,7 @@ Trace viewer는 선택 응답을 세 개의 목적별 tab으로 나누어 보여
 | --- | --- | --- |
 | 후속 질문인데 prior scope 미사용 | `followup_scope_intent=True`, `scope_source != prior_search_scope`, `scope_decision` 없음 | 후속 질문 scope 상실 탐지 |
 | 날짜 필터 손실 | 직전 응답에는 `report_date_start/end`가 있었는데 현재 응답에는 없음 | 기간 조건 회귀 탐지 |
-| source 1개 문서 편중 | `rerank_info`가 2개 이상인데 unique file이 1개 이하 | 복수 문서 요청의 source 다양성 부족 탐지 |
+| source 1개 문서 편중 | `selected_sources`가 2개 이상인데 unique file이 1개 이하 | 복수 문서 요청의 source 다양성 부족 탐지 |
 | 필터 후 후보 0개 | `candidate_count_after_filter == 0` | metadata filter 과도 적용 탐지 |
 | route/content intent 불일치 | `route=rdb`인데 질문에 `주요 내용`, `요약`, `리스크`, `투자포인트` 포함 | 본문 검색이 필요한 질문이 RDB로 간 경우 탐지 |
 | document coverage 미적용 | 질문에 `전체`, `각각`, `리포트들`, `목록`, `비교`, `모두`, `여러`가 있고 `document_coverage_applied is False` | 여러 문서 질의에서 coverage 보장 누락 탐지 |
@@ -465,7 +485,7 @@ Chat Monitoring 상세 화면의 `Create issue report with selected trace` 버�
 - previous vs selected diff
 - debug hints
 
-이 report는 전체 Monitoring의 Issue reports tab에서 다시 볼 수 있고, 필요하면 regression 후보로 승격할 수 있다.
+이 report는 전체 Monitoring의 `이슈 신고/회귀 후보` 화면에서 다시 볼 수 있고, 필요하면 regression 후보로 승격할 수 있다.
 
 ## 5. 응답 metadata 수집 흐름
 
@@ -504,7 +524,7 @@ metadata
 ├─ selection_context
 ├─ scope_decision
 ├─ no_vector_results
-├─ rerank_info
+├─ selected_sources
 ├─ search_scope
 └─ monitoring
    ├─ query_rewrite
@@ -514,7 +534,10 @@ metadata
    ├─ retrieval
    │  ├─ source_count
    │  ├─ score_summary
-   │  └─ vectordb_node의 retrieval metrics
+   │  ├─ runtime_mode / snapshot_id / publication_generation
+   │  ├─ native candidate/eligible/snapshot counts와 search strategy
+   │  ├─ FAISS/hydration/cache counters
+   │  └─ native scope/eligibility/FAISS/hydration/lease/total timings
    └─ rdb
       ├─ sql_query
       ├─ row_count
@@ -529,7 +552,8 @@ metadata
 
 - Debug hints는 rule-based이므로 모든 실패를 포착하지 못한다.
 - keyword 기반 hint는 질문 표현에 따라 false positive/false negative가 발생할 수 있다.
-- `current_data` evaluation은 현재 DB/index 상태에 의존하므로 장기 baseline 비교에는 `fixed_snapshot`이 더 적합하다.
+- `current_data` evaluation은 현재 canonical backend 상태에 의존하므로 장기 baseline 비교에는 고정 V1형 `fixed_snapshot`이 더 적합하다.
+- Native V2의 `임베딩 누락 문서` UI는 현재 catalog 경로를 legacy anchor로 재해석하는 결함 때문에 실패한다. 코드 수정 전에는 manifest backlog 지표를 사용한다.
 - Monitoring metadata는 compact 진단 정보이며, 전체 chain-of-thought나 LLM 내부 판단을 저장하지 않는다.
 - Issue report와 evaluation run 산출물은 `debug/` 아래에 저장되며 Git에는 포함하지 않는다.
 - Chat Monitoring row는 안전성을 위해 preview 중심이지만, issue report 원문에는 문제 재현에 필요한 정보가 포함될 수 있으므로 외부 전달 전 확인이 필요하다.
@@ -539,7 +563,7 @@ metadata
 Monitoring 관련 주요 회귀 테스트는 다음 명령으로 실행한다.
 
 ```bash
-python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_evaluation_dataset.py tests/test_evaluation_snapshot_runner.py -q
+python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_status.py tests/test_vectordb_selection.py tests/test_evaluation_dataset.py tests/test_evaluation_snapshot_runner.py -q
 ```
 
 주요 테스트 범위:
@@ -553,3 +577,5 @@ python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_eval
 - issue report context 생성
 - 전체 thread summary와 data integrity summary
 - evaluation run 비교와 failure triage
+- native runtime/data-integrity 요약과 snapshot-aware retrieval metadata
+- multi-turn evaluation helper/fixture (GUI에는 미노출)
