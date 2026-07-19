@@ -14,6 +14,7 @@ from src.retrieval.publication import (
     PublicationCrash,
     PublicationError,
     PublicationRequest,
+    activate_epoch_zero_seed,
     publish_immutable_artifact,
     read_durable_floors,
 )
@@ -447,6 +448,59 @@ def test_first_successor_without_new_logical_member_is_rejected_before_journal(
     finally:
         connection.close()
     assert journal_count == 0
+
+
+def test_epoch_zero_seed_activation_keeps_the_converted_snapshot_active(
+    tmp_path: Path,
+) -> None:
+    data_root, _ = make_native_install(tmp_path)
+
+    outcome = activate_epoch_zero_seed(
+        data_root,
+        snapshot_id="snapshot-seed",
+        canary={
+            "sample_count": 1,
+            "dimension": 2,
+            "minimum_cosine_similarity": 1.0,
+            "maximum_norm_relative_error": 0.0,
+            "self_rank_one_count": 1,
+        },
+    )
+
+    assert outcome.active_snapshot_id == "snapshot-seed"
+    assert outcome.predecessor_snapshot_id is None
+    assert outcome.publication_generation == 2
+    assert outcome.write_epoch == 1
+    assert outcome.v1_fallback_open is False
+    assert _runtime(data_root) == (
+        "snapshot-seed",
+        "build-seed",
+        None,
+        2,
+        1,
+        0,
+        0,
+        1,
+    )
+    with sqlite3.connect(
+        data_root / "retrieval" / "v2" / "catalog.sqlite3"
+    ) as connection:
+        assert connection.execute(
+            "SELECT active_snapshot_id FROM retrieval_runtime"
+        ).fetchone() == ("snapshot-seed",)
+        assert connection.execute(
+            "SELECT state FROM vector_snapshots WHERE snapshot_id = 'snapshot-seed'"
+        ).fetchone() == ("ready",)
+        assert connection.execute(
+            "SELECT state FROM retrieval_builds WHERE build_id = 'build-seed'"
+        ).fetchone() == ("fully_complete",)
+    assert [
+        (floor.publication_generation, floor.write_epoch, floor.active_snapshot_id)
+        for floor in read_durable_floors(data_root)
+    ] == [
+        (1, 0, "snapshot-seed"),
+        (2, 1, "snapshot-seed"),
+    ]
 
 
 def test_epoch_zero_publication_cannot_bypass_first_successor_epoch_increment(

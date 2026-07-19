@@ -17,15 +17,18 @@ from src.core.pdf_extraction import ExtractionResult
 from src.migrations.v2.evidence import seal_compatibility_bundle
 from src.migrations.v2.import_v1 import convert_v1_seed
 from src.retrieval import build_service
+from src.retrieval.bootstrap import inspect_runtime
 from src.retrieval.build_service import (
     NativeBuildError,
     execute_full_corpus_successor,
+    execute_incremental_update,
     materialize_candidate,
     prepare_full_corpus_build,
+    prepare_incremental_build,
     publish_candidate,
 )
 from src.retrieval.identity import EmbeddingProfile
-from src.retrieval.publication import PublicationError
+from src.retrieval.publication import PublicationError, activate_epoch_zero_seed
 from src.retrieval.recovery import RecoveryDisposition, StartupReconciler
 from src.retrieval.writer_lock import NativeWriterLock, WriterLockError
 
@@ -71,6 +74,27 @@ def _profile() -> EmbeddingProfile:
         extractor="legacy-v1-parent-content",
         parent_policy={"size": 2000, "overlap": 200},
         child_policy={"size": 500, "overlap": 50},
+    )
+
+
+def _migration_profile() -> EmbeddingProfile:
+    return EmbeddingProfile(
+        model="model-a",
+        dimension=3,
+        metric="l2",
+        normalization="none",
+        prefix_template=PREFIX,
+        extractor="legacy-v1-import|configured=deterministic-extractor|unattested",
+        parent_policy={
+            "algorithm": "langchain-recursive-v1",
+            "chunk_size": 2000,
+            "chunk_overlap": 200,
+        },
+        child_policy={
+            "algorithm": "langchain-recursive-v1",
+            "chunk_size": 500,
+            "chunk_overlap": 50,
+        },
     )
 
 
@@ -134,6 +158,7 @@ def _native_seed(
     tmp_path: Path,
     *,
     seed_matches_current_source: bool = False,
+    profile: EmbeddingProfile | None = None,
 ) -> tuple[Path, Path]:
     copied = tmp_path / "copied-v1"
     copied.mkdir()
@@ -145,7 +170,7 @@ def _native_seed(
         copied,
         data_root,
         expected_hashes=expected,
-        profile=_profile(),
+        profile=profile or _profile(),
         source_hashes={
             "a.pdf": (
                 hashlib.sha256(current_a).hexdigest()
@@ -296,6 +321,110 @@ def test_full_corpus_successor_closes_fallback_and_adds_new_member(tmp_path: Pat
     assert active_files == {"downloaded/a.pdf", "downloaded/b.pdf"}
     assert (data_root / result.snapshot_relative_path).is_file()
     assert (data_root / result.evidence_manifest_relative_path).is_file()
+
+
+def test_incremental_update_reuses_unchanged_vectors_and_processes_only_pending_pdf(
+    tmp_path: Path,
+) -> None:
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=_migration_profile(),
+    )
+    activate_epoch_zero_seed(
+        data_root,
+        snapshot_id=inspect_runtime(
+            data_root / "reports.db",
+            data_root=data_root,
+            validate_snapshot=True,
+        ).active_snapshot_id
+        or "",
+        canary={
+            "sample_count": 2,
+            "dimension": 3,
+            "minimum_cosine_similarity": 1.0,
+            "maximum_norm_relative_error": 0.0,
+            "self_rank_one_count": 2,
+        },
+    )
+    embeddings = DeterministicEmbeddings()
+    extracted: list[str] = []
+
+    def tracking_extract(path: Path, engine: str) -> str:
+        extracted.append(path.name)
+        return _extract(path, engine)
+
+    result = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        data_root=data_root,
+        embeddings=embeddings,
+        model="model-a",
+        extractor_name="deterministic-extractor",
+        extractor=tracking_extract,
+        metadata_parser=_metadata,
+        allow_extraction_fallback=False,
+        use_parent_child=True,
+        parent_chunk_size=2000,
+        child_chunk_size=500,
+        metric="l2",
+        normalization="none",
+    )
+
+    assert result is not None
+    candidate, publication = result
+    assert extracted == ["b.pdf"]
+    assert publication.active_snapshot_id == candidate.snapshot_id
+    assert publication.predecessor_snapshot_id is not None
+    assert candidate.report_count == 2
+    assert candidate.chunk_count > 2
+    assert len(embeddings.calls) == 2
+    assert all("newly searchable" not in text for text in embeddings.calls[0])
+    assert any("newly searchable" in text for text in embeddings.calls[1])
+
+
+def test_incremental_update_is_a_noop_without_source_changes(tmp_path: Path) -> None:
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=_migration_profile(),
+    )
+    selection = inspect_runtime(
+        data_root / "reports.db",
+        data_root=data_root,
+        validate_snapshot=True,
+    )
+    activate_epoch_zero_seed(
+        data_root,
+        snapshot_id=selection.active_snapshot_id or "",
+        canary={
+            "sample_count": 2,
+            "dimension": 3,
+            "minimum_cosine_similarity": 1.0,
+            "maximum_norm_relative_error": 0.0,
+            "self_rank_one_count": 2,
+        },
+    )
+    (sources / "b.pdf").unlink()
+    embeddings = DeterministicEmbeddings()
+
+    assert prepare_incremental_build(
+        data_root / "reports.db",
+        sources,
+        data_root=data_root,
+        embeddings=embeddings,
+        model="model-a",
+        extractor_name="deterministic-extractor",
+        extractor=_extract,
+        metadata_parser=_metadata,
+        allow_extraction_fallback=False,
+        use_parent_child=True,
+        parent_chunk_size=2000,
+        child_chunk_size=500,
+        metric="l2",
+        normalization="none",
+    ) is None
+    assert embeddings.calls == []
 
 
 def test_build_mutation_boundaries_reject_duck_typed_writer_leases(

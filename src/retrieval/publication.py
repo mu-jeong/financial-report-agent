@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -64,6 +66,7 @@ class PublicationRequest:
     evidence_manifest_sha256: str
     increment_write_epoch: bool = True
     enable_writes_on_complete: bool = True
+    allow_active_snapshot_promotion: bool = False
 
 
 @dataclass(frozen=True)
@@ -361,6 +364,10 @@ class PublicationCoordinator:
                     if intent is None
                     else intent.enable_writes_on_complete
                 ),
+                allow_active_snapshot_promotion=(
+                    row["from_snapshot_id"] is not None
+                    and row["from_snapshot_id"] == row["to_snapshot_id"]
+                ),
             )
         finally:
             connection.close()
@@ -577,19 +584,32 @@ class PublicationCoordinator:
         )
         if actual_runtime != expected_runtime:
             raise PublicationError("runtime changed after commit intent became durable")
+        promotes_active_snapshot = intent.from_snapshot_id == intent.to_snapshot_id
+        if promotes_active_snapshot and retiring_predecessor is not None:
+            raise PublicationError("epoch-zero seed activation cannot retire a predecessor")
 
         def commit() -> None:
-            connection.execute(
-                """
-                UPDATE retrieval_builds
-                SET state = 'committed_pending_checkpoint',
-                    state_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE build_id = ? AND state = 'ready'
-                """,
-                (intent.to_build_id,),
-            )
-            if connection.execute("SELECT changes()").fetchone()[0] != 1:
-                raise PublicationError("target build is not ready for commit")
+            if promotes_active_snapshot:
+                state = connection.execute(
+                    "SELECT state FROM retrieval_builds WHERE build_id = ?",
+                    (intent.to_build_id,),
+                ).fetchone()
+                if state is None or str(state[0]) != "fully_complete":
+                    raise PublicationError(
+                        "epoch-zero seed activation requires a fully complete build"
+                    )
+            else:
+                connection.execute(
+                    """
+                    UPDATE retrieval_builds
+                    SET state = 'committed_pending_checkpoint',
+                        state_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE build_id = ? AND state = 'ready'
+                    """,
+                    (intent.to_build_id,),
+                )
+                if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                    raise PublicationError("target build is not ready for commit")
             connection.execute(
                 """
                 UPDATE retrieval_runtime
@@ -603,7 +623,7 @@ class PublicationCoordinator:
                 (
                     intent.to_snapshot_id,
                     intent.to_build_id,
-                    intent.from_snapshot_id,
+                    None if promotes_active_snapshot else intent.from_snapshot_id,
                     intent.target_publication_generation,
                     intent.new_write_epoch,
                     int(intent.v1_fallback_floor == "open"),
@@ -618,7 +638,7 @@ class PublicationCoordinator:
                 """,
                 (intent.publication_id,),
             )
-            if retiring_predecessor is not None:
+            if retiring_predecessor is not None and not promotes_active_snapshot:
                 connection.execute(
                     """
                     UPDATE vector_snapshots
@@ -680,7 +700,7 @@ class PublicationCoordinator:
                     "SELECT state FROM retrieval_builds WHERE build_id = ?",
                     (intent.to_build_id,),
                 ).fetchone()
-                if state != ("fully_complete",):
+                if state is None or str(state[0]) != "fully_complete":
                     raise PublicationError("target build cannot become fully complete")
             connection.execute(
                 """
@@ -742,6 +762,102 @@ class PublicationCoordinator:
             crash_hook(boundary)
         if crash_after == boundary:
             raise PublicationCrash(boundary)
+
+
+def activate_epoch_zero_seed(
+    data_root: str | Path,
+    *,
+    snapshot_id: str,
+    canary: Mapping[str, Any],
+    writer_lease: WriterLease | None = None,
+) -> PublicationOutcome:
+    """Enable native writes while keeping the converted seed snapshot active."""
+
+    root = Path(data_root).resolve(strict=True)
+    if writer_lease is None:
+        with NativeWriterLock(root) as owned_lease:
+            return activate_epoch_zero_seed(
+                root,
+                snapshot_id=snapshot_id,
+                canary=canary,
+                writer_lease=owned_lease,
+            )
+    assert_writer_lease_owned(writer_lease, root)
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise ValueError("snapshot_id must be a non-empty string")
+
+    coordinator = PublicationCoordinator(root)
+    publication_id = hashlib.sha256(
+        f"native-seed-activation\0{snapshot_id}".encode("utf-8")
+    ).hexdigest()
+    connection = _open_catalog(coordinator.catalog_path, read_only=True)
+    try:
+        _validate_catalog_integrity(connection)
+        existing = connection.execute(
+            "SELECT 1 FROM publication_runs WHERE publication_id = ?",
+            (publication_id,),
+        ).fetchone()
+        if existing is not None:
+            request = coordinator.request_from_journal(publication_id)
+            if (
+                request.to_snapshot_id != snapshot_id
+                or not request.allow_active_snapshot_promotion
+            ):
+                raise PublicationError("seed activation journal identity conflicts")
+            return coordinator.publish(request, writer_lease=writer_lease)
+
+        _validate_runtime_floor(root, connection, None)
+        runtime = _read_runtime(connection)
+        if (
+            runtime["active_snapshot_id"] != snapshot_id
+            or int(runtime["write_epoch"]) != 0
+            or not bool(runtime["v1_fallback_open"])
+            or bool(runtime["degraded"])
+            or bool(runtime["write_enabled"])
+            or runtime["predecessor_snapshot_id"] is not None
+        ):
+            raise PublicationError(
+                "seed activation requires the healthy converted epoch-zero runtime"
+            )
+        snapshot = _validate_snapshot(
+            connection,
+            root,
+            snapshot_id,
+            allowed_build_states={"fully_complete"},
+            allowed_snapshot_states={"ready"},
+        )
+        evidence = {
+            "schema_version": 1,
+            "kind": "native_seed_activation",
+            "publication_id": publication_id,
+            "base_publication_generation": int(runtime["publication_generation"]),
+            "base_snapshot_id": snapshot_id,
+            "base_write_epoch": 0,
+            "build_id": str(snapshot["build_id"]),
+            "snapshot_id": snapshot_id,
+            "snapshot_file_sha256": str(snapshot["file_sha256"]),
+            "same_space_canary": dict(canary),
+        }
+        _validate_seed_activation_canary(evidence, int(snapshot["dimension"]))
+    finally:
+        connection.close()
+
+    evidence_relative = f"retrieval/v2/evidence/{publication_id}/manifest.json"
+    evidence_path = _resolve_relative(root, evidence_relative)
+    _atomic_json_once(evidence_path, evidence)
+    evidence_path.chmod(stat.S_IREAD)
+    return coordinator.publish(
+        PublicationRequest(
+            publication_id=publication_id,
+            to_snapshot_id=snapshot_id,
+            evidence_manifest_relative_path=evidence_relative,
+            evidence_manifest_sha256=_sha256_file(evidence_path),
+            increment_write_epoch=True,
+            enable_writes_on_complete=True,
+            allow_active_snapshot_promotion=True,
+        ),
+        writer_lease=writer_lease,
+    )
 
 
 def publish_immutable_artifact(
@@ -844,6 +960,18 @@ def _validate_first_successor_new_member(
     active_snapshot = runtime["active_snapshot_id"]
     if active_snapshot is None:
         raise PublicationError("epoch-zero runtime has no converted active snapshot")
+    if request.to_snapshot_id == active_snapshot:
+        if not request.allow_active_snapshot_promotion:
+            raise PublicationError(
+                "active epoch-zero snapshot requires the dedicated seed activation protocol"
+            )
+        if runtime["predecessor_snapshot_id"] is not None:
+            raise PublicationError("epoch-zero seed activation cannot have a predecessor")
+        return
+    if request.allow_active_snapshot_promotion:
+        raise PublicationError(
+            "seed activation must keep the converted active snapshot selected"
+        )
 
     def report_uids(snapshot_id: str) -> set[str]:
         return {
@@ -1081,6 +1209,14 @@ def _validate_request(request: PublicationRequest) -> None:
         raise TypeError("increment_write_epoch must be a bool")
     if not isinstance(request.enable_writes_on_complete, bool):
         raise TypeError("enable_writes_on_complete must be a bool")
+    if not isinstance(request.allow_active_snapshot_promotion, bool):
+        raise TypeError("allow_active_snapshot_promotion must be a bool")
+    if request.allow_active_snapshot_promotion and (
+        not request.increment_write_epoch or not request.enable_writes_on_complete
+    ):
+        raise ValueError(
+            "active snapshot promotion must increment the epoch and enable writes"
+        )
 
 
 def _validate_evidence_manifest(
@@ -1109,21 +1245,24 @@ def _validate_candidate_evidence_lineage(
     live_runtime: sqlite3.Row | None,
 ) -> None:
     snapshot = _read_snapshot(connection, request.to_snapshot_id)
+    allowed_kinds = (
+        {"native_seed_activation"}
+        if request.allow_active_snapshot_promotion
+        else {"native_full_corpus_candidate", "native_incremental_candidate"}
+    )
     expected_identity = (
         1,
-        "native_full_corpus_candidate",
         request.publication_id,
         request.to_snapshot_id,
         str(snapshot["build_id"]),
     )
     actual_identity = (
         evidence.get("schema_version"),
-        evidence.get("kind"),
         evidence.get("publication_id"),
         evidence.get("snapshot_id"),
         evidence.get("build_id"),
     )
-    if actual_identity != expected_identity:
+    if actual_identity != expected_identity or evidence.get("kind") not in allowed_kinds:
         raise PublicationError(
             "publication evidence identity does not match the target candidate"
         )
@@ -1158,6 +1297,38 @@ def _validate_candidate_evidence_lineage(
         raise PublicationError(
             "publication evidence base snapshot does not match its journal"
         )
+    if request.allow_active_snapshot_promotion:
+        _validate_seed_activation_canary(evidence, int(snapshot["dimension"]))
+
+
+def _validate_seed_activation_canary(
+    evidence: Mapping[str, Any],
+    expected_dimension: int,
+) -> None:
+    canary = evidence.get("same_space_canary")
+    if not isinstance(canary, Mapping):
+        raise PublicationError("seed activation evidence has no same-space canary")
+    sample_count = canary.get("sample_count")
+    dimension = canary.get("dimension")
+    self_rank_one_count = canary.get("self_rank_one_count")
+    minimum_cosine = canary.get("minimum_cosine_similarity")
+    maximum_norm_error = canary.get("maximum_norm_relative_error")
+    if (
+        not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count <= 0
+        or dimension != expected_dimension
+        or self_rank_one_count != sample_count
+        or not isinstance(minimum_cosine, (int, float))
+        or isinstance(minimum_cosine, bool)
+        or not math.isfinite(float(minimum_cosine))
+        or float(minimum_cosine) < 0.999
+        or not isinstance(maximum_norm_error, (int, float))
+        or isinstance(maximum_norm_error, bool)
+        or not math.isfinite(float(maximum_norm_error))
+        or float(maximum_norm_error) > 0.01
+    ):
+        raise PublicationError("seed activation same-space canary is invalid")
 
 
 def _validate_snapshot(
@@ -1334,13 +1505,18 @@ def _validate_committed_pointer(
         runtime["active_build_id"],
         runtime["predecessor_snapshot_id"],
     )
+    expected_predecessor = (
+        None
+        if intent.from_snapshot_id == intent.to_snapshot_id
+        else intent.from_snapshot_id
+    )
     expected = (
         intent.target_publication_generation,
         intent.new_write_epoch,
         intent.v1_fallback_floor == "open",
         intent.to_snapshot_id,
         intent.to_build_id,
-        intent.from_snapshot_id,
+        expected_predecessor,
     )
     if actual != expected:
         raise PublicationError("committed runtime pointer conflicts with its intent")

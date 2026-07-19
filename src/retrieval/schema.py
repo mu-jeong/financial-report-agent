@@ -382,11 +382,9 @@ _TABLE_DDL = (
         updated_at TEXT NOT NULL DEFAULT (
             strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         ) CHECK (length(updated_at) > 0),
-        CHECK (
-            from_snapshot_id IS NULL
-            OR to_snapshot_id IS NULL
-            OR from_snapshot_id <> to_snapshot_id
-        ),
+        -- A journal may point from and to the same immutable snapshot only for
+        -- the application-validated epoch-zero seed activation protocol.  The
+        -- ordinary publication path still rejects same-snapshot requests.
         CHECK (
             (evidence_manifest_relative_path IS NULL
              AND evidence_manifest_sha256 IS NULL)

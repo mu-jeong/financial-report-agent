@@ -296,17 +296,17 @@ def _run_pipeline_locked(test_limit: int = config.TEST_LIMIT) -> int:
         allow_degraded_forward_recovery=True,
     )
     if runtime.is_native:
-        from src.retrieval.build_service import execute_full_corpus_successor
+        from src.retrieval.build_service import execute_incremental_update
 
         extraction_engine = unembedded_extraction_engine()
         allow_extraction_fallback = extraction_engine == config.EXTRACTION_ENGINE
         print("=" * 60)
-        print("  Finance LLM Native V2 Full-Corpus Build")
+        print("  Finance LLM Native V2 Incremental Update")
         print("=" * 60)
         if test_limit and test_limit > 0:
-            logger.info("Native V2 ignores --limit and validates the complete corpus.")
+            logger.info("Native V2 ignores --limit and scans the complete source inventory.")
         try:
-            result, outcome = execute_full_corpus_successor(
+            completed = execute_incremental_update(
                 config.DB_PATH,
                 config.SAVE_DIR,
                 data_root=runtime.paths.data_root,
@@ -322,8 +322,12 @@ def _run_pipeline_locked(test_limit: int = config.TEST_LIMIT) -> int:
                 normalization="none",
             )
         except Exception as exc:
-            logger.error(f"Native V2 full-corpus build failed: {type(exc).__name__}: {exc}")
+            logger.error(f"Native V2 incremental update failed: {type(exc).__name__}: {exc}")
             return 1
+        if completed is None:
+            logger.info("Native V2 is already current; no PDFs required processing.")
+            return 0
+        result, outcome = completed
         logger.info(
             "Native V2 publication complete: generation=%s epoch=%s reports=%s chunks=%s",
             outcome.publication_generation,

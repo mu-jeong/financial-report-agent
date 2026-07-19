@@ -189,7 +189,7 @@ def test_run_pipeline_records_extraction_engine_on_failed_pending_document(tmp_p
     }
 
 
-def test_run_pipeline_routes_native_runtime_to_one_full_corpus_build(
+def test_run_pipeline_routes_native_runtime_to_incremental_update(
     tmp_path,
     monkeypatch,
 ):
@@ -233,7 +233,7 @@ def test_run_pipeline_routes_native_runtime_to_one_full_corpus_build(
         calls.append((db_path, source_directory, kwargs))
         return result, outcome
 
-    monkeypatch.setattr(build_service, "execute_full_corpus_successor", fake_execute)
+    monkeypatch.setattr(build_service, "execute_incremental_update", fake_execute)
 
     assert embed_pipeline.run_pipeline(test_limit=1) == 0
     assert len(calls) == 1
@@ -285,7 +285,7 @@ def test_run_pipeline_native_runtime_keeps_default_extractor_fallback_policy(
             SimpleNamespace(publication_generation=2, write_epoch=1),
         )
 
-    monkeypatch.setattr(build_service, "execute_full_corpus_successor", fake_execute)
+    monkeypatch.setattr(build_service, "execute_incremental_update", fake_execute)
 
     assert embed_pipeline.run_pipeline() == 0
     assert captured["extractor_name"] == "opendataloader"

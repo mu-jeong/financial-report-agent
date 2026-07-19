@@ -1,10 +1,9 @@
-"""Deterministic whole-corpus native build service.
+"""Deterministic native snapshot build service.
 
-Every source change produces one complete off-path candidate.  The service
-never mutates the active pointer and has no single-report publication API.
-Publication is delegated to :mod:`src.retrieval.publication` only after the
-candidate catalog rows, raw FAISS bytes, membership, and redacted evidence are
-fully validated.
+Every source change produces one complete off-path snapshot. Incremental builds
+reuse unchanged immutable chunks and vectors while parsing and embedding only
+new or changed reports. Publication is delegated only after the candidate
+catalog rows, FAISS bytes, membership, and redacted evidence are validated.
 """
 
 from __future__ import annotations
@@ -147,6 +146,7 @@ class NativeBuildPlan:
     source_inventory: tuple[SourceFileSnapshot, ...]
     same_space_canary: SameSpaceCanary | None
     forward_recovery: bool
+    build_mode: str
 
 
 @dataclass(frozen=True)
@@ -165,6 +165,14 @@ class CandidateResult:
     canonical_source_prefix: str
     deleted_relative_paths: tuple[str, ...]
     source_inventory: tuple[SourceFileSnapshot, ...]
+
+
+@dataclass(frozen=True)
+class _ReusableSnapshot:
+    profile: EmbeddingProfile
+    parents: tuple[CandidateParent, ...]
+    chunks: tuple[CandidateChunk, ...]
+    vectors_by_chunk_uid: Mapping[str, np.ndarray]
 
 
 def prepare_full_corpus_build(
@@ -189,7 +197,8 @@ def prepare_full_corpus_build(
     allow_extraction_fallback: bool = True,
     allow_degraded_forward_recovery: bool = False,
     writer_lease: WriterLease | None = None,
-) -> NativeBuildPlan:
+    _reuse_unchanged_vectors: bool = False,
+) -> NativeBuildPlan | None:
     """Prepare one deterministic full-corpus successor entirely off path.
 
     Epoch-zero planning requires the dedicated first-successor writer lease;
@@ -319,6 +328,30 @@ def prepare_full_corpus_build(
         active_reports_by_path=active_reports_by_path,
         deleted_paths=set(deleted),
     )
+    if _reuse_unchanged_vectors:
+        return _prepare_incremental_plan(
+            selection=selection,
+            reports=reports,
+            source_records=source_records,
+            manifest=manifest,
+            active_reports_by_path=active_reports_by_path,
+            source_root=source_root,
+            source_inventory=source_inventory,
+            canonical_source_prefix=normalized_source_prefix,
+            deleted_relative_paths=deleted,
+            embeddings=embeddings,
+            model=model,
+            extractor_name=canonical_extractor_name,
+            extractor=extractor_port,
+            allow_extraction_fallback=allow_extraction_fallback,
+            parent_chunk_size=parent_chunk_size,
+            child_chunk_size=child_chunk_size,
+            use_parent_child=use_parent_child,
+            single_chunk_size=single_chunk_size,
+            metric=metric,
+            normalization=normalization,
+            prefix_template=prefix_template,
+        )
 
     canary = (
         _validate_same_space_canary(
@@ -464,11 +497,274 @@ def prepare_full_corpus_build(
     )
     vectors_by_physical_id = np.ascontiguousarray(vectors[vector_order], dtype=np.float32)
     vectors_by_physical_id.setflags(write=False)
+    return _finalize_native_build_plan(
+        selection=selection,
+        profile=profile,
+        reports=reports,
+        parents=tuple(parents),
+        chunks=chunks,
+        manifest=manifest,
+        vectors_by_physical_id=vectors_by_physical_id,
+        deleted_relative_paths=deleted,
+        source_root=source_root,
+        canonical_source_prefix=normalized_source_prefix,
+        source_inventory=source_inventory,
+        same_space_canary=canary,
+        build_mode="full",
+    )
+
+
+def prepare_incremental_build(
+    legacy_db_path: str | Path,
+    source_directory: str | Path,
+    **kwargs: Any,
+) -> NativeBuildPlan | None:
+    """Build a complete successor while reusing every unchanged active vector."""
+
+    if "_reuse_unchanged_vectors" in kwargs:
+        raise TypeError("_reuse_unchanged_vectors is internal")
+    return prepare_full_corpus_build(
+        legacy_db_path,
+        source_directory,
+        **kwargs,
+        _reuse_unchanged_vectors=True,
+    )
+
+
+def _prepare_incremental_plan(
+    *,
+    selection: RuntimeSelection,
+    reports: tuple[CandidateReport, ...],
+    source_records: list[dict[str, Any]],
+    manifest: CorpusManifest,
+    active_reports_by_path: Mapping[str, str],
+    source_root: Path,
+    source_inventory: tuple[SourceFileSnapshot, ...],
+    canonical_source_prefix: str,
+    deleted_relative_paths: tuple[str, ...],
+    embeddings: EmbeddingsPort,
+    model: str,
+    extractor_name: str,
+    extractor: ExtractorPort,
+    allow_extraction_fallback: bool,
+    parent_chunk_size: int,
+    child_chunk_size: int,
+    use_parent_child: bool,
+    single_chunk_size: int | None,
+    metric: str,
+    normalization: str,
+    prefix_template: str,
+) -> NativeBuildPlan | None:
+    if selection.write_epoch <= 0 or not selection.write_enabled:
+        raise NativeBuildError("incremental updates require a writable native runtime")
+    changed_records = [
+        record
+        for record in source_records
+        if active_reports_by_path.get(record["canonical_relative_path"])
+        != record["report_uid"]
+    ]
+    if not changed_records and not deleted_relative_paths:
+        return None
+
+    changed_uids = {str(record["report_uid"]) for record in changed_records}
+    unchanged_uids = {
+        report.report_uid for report in reports if report.report_uid not in changed_uids
+    }
+    reusable = _read_reusable_snapshot(selection, unchanged_uids)
+    _validate_incremental_profile(
+        reusable.profile,
+        model=model,
+        extractor_name=extractor_name,
+        allow_extraction_fallback=allow_extraction_fallback,
+        parent_chunk_size=parent_chunk_size,
+        child_chunk_size=child_chunk_size,
+        use_parent_child=use_parent_child,
+        single_chunk_size=single_chunk_size,
+        metric=metric,
+        normalization=normalization,
+        prefix_template=prefix_template,
+    )
+
+    canary = (
+        _validate_same_space_canary(
+            selection,
+            embeddings,
+            metric=metric,
+            normalization=normalization,
+        )
+        if changed_records
+        else None
+    )
+    extracted = [
+        (
+            record,
+            _extract_source(
+                record["path"],
+                extractor_name,
+                extractor,
+                allow_fallback=allow_extraction_fallback,
+            ),
+        )
+        for record in changed_records
+    ]
+    if extracted:
+        provisional_parents, provisional_chunks, embedding_texts = _split_full_corpus(
+            extracted,
+            parent_chunk_size=parent_chunk_size,
+            child_chunk_size=child_chunk_size,
+            use_parent_child=use_parent_child,
+            single_chunk_size=single_chunk_size,
+            prefix_template=prefix_template,
+        )
+        try:
+            new_vectors = np.asarray(
+                embeddings.embed_documents(embedding_texts),
+                dtype=np.float32,
+            )
+        except Exception as exc:
+            raise NativeBuildError(f"incremental embedding failed: {exc}") from exc
+        if (
+            new_vectors.ndim != 2
+            or new_vectors.shape[0] != len(provisional_chunks)
+            or new_vectors.shape[1] != reusable.profile.dimension
+        ):
+            raise NativeBuildError(
+                "incremental embedding result does not match the active vector space"
+            )
+        if not np.isfinite(new_vectors).all():
+            raise NativeBuildError("incremental embedding contains a non-finite vector")
+        if normalization == "l2":
+            norms = np.linalg.norm(new_vectors, axis=1, keepdims=True)
+            if np.any(norms == 0):
+                raise NativeBuildError("zero vector cannot be L2-normalized")
+            new_vectors = np.asarray(new_vectors / norms, dtype=np.float32)
+    else:
+        provisional_parents = []
+        provisional_chunks = []
+        new_vectors = np.empty((0, reusable.profile.dimension), dtype=np.float32)
+
+    profile_id = reusable.profile.profile_hash
+    new_parents: list[CandidateParent] = []
+    parent_uid_by_key: dict[tuple[str, int], str] = {}
+    for parent in provisional_parents:
+        parent_uid = compute_parent_uid(
+            profile_id,
+            parent["report_uid"],
+            parent["parent_order"],
+            parent["content_sha256"],
+        )
+        parent_uid_by_key[(parent["report_uid"], parent["parent_order"])] = parent_uid
+        new_parents.append(
+            CandidateParent(
+                parent_uid=parent_uid,
+                report_uid=parent["report_uid"],
+                profile_id=profile_id,
+                parent_order=parent["parent_order"],
+                content=parent["content"],
+                content_sha256=parent["content_sha256"],
+            )
+        )
+
+    provisional_uids: list[str] = []
+    for chunk in provisional_chunks:
+        parent_uid = parent_uid_by_key[(chunk["report_uid"], chunk["parent_order"])]
+        provisional_uids.append(
+            compute_chunk_uid(
+                profile_id,
+                parent_uid,
+                chunk["child_order"],
+                chunk["span_start"],
+                chunk["span_end"],
+                chunk["embedding_text_sha256"],
+            )
+        )
+
+    vector_by_chunk_uid = dict(reusable.vectors_by_chunk_uid)
+    raw_chunks = list(reusable.chunks)
+    for chunk, chunk_uid, vector in zip(
+        provisional_chunks,
+        provisional_uids,
+        new_vectors,
+        strict=True,
+    ):
+        parent_uid = parent_uid_by_key[(chunk["report_uid"], chunk["parent_order"])]
+        raw_chunks.append(
+            CandidateChunk(
+                chunk_uid=chunk_uid,
+                parent_uid=parent_uid,
+                profile_id=profile_id,
+                child_order=chunk["child_order"],
+                span_start=chunk["span_start"],
+                span_end=chunk["span_end"],
+                embedding_text_sha256=chunk["embedding_text_sha256"],
+                physical_id=0,
+            )
+        )
+        vector_by_chunk_uid[chunk_uid] = np.asarray(vector, dtype=np.float32)
+
+    if not raw_chunks:
+        raise NativeBuildError("incremental update cannot publish an empty corpus")
+    physical_ids = assign_physical_ids(chunk.chunk_uid for chunk in raw_chunks)
+    chunks = tuple(
+        CandidateChunk(
+            chunk_uid=chunk.chunk_uid,
+            parent_uid=chunk.parent_uid,
+            profile_id=chunk.profile_id,
+            child_order=chunk.child_order,
+            span_start=chunk.span_start,
+            span_end=chunk.span_end,
+            embedding_text_sha256=chunk.embedding_text_sha256,
+            physical_id=physical_ids[chunk.chunk_uid],
+        )
+        for chunk in raw_chunks
+    )
+    ordered_chunks = sorted(chunks, key=lambda item: item.physical_id)
+    vectors_by_physical_id = np.ascontiguousarray(
+        np.vstack([vector_by_chunk_uid[chunk.chunk_uid] for chunk in ordered_chunks]),
+        dtype=np.float32,
+    )
+    vectors_by_physical_id.setflags(write=False)
+    return _finalize_native_build_plan(
+        selection=selection,
+        profile=reusable.profile,
+        reports=reports,
+        parents=(*reusable.parents, *new_parents),
+        chunks=chunks,
+        manifest=manifest,
+        vectors_by_physical_id=vectors_by_physical_id,
+        deleted_relative_paths=deleted_relative_paths,
+        source_root=source_root,
+        canonical_source_prefix=canonical_source_prefix,
+        source_inventory=source_inventory,
+        same_space_canary=canary,
+        build_mode="incremental",
+    )
+
+
+def _finalize_native_build_plan(
+    *,
+    selection: RuntimeSelection,
+    profile: EmbeddingProfile,
+    reports: tuple[CandidateReport, ...],
+    parents: tuple[CandidateParent, ...],
+    chunks: tuple[CandidateChunk, ...],
+    manifest: CorpusManifest,
+    vectors_by_physical_id: np.ndarray,
+    deleted_relative_paths: tuple[str, ...],
+    source_root: Path,
+    canonical_source_prefix: str,
+    source_inventory: tuple[SourceFileSnapshot, ...],
+    same_space_canary: SameSpaceCanary | None,
+    build_mode: str,
+) -> NativeBuildPlan:
+    if build_mode not in {"full", "incremental"}:
+        raise NativeBuildError("unknown native build mode")
+    _validate_plan_membership(reports, list(parents), chunks, manifest)
+    if vectors_by_physical_id.shape != (len(chunks), profile.dimension):
+        raise NativeBuildError("candidate vector payload shape is inconsistent")
     vector_payload_sha256 = hashlib.sha256(
         vectors_by_physical_id.astype("<f4", copy=False).tobytes(order="C")
     ).hexdigest()
-
-    _validate_plan_membership(reports, parents, chunks, manifest)
     topology_sha256 = sha256_text(
         canonical_json(
             {
@@ -495,10 +791,10 @@ def prepare_full_corpus_build(
         )
     )
     build_id = canonical_hash(
-        "retrieval-build",
+        "retrieval-build" if build_mode == "full" else "retrieval-incremental-build",
         selection.publication_generation,
         selection.active_snapshot_id,
-        profile_id,
+        profile.profile_hash,
         manifest.sha256,
         topology_sha256,
     )
@@ -524,8 +820,8 @@ def prepare_full_corpus_build(
     )
     _validate_source_inventory(
         source_root,
-        canonical_source_prefix=normalized_source_prefix,
-        ignored_paths=set(deleted),
+        canonical_source_prefix=canonical_source_prefix,
+        ignored_paths=set(deleted_relative_paths),
         expected=source_inventory,
     )
     return NativeBuildPlan(
@@ -534,7 +830,7 @@ def prepare_full_corpus_build(
         base_write_epoch=selection.write_epoch,
         profile=profile,
         reports=reports,
-        parents=tuple(parents),
+        parents=parents,
         chunks=chunks,
         manifest=manifest,
         build_id=build_id,
@@ -542,12 +838,13 @@ def prepare_full_corpus_build(
         publication_id=publication_id,
         vector_payload_sha256=vector_payload_sha256,
         vectors_by_physical_id=vectors_by_physical_id,
-        deleted_relative_paths=deleted,
+        deleted_relative_paths=deleted_relative_paths,
         source_root=source_root,
-        canonical_source_prefix=normalized_source_prefix,
+        canonical_source_prefix=canonical_source_prefix,
         source_inventory=source_inventory,
-        same_space_canary=canary,
+        same_space_canary=same_space_canary,
         forward_recovery=bool(selection.degraded),
+        build_mode=build_mode,
     )
 
 
@@ -733,6 +1030,37 @@ def execute_full_corpus_successor(
                 "writer_lease": writer_lease,
             },
         )
+        if plan is None:
+            raise NativeBuildError("full-corpus planning unexpectedly produced no candidate")
+        result = materialize_candidate(plan, root, writer_lease=writer_lease)
+        return result, publish_candidate(
+            result,
+            root,
+            writer_lease=writer_lease,
+        )
+
+
+def execute_incremental_update(
+    legacy_db_path: str | Path,
+    source_directory: str | Path,
+    **kwargs: Any,
+) -> tuple[CandidateResult, PublicationOutcome] | None:
+    """Publish changed reports while carrying unchanged chunks and vectors forward."""
+
+    root = Path(kwargs.get("data_root") or Path(legacy_db_path).parent).resolve(strict=True)
+    with NativeWriterLock(root) as writer_lease:
+        StartupReconciler(root).reconcile(writer_lease=writer_lease)
+        plan = prepare_incremental_build(
+            legacy_db_path,
+            source_directory,
+            **{
+                **kwargs,
+                "allow_degraded_forward_recovery": True,
+                "writer_lease": writer_lease,
+            },
+        )
+        if plan is None:
+            return None
         result = materialize_candidate(plan, root, writer_lease=writer_lease)
         return result, publish_candidate(
             result,
@@ -1046,6 +1374,192 @@ def _read_catalog_sources(
         return active_reports, existing
     finally:
         connection.close()
+
+
+def _read_reusable_snapshot(
+    selection: RuntimeSelection,
+    reusable_report_uids: set[str],
+) -> _ReusableSnapshot:
+    if not selection.active_snapshot_id:
+        raise NativeBuildError("incremental base snapshot is unavailable")
+    connection = _open_read_only_catalog(selection.paths.catalog)
+    connection.row_factory = sqlite3.Row
+    try:
+        descriptor_row = connection.execute(
+            """
+            SELECT snapshot.relative_path, snapshot.file_sha256,
+                   snapshot.size_bytes, snapshot.dimension, snapshot.metric,
+                   snapshot.ntotal, profile.profile_id, profile.profile_hash,
+                   profile.model, profile.normalization,
+                   profile.prefix_template, profile.extractor,
+                   profile.parent_policy_json, profile.child_policy_json
+            FROM vector_snapshots AS snapshot
+            JOIN retrieval_builds AS build ON build.build_id = snapshot.build_id
+            JOIN embedding_profiles AS profile ON profile.profile_id = build.profile_id
+            WHERE snapshot.snapshot_id = ?
+            """,
+            (selection.active_snapshot_id,),
+        ).fetchone()
+        if descriptor_row is None:
+            raise NativeBuildError("incremental base descriptor is missing")
+        try:
+            parent_policy = json.loads(str(descriptor_row["parent_policy_json"]))
+            child_policy = json.loads(str(descriptor_row["child_policy_json"]))
+        except json.JSONDecodeError as exc:
+            raise NativeBuildError("incremental base profile policy is invalid") from exc
+        profile = EmbeddingProfile(
+            model=str(descriptor_row["model"]),
+            dimension=int(descriptor_row["dimension"]),
+            metric=str(descriptor_row["metric"]),
+            normalization=("l2" if int(descriptor_row["normalization"]) else "none"),
+            prefix_template=str(descriptor_row["prefix_template"]),
+            extractor=str(descriptor_row["extractor"]),
+            parent_policy=parent_policy,
+            child_policy=child_policy,
+        )
+        if (
+            str(descriptor_row["profile_id"]) != profile.profile_hash
+            or str(descriptor_row["profile_hash"]) != profile.profile_hash
+        ):
+            raise NativeBuildError("incremental base profile identity is inconsistent")
+        rows = connection.execute(
+            """
+            SELECT report.report_uid, parent.parent_uid, parent.profile_id,
+                   parent.parent_order, parent.content, parent.content_sha256,
+                   chunk.chunk_uid, chunk.child_order, chunk.span_start,
+                   chunk.span_end, chunk.embedding_text_sha256,
+                   membership.faiss_id
+            FROM snapshot_membership AS membership
+            JOIN retrieval_chunks AS chunk ON chunk.chunk_uid = membership.chunk_uid
+            JOIN retrieval_parents AS parent
+              ON parent.parent_uid = chunk.parent_uid
+             AND parent.profile_id = chunk.profile_id
+            JOIN reports AS report ON report.report_id = parent.report_id
+            WHERE membership.snapshot_id = ?
+            ORDER BY membership.faiss_id
+            """,
+            (selection.active_snapshot_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    selected = [row for row in rows if str(row["report_uid"]) in reusable_report_uids]
+    seen_report_uids = {str(row["report_uid"]) for row in selected}
+    if seen_report_uids != reusable_report_uids:
+        raise NativeBuildError("unchanged active reports are not fully reusable")
+    parent_by_uid: dict[str, CandidateParent] = {}
+    chunks: list[CandidateChunk] = []
+    physical_ids: list[int] = []
+    for row in selected:
+        parent_uid = str(row["parent_uid"])
+        parent = CandidateParent(
+            parent_uid=parent_uid,
+            report_uid=str(row["report_uid"]),
+            profile_id=str(row["profile_id"]),
+            parent_order=int(row["parent_order"]),
+            content=str(row["content"]),
+            content_sha256=str(row["content_sha256"]),
+        )
+        existing_parent = parent_by_uid.setdefault(parent_uid, parent)
+        if existing_parent != parent:
+            raise NativeBuildError("reusable parent identity is inconsistent")
+        physical_id = int(row["faiss_id"])
+        physical_ids.append(physical_id)
+        chunks.append(
+            CandidateChunk(
+                chunk_uid=str(row["chunk_uid"]),
+                parent_uid=parent_uid,
+                profile_id=str(row["profile_id"]),
+                child_order=int(row["child_order"]),
+                span_start=int(row["span_start"]),
+                span_end=int(row["span_end"]),
+                embedding_text_sha256=str(row["embedding_text_sha256"]),
+                physical_id=physical_id,
+            )
+        )
+
+    descriptor = SnapshotDescriptor(
+        sha256=str(descriptor_row["file_sha256"]),
+        size_bytes=int(descriptor_row["size_bytes"]),
+        dimension=int(descriptor_row["dimension"]),
+        metric=str(descriptor_row["metric"]),
+        ntotal=int(descriptor_row["ntotal"]),
+    )
+    snapshot_path = selection.paths.data_root.joinpath(
+        *str(descriptor_row["relative_path"]).split("/")
+    )
+    reused_vectors = load_index(snapshot_path, descriptor).reconstruct(physical_ids)
+    vectors_by_chunk_uid: dict[str, np.ndarray] = {}
+    for chunk, vector in zip(chunks, reused_vectors, strict=True):
+        immutable = np.asarray(vector, dtype=np.float32).copy()
+        immutable.setflags(write=False)
+        vectors_by_chunk_uid[chunk.chunk_uid] = immutable
+    return _ReusableSnapshot(
+        profile=profile,
+        parents=tuple(parent_by_uid.values()),
+        chunks=tuple(chunks),
+        vectors_by_chunk_uid=vectors_by_chunk_uid,
+    )
+
+
+def _validate_incremental_profile(
+    profile: EmbeddingProfile,
+    *,
+    model: str,
+    extractor_name: str,
+    allow_extraction_fallback: bool,
+    parent_chunk_size: int,
+    child_chunk_size: int,
+    use_parent_child: bool,
+    single_chunk_size: int | None,
+    metric: str,
+    normalization: str,
+    prefix_template: str,
+) -> None:
+    if (
+        profile.model != model
+        or profile.metric != metric
+        or profile.normalization != normalization
+        or profile.prefix_template != prefix_template
+    ):
+        raise NativeBuildError(
+            "incremental writer configuration differs from the active embedding profile"
+        )
+    accepted_extractors = {
+        f"legacy-v1-import|configured={extractor_name}|unattested",
+        _v1_extraction_profile(
+            extractor_name,
+            allow_fallback=allow_extraction_fallback,
+        ),
+    }
+    if profile.extractor not in accepted_extractors:
+        raise NativeBuildError(
+            "incremental extractor differs from the active embedding profile"
+        )
+
+    def policy_size(policy: Mapping[str, Any]) -> int | None:
+        value = policy.get("chunk_size", policy.get("size"))
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    if use_parent_child:
+        expected_parent_size = parent_chunk_size
+        expected_child_size = child_chunk_size
+    else:
+        expected_parent_size = single_chunk_size
+        expected_child_size = None
+    if policy_size(profile.parent_policy) != expected_parent_size:
+        raise NativeBuildError(
+            "incremental parent chunk policy differs from the active profile"
+        )
+    child_size = policy_size(profile.child_policy)
+    if use_parent_child and child_size != expected_child_size:
+        raise NativeBuildError(
+            "incremental child chunk policy differs from the active profile"
+        )
+    if not use_parent_child and profile.child_policy.get("algorithm") != "identity-span-v1":
+        raise NativeBuildError(
+            "incremental single-level policy differs from the active profile"
+        )
 
 
 def _build_candidate_manifest(
@@ -1702,7 +2216,12 @@ def _write_candidate_evidence(
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
-        "kind": "native_full_corpus_candidate",
+        "kind": (
+            "native_incremental_candidate"
+            if plan.build_mode == "incremental"
+            else "native_full_corpus_candidate"
+        ),
+        "build_mode": plan.build_mode,
         "publication_id": plan.publication_id,
         "base_publication_generation": plan.base_publication_generation,
         "base_snapshot_id": plan.base_snapshot_id,
@@ -1856,8 +2375,10 @@ __all__ = [
     "NativeBuildPlan",
     "SourceFileSnapshot",
     "execute_full_corpus_successor",
+    "execute_incremental_update",
     "materialize_candidate",
     "prepare_full_corpus_build",
+    "prepare_incremental_build",
     "publish_candidate",
     "validate_epoch_zero_same_space_canary",
 ]

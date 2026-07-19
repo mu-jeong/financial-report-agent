@@ -38,13 +38,9 @@ from src.migrations.v2.evidence import (
 )
 from src.migrations.v2.import_v1 import convert_v1_seed, validate_converted_seed
 from src.retrieval.bootstrap import RuntimeSelection, inspect_runtime
-from src.retrieval.build_service import (
-    CandidateResult,
-    execute_full_corpus_successor,
-    validate_epoch_zero_same_space_canary,
-)
+from src.retrieval.build_service import validate_epoch_zero_same_space_canary
 from src.retrieval.identity import EmbeddingProfile, canonical_json
-from src.retrieval.publication import PublicationOutcome
+from src.retrieval.publication import PublicationOutcome, activate_epoch_zero_seed
 from src.retrieval.update_lock import RetrievalUpdateLock
 
 
@@ -58,7 +54,6 @@ CUTOVER_PHASES = frozenset(
 )
 CUTOVER_TERMINAL_PHASES = frozenset({"VERIFIED", "ROLLED_BACK"})
 RUNTIME_SMOKE_TIMEOUT_SECONDS = 120
-SOURCE_PREPARER_TIMEOUT_SECONDS = 600
 
 
 class MigrationError(RuntimeError):
@@ -92,12 +87,7 @@ class UserMigrationSettings:
     use_parent_child: bool
 
 
-SourcePreparer = Callable[[UserMigrationSettings], None]
 CutoverHook = Callable[[str], None]
-SuccessorBuilder = Callable[
-    [Path, UserMigrationSettings, EmbeddingsPort, str],
-    tuple[CandidateResult, PublicationOutcome],
-]
 
 
 @dataclass(frozen=True)
@@ -118,17 +108,13 @@ def migrate_v1_to_v2(
     *,
     embeddings_factory: EmbeddingsFactory | None = None,
     smoke_check: SmokeCheck | None = None,
-    successor_builder: SuccessorBuilder | None = None,
-    source_preparer: SourcePreparer | None = None,
     cutover_hook: CutoverHook | None = None,
 ) -> MigrationOutcome:
-    """Activate a writable native successor without mutating V1 artifacts."""
+    """Convert and activate the V1-backed native seed without mutating V1."""
 
     normalized = _validated_settings(settings)
     provider_factory = embeddings_factory or _default_embeddings_factory
     smoke = smoke_check or _subprocess_smoke_check(normalized)
-    build_successor = successor_builder or _default_successor_builder
-    prepare_sources = source_preparer or _subprocess_source_preparer
     control_root = normalized.data_root.parent / CONTROL_DIRECTORY_NAME
     control_root.mkdir(parents=True, exist_ok=True)
     _require_plain_local_path(control_root, "migration control directory")
@@ -183,30 +169,11 @@ def migrate_v1_to_v2(
                 provenance=provenance,
             )
 
-            print("[2/8] 원본 PDF와 첫 V2 successor 입력을 확인하는 중...", flush=True)
+            print("[2/8] V1 PDF 원본을 검증하는 중...", flush=True)
             source_hashes = _source_pdf_hashes(
                 backup_root / "reports.db",
                 normalized.source_dir,
             )
-            successor_sources = _successor_source_names(
-                backup_root / "reports.db",
-                normalized.source_dir,
-            )
-            if not successor_sources:
-                print(
-                    "      새 리포트가 없어 최근 리포트를 한 번 확인합니다...",
-                    flush=True,
-                )
-                prepare_sources(normalized)
-                successor_sources = _successor_source_names(
-                    backup_root / "reports.db",
-                    normalized.source_dir,
-                )
-            if not successor_sources:
-                raise MigrationError(
-                    "a new report is required for the first writable V2 successor; "
-                    "no V2 was activated and V1 remains active"
-                )
             source_inventory = _pdf_inventory(normalized.source_dir)
             profile = _embedding_profile(
                 normalized,
@@ -242,39 +209,33 @@ def migrate_v1_to_v2(
                     f"same-space canary failed; V1 was kept unchanged: {type(exc).__name__}: {exc}"
                 ) from exc
 
-            print("[5/8] 전체 corpus를 재임베딩해 쓰기 가능한 V2를 만드는 중...", flush=True)
+            print("[5/8] 변환 seed를 쓰기 가능한 V2로 승격하는 중...", flush=True)
             try:
-                candidate, publication = build_successor(
+                publication = activate_epoch_zero_seed(
                     stage_root,
-                    normalized,
-                    provider,
-                    assessment.observable.metric,
+                    snapshot_id=conversion.snapshot_id,
+                    canary=asdict(canary),
                 )
             except Exception as exc:
                 raise MigrationError(
-                    "writable V2 successor build failed; V1 was kept unchanged: "
+                    "writable V2 seed activation failed; V1 was kept unchanged: "
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
-            if publication.active_snapshot_id != candidate.snapshot_id:
-                raise MigrationError("successor publication selected an unexpected snapshot")
-            if _candidate_inventory(candidate) != source_inventory:
-                raise MigrationError(
-                    "successor source inventory does not match the validated PDFs"
-                )
+            if publication.active_snapshot_id != conversion.snapshot_id:
+                raise MigrationError("seed activation selected an unexpected snapshot")
 
             print("[6/8] 전환 전 읽기·쓰기 실행 테스트를 수행하는 중...", flush=True)
             staged = _require_expected_native(
                 stage_root / "reports.db",
-                candidate.snapshot_id,
+                conversion.snapshot_id,
                 data_root=stage_root,
             )
-            _require_first_successor(
+            _require_seed_activation(
                 staged,
                 seed_snapshot_id=conversion.snapshot_id,
-                candidate=candidate,
                 publication=publication,
             )
-            smoke(stage_root / "reports.db", candidate.snapshot_id, True)
+            smoke(stage_root / "reports.db", conversion.snapshot_id, True)
 
             owner_marker = {
                 "schema_version": MIGRATION_SCHEMA_VERSION,
@@ -290,7 +251,7 @@ def migrate_v1_to_v2(
                 "created_at_utc": datetime.now(timezone.utc).isoformat(
                     timespec="seconds"
                 ),
-                "snapshot_id": candidate.snapshot_id,
+                "snapshot_id": conversion.snapshot_id,
                 "publication_generation": staged.publication_generation,
                 "write_epoch": staged.write_epoch,
                 "v1_fallback_open": staged.v1_fallback_open,
@@ -304,9 +265,8 @@ def migrate_v1_to_v2(
                 "assessment_uncertainties": list(assessment.uncertainties),
                 "legacy_report_count": copied.source_report_count,
                 "legacy_parent_count": copied.source_parent_count,
-                "native_report_count": candidate.report_count,
-                "native_chunk_count": candidate.chunk_count,
-                "successor_source_names": list(successor_sources),
+                "native_report_count": conversion.report_count,
+                "native_chunk_count": conversion.chunk_count,
             }
             live_retrieval = normalized.data_root / "retrieval"
             stage_retrieval = stage_root / "retrieval"
@@ -410,10 +370,10 @@ def migrate_v1_to_v2(
                     _invoke_cutover_hook(cutover_hook, "journal_activated")
                     live = _require_expected_native(
                         normalized.db_path,
-                        candidate.snapshot_id,
+                        conversion.snapshot_id,
                     )
                     _require_same_native_identity(staged, live)
-                    smoke(normalized.db_path, candidate.snapshot_id, False)
+                    smoke(normalized.db_path, conversion.snapshot_id, False)
                     _write_json_once_or_same(receipt_path, receipt)
                     _invoke_cutover_hook(cutover_hook, "receipt_written")
                     journal = _transition_cutover_journal(
@@ -998,42 +958,6 @@ def _source_pdf_hashes(database: Path, source_dir: Path) -> dict[str, str]:
     return result
 
 
-def _successor_source_names(database: Path, source_dir: Path) -> tuple[str, ...]:
-    """Find sources that can satisfy the first-successor new-report invariant."""
-
-    uri = f"file:{database.resolve(strict=True).as_posix()}?mode=ro&immutable=1"
-    try:
-        with sqlite3.connect(uri, uri=True) as connection:
-            rows = list(
-                connection.execute(
-                    "SELECT file_name, is_embedded FROM reports ORDER BY file_name"
-                )
-            )
-    except sqlite3.Error as exc:
-        raise MigrationError(f"V1 report state cannot be read: {exc}") from exc
-    known: set[str] = set()
-    candidates: set[str] = set()
-    for file_name, is_embedded in rows:
-        if not isinstance(file_name, str) or Path(file_name).name != file_name:
-            raise MigrationError("V1 contains an invalid source PDF name")
-        known.add(file_name)
-        if is_embedded != 1:
-            candidates.add(file_name)
-    observed_casefold: set[str] = set()
-    for path in sorted(source_dir.iterdir(), key=lambda item: item.name.casefold()):
-        if not path.name.lower().endswith(".pdf"):
-            continue
-        if path.is_symlink() or not path.is_file():
-            raise MigrationError(f"source PDF must be a real file: {path.name}")
-        folded = path.name.casefold()
-        if folded in observed_casefold:
-            raise MigrationError(f"duplicate source PDF name: {path.name}")
-        observed_casefold.add(folded)
-        if path.name not in known:
-            candidates.add(path.name)
-    return tuple(sorted(candidates, key=str.casefold))
-
-
 def _pdf_inventory(source_dir: Path) -> dict[str, str]:
     inventory: dict[str, str] = {}
     observed_casefold: set[str] = set()
@@ -1050,58 +974,6 @@ def _pdf_inventory(source_dir: Path) -> dict[str, str]:
     if not inventory:
         raise MigrationError("source PDF directory is empty")
     return inventory
-
-
-def _candidate_inventory(candidate: CandidateResult) -> dict[str, str]:
-    inventory = {
-        item.canonical_relative_path: item.sha256
-        for item in candidate.source_inventory
-    }
-    if len(inventory) != len(candidate.source_inventory):
-        raise MigrationError("successor contains duplicate source inventory entries")
-    return inventory
-
-
-def _v1_metadata_parser(database: Path) -> Callable[[str], dict[str, Any] | None]:
-    """Prefer authoritative V1 rows and parse only genuinely new file names."""
-
-    uri = f"file:{database.resolve(strict=True).as_posix()}?mode=ro"
-    try:
-        with sqlite3.connect(uri, uri=True) as connection:
-            rows = list(
-                connection.execute(
-                    """
-                    SELECT file_name, report_type, report_date, target_name,
-                           title, broker
-                    FROM reports
-                    """
-                )
-            )
-    except sqlite3.Error as exc:
-        raise MigrationError(f"V1 report metadata cannot be read: {exc}") from exc
-    metadata_by_name = {
-        str(row[0]): {
-            "report_type": row[1],
-            "report_date": row[2],
-            "target_name": row[3],
-            "title": row[4],
-            "broker": row[5],
-        }
-        for row in rows
-    }
-    if len(metadata_by_name) != len(rows):
-        raise MigrationError("V1 contains duplicate report file names")
-
-    def parse(file_name: str) -> dict[str, Any] | None:
-        existing = metadata_by_name.get(file_name)
-        if existing is not None:
-            return dict(existing)
-        from src.core.db_manager import parse_filename
-
-        parsed = parse_filename(file_name)
-        return None if parsed is None else dict(parsed)
-
-    return parse
 
 
 def _require_same_v1_state(
@@ -1185,31 +1057,29 @@ def _require_expected_native(
 def _require_supported_native(selection: RuntimeSelection) -> None:
     if not selection.is_native or not selection.active_snapshot_id:
         raise MigrationError("validated native runtime is unavailable")
-    healthy_successor = (
+    healthy_native = (
         selection.write_epoch > 0
         and not selection.v1_fallback_open
         and selection.write_enabled
         and not selection.degraded
     )
-    if not healthy_successor:
+    if not healthy_native:
         raise MigrationError(
-            "one-click completion requires a healthy writable native successor; "
+            "one-click completion requires a healthy writable native runtime; "
             "an epoch-zero or degraded native state is not accepted"
         )
 
 
-def _require_first_successor(
+def _require_seed_activation(
     selection: RuntimeSelection,
     *,
     seed_snapshot_id: str,
-    candidate: CandidateResult,
     publication: PublicationOutcome,
 ) -> None:
     _require_supported_native(selection)
     expected = (
-        candidate.snapshot_id,
-        candidate.build_id,
         seed_snapshot_id,
+        None,
         2,
         1,
         False,
@@ -1218,7 +1088,6 @@ def _require_first_successor(
     )
     observed = (
         selection.active_snapshot_id,
-        selection.active_build_id,
         selection.predecessor_snapshot_id,
         selection.publication_generation,
         selection.write_epoch,
@@ -1232,18 +1101,20 @@ def _require_first_successor(
         publication.publication_generation,
         publication.write_epoch,
         publication.v1_fallback_open,
-        publication.publication_id,
     )
     expected_publication = (
-        candidate.snapshot_id,
         seed_snapshot_id,
+        None,
         2,
         1,
         False,
-        candidate.publication_id,
     )
-    if observed != expected or publication_identity != expected_publication:
-        raise MigrationError("first successor publication identity is inconsistent")
+    if (
+        observed != expected
+        or publication_identity != expected_publication
+        or not publication.publication_id
+    ):
+        raise MigrationError("converted seed activation identity is inconsistent")
 
 
 def _native_identity(selection: RuntimeSelection) -> dict[str, Any]:
@@ -1274,13 +1145,14 @@ def _validate_native_identity_payload(identity: dict[str, Any]) -> None:
     }
     if set(identity) != expected_fields:
         raise MigrationError("native identity fields are invalid")
-    for field in (
-        "active_snapshot_id",
-        "active_build_id",
-        "predecessor_snapshot_id",
-    ):
+    for field in ("active_snapshot_id", "active_build_id"):
         if not isinstance(identity[field], str) or not identity[field]:
             raise MigrationError("native identity string fields are invalid")
+    predecessor = identity["predecessor_snapshot_id"]
+    if predecessor is not None and (
+        not isinstance(predecessor, str) or not predecessor
+    ):
+        raise MigrationError("native predecessor identity is invalid")
     for field in ("publication_generation", "write_epoch"):
         value = identity[field]
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -1386,67 +1258,6 @@ def _subprocess_smoke_check(settings: UserMigrationSettings) -> SmokeCheck:
         )
 
     return run
-
-
-def _default_successor_builder(
-    stage_root: Path,
-    settings: UserMigrationSettings,
-    embeddings: EmbeddingsPort,
-    metric: str,
-) -> tuple[CandidateResult, PublicationOutcome]:
-    return execute_full_corpus_successor(
-        stage_root / "reports.db",
-        settings.source_dir,
-        data_root=stage_root,
-        embeddings=embeddings,
-        model=settings.model,
-        extractor_name=settings.extractor,
-        metadata_parser=_v1_metadata_parser(settings.db_path),
-        allow_extraction_fallback=True,
-        use_parent_child=True,
-        single_chunk_size=settings.single_chunk_size,
-        parent_chunk_size=settings.parent_chunk_size,
-        child_chunk_size=settings.child_chunk_size,
-        metric=metric,
-        normalization="none",
-    )
-
-
-def _subprocess_source_preparer(settings: UserMigrationSettings) -> None:
-    """Download missing reports from a bounded recent window while V1 is live."""
-
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "DB_PATH": str(settings.db_path),
-            "SAVE_DIR": str(settings.source_dir),
-            "FAISS_DIR": str(settings.faiss_dir),
-            "REPORT_PDF_DIR": str(settings.source_dir),
-            "CRAWLER_MODE": "LATEST",
-            "CRAWLER_TARGET_COUNT": "0",
-            "CRAWLER_LOOKBACK_DAYS": "7",
-            "CRAWLER_MAX_LOOKBACK_DAYS": "7",
-            "PYTHONUTF8": "1",
-        }
-    )
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-m", "src.core.report_crawler"],
-            cwd=settings.install_root,
-            env=environment,
-            check=False,
-            timeout=SOURCE_PREPARER_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise MigrationError(
-            "recent report download timed out after "
-            f"{SOURCE_PREPARER_TIMEOUT_SECONDS} seconds; V1 remains active"
-        ) from exc
-    if completed.returncode != 0:
-        raise MigrationError(
-            "recent report download failed with exit code "
-            f"{completed.returncode}; V1 remains active"
-        )
 
 
 def _default_embeddings_factory() -> EmbeddingsPort:
