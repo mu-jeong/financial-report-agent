@@ -1377,16 +1377,59 @@ def promote_issue_report_to_eval_candidate(
 def summarize_data_integrity(status: dict[str, Any]) -> dict[str, Any]:
     db = status.get("db") or {}
     vector = status.get("vector_db") or {}
+    retrieval = status.get("retrieval") or {"mode": "legacy_v1"}
     total = int(db.get("total_reports") or 0)
     embedded = int(db.get("embedded_reports") or 0)
     pending = int(db.get("pending_reports") or 0)
     downloaded = int(status.get("downloaded_pdfs") or 0)
-    checks = {
-        "faiss_index": {"status": "pass" if vector.get("has_faiss_index") else "fail", "detail": "FAISS index present" if vector.get("has_faiss_index") else "FAISS index missing"},
-        "embedding_backlog": {"status": "pass" if pending == 0 else "warning", "detail": f"{pending} pending reports"},
-        "pdf_vs_db": {"status": "pass" if downloaded >= embedded else "warning", "detail": f"{downloaded} PDFs for {embedded} embedded reports"},
-        "search_coverage": {"status": "pass" if total == 0 or embedded / total >= 0.95 else "warning", "detail": f"{embedded}/{total} reports embedded"},
-    }
+    if retrieval.get("mode") == "legacy_v1":
+        checks = {
+            "faiss_index": {"status": "pass" if vector.get("has_faiss_index") else "fail", "detail": "FAISS index present" if vector.get("has_faiss_index") else "FAISS index missing"},
+            "embedding_backlog": {"status": "pass" if pending == 0 else "warning", "detail": f"{pending} pending reports"},
+            "pdf_vs_db": {"status": "pass" if downloaded >= embedded else "warning", "detail": f"{downloaded} PDFs for {embedded} embedded reports"},
+            "search_coverage": {"status": "pass" if total == 0 or embedded / total >= 0.95 else "warning", "detail": f"{embedded}/{total} reports embedded"},
+        }
+    else:
+        membership = int(retrieval.get("membership_count") or 0)
+        ntotal = int(vector.get("ntotal") or 0)
+        snapshot_ready = retrieval.get("snapshot_state") == "ready"
+        build_ready = retrieval.get("build_state") in {
+            "committed_pending_checkpoint",
+            "fully_complete",
+        }
+        checks = {
+            "native_snapshot": {
+                "status": "pass" if snapshot_ready and build_ready else "fail",
+                "detail": (
+                    f"build={retrieval.get('build_state')}, "
+                    f"snapshot={retrieval.get('snapshot_state')}"
+                ),
+            },
+            "native_membership": {
+                "status": "pass" if membership == ntotal and ntotal > 0 else "fail",
+                "detail": f"{membership}/{ntotal} catalog members",
+            },
+            "manifest_backlog": {
+                "status": "pass" if pending == 0 else "warning",
+                "detail": f"{pending} latest source objects outside the active manifest",
+            },
+            "pdf_vs_manifest": {
+                "status": "pass" if downloaded >= embedded else "warning",
+                "detail": f"{downloaded} PDFs for {embedded} active reports",
+            },
+            "search_coverage": {
+                "status": "pass" if total == 0 or embedded / total >= 0.95 else "warning",
+                "detail": f"{embedded}/{total} reports in the active snapshot",
+            },
+            "runtime_health": {
+                "status": "warning" if retrieval.get("degraded") else "pass",
+                "detail": (
+                    f"generation={retrieval.get('publication_generation')}, "
+                    f"epoch={retrieval.get('write_epoch')}, "
+                    f"write_enabled={retrieval.get('write_enabled')}"
+                ),
+            },
+        }
     return {"checks": checks, "pass_count": sum(1 for check in checks.values() if check["status"] == "pass"), "warning_count": sum(1 for check in checks.values() if check["status"] == "warning"), "fail_count": sum(1 for check in checks.values() if check["status"] == "fail")}
 
 

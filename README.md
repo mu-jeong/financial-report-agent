@@ -15,6 +15,8 @@ Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면
 
 Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법과 `RUN_APP.bat` 사용 구분은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
 
+기존 V1 검색 데이터가 있다면 `MIGRATE_V2.bat`을 더블클릭해 백업·임베딩 공간 확인·전체 corpus 재임베딩·GUI 실행 테스트를 거친 뒤 쓰기 가능한 V2로 안전하게 전환할 수 있습니다. 새 리포트가 없어 안전한 첫 successor를 만들 수 없으면 V1을 그대로 유지합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
+
 ---
 
 증권사 리포트 PDF를 수집하고 SQLite + FAISS에 색인한 뒤, LangGraph 기반 RAG 파이프라인으로 재무 질문에 답하는 프로젝트입니다. 생성 모델, 임베딩, 선택형 rerank는 OpenRouter API를 기준으로 연동합니다.

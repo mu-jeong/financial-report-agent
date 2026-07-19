@@ -12,6 +12,9 @@ from src.core.status import (
     get_data_status,
     list_unembedded_reports,
 )
+from src.migrations.v2.evidence import seal_compatibility_bundle
+from src.migrations.v2.import_v1 import convert_v1_seed
+from tests.migrations.v2.fixtures_factory.v1 import build_v1_fixture
 
 
 def test_get_data_status_reports_db_pdf_and_vector_counts(tmp_path):
@@ -79,6 +82,79 @@ def test_get_data_status_reports_db_pdf_and_vector_counts(tmp_path):
     assert status["vector_db"]["has_faiss_index"] is True
     assert status["vector_db"]["total_size_bytes"] == 6
     assert "SQLite 리포트: 3건" in format_status_text(status)
+
+
+def test_get_data_status_uses_native_membership_without_pickle_assumptions(tmp_path):
+    copied = tmp_path / "copied"
+    fixture = build_v1_fixture(copied)
+    data_root = tmp_path / "native data 한글"
+    bundle = seal_compatibility_bundle(copied, data_root)
+    result = convert_v1_seed(
+        copied,
+        data_root,
+        expected_hashes=fixture.artifact_hashes,
+        profile=fixture.embedding_profile(),
+        source_hashes=fixture.source_hashes,
+        compatibility_bundle_id=bundle.bundle_id,
+    )
+
+    status = get_data_status(
+        save_dir=str(data_root / "downloaded"),
+        db_path=str(data_root / "reports.db"),
+        faiss_dir=str(data_root / "legacy-vector-db"),
+    )
+
+    assert status["retrieval"]["mode"] == "native"
+    assert status["retrieval"]["write_epoch"] == 0
+    assert status["retrieval"]["membership_count"] == fixture.symbolic_n
+    assert status["vector_db"]["ntotal"] == fixture.symbolic_n
+    assert status["vector_db"]["has_faiss_index"] is True
+    assert status["vector_db"]["has_pickle_index"] is False
+    assert status["db"]["total_reports"] == 4
+    assert status["db"]["embedded_reports"] == 3
+    assert status["db"]["pending_reports"] == 1
+    assert Path(status["paths"]["db_path"]) == (
+        data_root / "retrieval" / "v2" / "catalog.sqlite3"
+    )
+    assert result.snapshot_id == status["retrieval"]["active_snapshot_id"]
+
+
+def test_status_never_downgrades_missing_native_authority_to_legacy(tmp_path):
+    db_path = tmp_path / "reports.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE reports (
+                id INTEGER PRIMARY KEY,
+                report_type TEXT,
+                report_date TEXT,
+                target_name TEXT,
+                title TEXT,
+                broker TEXT,
+                file_name TEXT,
+                is_embedded INTEGER
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO reports VALUES (1, 'company', '2026-07-16', "
+            "'stale', 'stale', 'stale', 'stale.pdf', 0)"
+        )
+    evidence = tmp_path / "retrieval" / "v2" / "evidence"
+    evidence.mkdir(parents=True)
+    (evidence / "native-authority.marker").write_text("present", encoding="utf-8")
+
+    status = get_data_status(
+        save_dir=str(tmp_path / "downloaded"),
+        db_path=str(db_path),
+        faiss_dir=str(tmp_path / "vector_db"),
+    )
+
+    assert status["retrieval"]["mode"] == "unavailable"
+    assert status["retrieval"]["write_enabled"] is False
+    assert "V2 recovery evidence" in status["retrieval"]["error"]
+    assert status["db"]["total_reports"] == 0
+    assert list_unembedded_reports(str(db_path)) == []
 
 
 def test_list_unembedded_reports_returns_recent_pending_rows_and_safe_previews(tmp_path):

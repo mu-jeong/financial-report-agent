@@ -33,6 +33,7 @@ from datetime import datetime
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.configs.config import DB_PATH, SAVE_DIR, get_logger
+from src.retrieval.bootstrap import inspect_runtime, retrieval_paths
 
 logger = get_logger(__name__)
 
@@ -44,15 +45,47 @@ EMBEDDING_FAILURE_COLUMNS = {
 }
 
 
-def get_connection() -> sqlite3.Connection:
+def get_connection(db_path: str | None = None) -> sqlite3.Connection:
     """DB 커넥션 반환. Row를 dict처럼 접근 가능하도록 설정."""
-    conn = sqlite3.connect(DB_PATH)
+    effective_db_path = db_path or DB_PATH
+    native = retrieval_paths(effective_db_path)
+    selection = inspect_runtime(effective_db_path, validate_snapshot=False)
+    if selection.mode != "legacy_v1":
+        db_uri = f"file:{native.catalog.resolve().as_posix()}?mode=ro"
+        conn = sqlite3.connect(db_uri, uri=True)
+        conn.create_function(
+            "v2_basename",
+            1,
+            lambda value: str(value or "").replace("\\", "/").rsplit("/", 1)[-1],
+            deterministic=True,
+        )
+        conn.execute(
+            """
+            CREATE TEMP VIEW reports AS
+            SELECT report_id AS id, report_type, report_date, target_name,
+                   title, broker, v2_basename(canonical_relative_path) AS file_name,
+                   1 AS is_embedded
+            FROM main.active_reports
+            """
+        )
+        conn.execute("PRAGMA query_only = ON")
+    else:
+        conn = sqlite3.connect(effective_db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
 
+def _native_catalog_exists() -> bool:
+    return inspect_runtime(DB_PATH, validate_snapshot=False).mode != "legacy_v1"
+
+
 def init_db() -> None:
     """테이블이 없으면 생성 (멱등 실행 가능)."""
+    if _native_catalog_exists():
+        with get_connection() as conn:
+            conn.execute("SELECT 1 FROM reports LIMIT 1").fetchone()
+        logger.info("[DB] Native V2 catalog validated; legacy schema creation skipped")
+        return
     with get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS reports (
@@ -98,6 +131,8 @@ def _ensure_reports_failure_columns(conn: sqlite3.Connection) -> None:
 
 def insert_parent_chunks(chunks: list[dict]) -> None:
     """Parent 청크들을 DB에 배치 저장. chunks는 {'id', 'content', 'file_name', 'metadata'} 리스트."""
+    if _native_catalog_exists():
+        raise RuntimeError("native V2 parent rows are written only by the full-corpus build service")
     with get_connection() as conn:
         conn.executemany(
             """
@@ -110,6 +145,17 @@ def insert_parent_chunks(chunks: list[dict]) -> None:
 
 def fetch_parent_content(parent_id: str) -> str | None:
     """parent_id로 부모 청크의 원본 텍스트를 조회."""
+    if _native_catalog_exists():
+        native = retrieval_paths(DB_PATH)
+        connection = sqlite3.connect(native.catalog)
+        try:
+            row = connection.execute(
+                "SELECT content FROM retrieval_parents WHERE parent_uid = ?",
+                (parent_id,),
+            ).fetchone()
+            return str(row[0]) if row else None
+        finally:
+            connection.close()
     with get_connection() as conn:
         row = conn.execute(
             "SELECT content FROM parent_chunks WHERE id = ?",
@@ -161,6 +207,8 @@ def upsert_report(file_name: str) -> bool:
     성공적으로 삽입되면 True, 중복이면 False 반환.
     file_path는 저장하지 않고 필요 시 os.path.join(save_dir, file_name) 으로 재조합.
     """
+    if _native_catalog_exists():
+        raise RuntimeError("native V2 source changes require a complete full-corpus build")
     parsed = parse_filename(file_name)
     if not parsed:
         logger.warning(f"[DB] ⚠️  파싱 실패, 건너뜀: {file_name}")
@@ -187,6 +235,8 @@ def upsert_report(file_name: str) -> bool:
 
 def mark_embedded(file_name: str, *, extraction_engine: str | None = None) -> None:
     """Vector DB 임베딩 완료 후 호출 — is_embedded 를 1로 업데이트."""
+    if _native_catalog_exists():
+        raise RuntimeError("native V2 does not expose per-report embedding state")
     with get_connection() as conn:
         _ensure_reports_failure_columns(conn)
         conn.execute(
@@ -210,6 +260,8 @@ def mark_embedding_failed(
     extraction_engine: str | None = None,
 ) -> None:
     """Record the latest per-file embedding failure while keeping it pending."""
+    if _native_catalog_exists():
+        raise RuntimeError("native V2 records failure at whole-build scope")
     compact_error = " ".join(str(error_message or "Unknown error").split())
     compact_engine = _compact_optional_text(extraction_engine, 120)
     with get_connection() as conn:
@@ -244,6 +296,9 @@ def sync_from_directory(directory: str = SAVE_DIR) -> None:
     이미 등록된 파일은 INSERT OR IGNORE로 건너뜀.
     잦은 연결을 방지하기 위해 단일 커넥션으로 executemany(Batch) 처리합니다.
     """
+    if _native_catalog_exists():
+        logger.info("[DB] Native V2 source discovery is owned by the full-corpus build service")
+        return
     if not os.path.isdir(directory):
         logger.warning(f"[DB] 폴더를 찾을 수 없습니다: {directory}")
         return

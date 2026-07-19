@@ -15,6 +15,12 @@ logs/*
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 *.py[cod]
 *.pyo
 *.pyd
@@ -41,6 +47,16 @@ Thumbs.db
 
 .omx/
 .hermes/
+
+# V2 migration runtime and copied-install validation workspaces
+/.v2m/
+/.v2p/
+
+# Local document rendering and editor scratch files
+/docs/temp/
+/.tmp_*/
+~$*.docx
+
 tests/fixtures/
 # ── 사용자 문제 신고 / 디버그 산출물 ─────────────────────────────────────────
 debug/*

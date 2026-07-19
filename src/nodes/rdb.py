@@ -1,6 +1,4 @@
 import functools
-import os
-import sqlite3
 from collections import Counter
 
 import sqlglot
@@ -9,6 +7,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 
 from src.configs.config import DB_PATH, get_logger
+from src.core.db_manager import get_connection
 from src.llms.factory import build_chat_model
 from src.configs.prompts import RDB_ANSWER_PROMPT, RDB_SQL_GEN_PROMPT
 from src.graphs.state import State
@@ -149,12 +148,11 @@ def sql_guardrail(func):
 
 @sql_guardrail
 def execute_sql(query: str):
-    db_uri = f"file:{os.path.abspath(DB_PATH)}?mode=ro"
-    conn = sqlite3.connect(db_uri, uri=True)
+    conn = get_connection(DB_PATH)
     cursor = conn.cursor()
     try:
         cursor.execute(query)
-        rows = cursor.fetchall()
+        rows = [tuple(row) for row in cursor.fetchall()]
         columns = [description[0] for description in cursor.description] if cursor.description else []
         return {"columns": columns, "rows": rows}
     except Exception as exc:

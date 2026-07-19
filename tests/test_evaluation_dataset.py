@@ -2,8 +2,6 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 from src.configs.settings import BASE_DIR
 
 DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "evaluation_dataset.json"
@@ -71,10 +69,9 @@ def test_evaluation_dataset_has_expected_schema():
             assert case["expected_sql_intent"].strip()
 
 
-def test_evaluation_dataset_local_sources_exist_when_reports_db_is_available():
-    db_path = BASE_DIR / "data" / "reports.db"
-    if not db_path.exists():
-        pytest.skip("local reports.db is not available")
+def test_evaluation_dataset_sources_exist_in_fixed_snapshot():
+    db_path = BASE_DIR / "tests" / "fixtures" / "eval_snapshot" / "reports.db"
+    assert db_path.is_file()
 
     dataset = load_dataset()
     expected_files = {

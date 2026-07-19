@@ -11,10 +11,36 @@ from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 
+REPOSITORY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, REPOSITORY_ROOT)
+_RUNTIME_SMOKE_REQUESTED = (
+    __name__ == "__main__" and sys.argv[1:] == ["--runtime-smoke"]
+)
+
+
+def _finish_runtime_smoke(selection) -> None:
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "surface": "gui",
+                "mode": selection.mode,
+                "active_snapshot_id": selection.active_snapshot_id,
+                "publication_generation": selection.publication_generation,
+                "write_epoch": selection.write_epoch,
+                "v1_fallback_open": selection.v1_fallback_open,
+                "degraded": selection.degraded,
+                "write_enabled": selection.write_enabled,
+            },
+            ensure_ascii=False,
+        )
+    )
+    raise SystemExit(0)
+
+
 import streamlit as st
 import streamlit.components.v1 as components
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.configs import config as config_module
 
@@ -22,6 +48,36 @@ config_module = importlib.reload(config_module)
 CRAWLER_CATEGORIES = config_module.CRAWLER_CATEGORIES
 MONITORING_MODE = config_module.MONITORING_MODE
 REPORT_PDF_DIR = config_module.REPORT_PDF_DIR
+
+from src.retrieval.bootstrap import reconcile_and_inspect_runtime
+
+_retrieval_startup_error = None
+try:
+    _retrieval_runtime = reconcile_and_inspect_runtime(config_module.DB_PATH)
+except Exception as exc:
+    _retrieval_runtime = None
+    _retrieval_startup_error = f"{type(exc).__name__}: {exc}"
+
+st.set_page_config(
+    page_title="Finance Report Agent",
+    layout="wide",
+)
+if _retrieval_startup_error is not None:
+    if _RUNTIME_SMOKE_REQUESTED:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "surface": "gui",
+                    "error": "RetrievalBootstrapError",
+                    "message": _retrieval_startup_error,
+                },
+                ensure_ascii=False,
+            )
+        )
+        raise SystemExit(2)
+    st.error(f"Retrieval startup validation failed: {_retrieval_startup_error}")
+    st.stop()
 
 from src.core import data_update_jobs
 from src.core import conversation_store
@@ -117,12 +173,6 @@ graph_app = main_graph_module.graph_app
 WEEKDAY_LABELS = ["월", "화", "수", "목", "금"]
 MONITORING_EVAL_RUN_DIR = Path("debug") / "evaluation_runs"
 MONITORING_REGRESSION_CANDIDATE_DIR = Path("debug") / "regression_candidates"
-
-st.set_page_config(
-    page_title="Finance Report Agent",
-    layout="wide",
-)
-
 
 def _inject_ui_styles() -> None:
     st.markdown(
@@ -2130,6 +2180,10 @@ def render_global_monitoring_page() -> None:
         return
 
     _render_issue_report_monitoring()
+
+
+if _RUNTIME_SMOKE_REQUESTED:
+    _finish_runtime_smoke(_retrieval_runtime)
 
 
 threads = _load_threads()

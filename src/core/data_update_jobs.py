@@ -19,8 +19,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from src.configs import config
 from src.configs.settings import BASE_DIR
-from src.core.report_crawler import normalize_report_categories
+from src.retrieval.runtime_guard import guard_before_retrieval_write
 
 JOB_DIR = BASE_DIR / "logs" / "data_update_jobs"
 STATUS_PATH = JOB_DIR / "status.json"
@@ -67,6 +68,10 @@ def group_consecutive_dates(values: list[str] | tuple[str, ...]) -> list[tuple[s
 
 def normalize_update_categories(categories: str | list[str] | tuple[str, ...] | None) -> list[str]:
     """Normalize report categories for GUI-triggered update jobs."""
+    # Keep crawler code outside process initialization.  The runtime guard is
+    # evaluated before the crawler process is ever launched.
+    from src.core.report_crawler import normalize_report_categories
+
     return normalize_report_categories(categories)
 
 
@@ -275,6 +280,10 @@ def build_embedding_command(limit: int | None = None) -> list[str]:
 
 def start_embedding_job(*, label: str, limit: int | None = None) -> dict[str, Any]:
     """Start a detached embedding-only job and return the initial status."""
+    guard_before_retrieval_write(
+        config.DB_PATH,
+        allow_degraded_forward_recovery=True,
+    )
     JOB_DIR.mkdir(parents=True, exist_ok=True)
     LOG_PATH.write_text("", encoding="utf-8")
     parent_pid = os.getpid()
@@ -313,6 +322,7 @@ def start_update_job(
     categories: str | list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Start a detached update job and return the initial status."""
+    guard_before_retrieval_write(config.DB_PATH)
     selected_dates = normalize_date_list(selected_dates)
     selected_categories = normalize_update_categories(categories)
     if selected_dates:
@@ -424,6 +434,10 @@ def run_embedding_job(
 ) -> int:
     """Run an embedding-only job and persist progress status for the GUI."""
     try:
+        guard_before_retrieval_write(
+            config.DB_PATH,
+            allow_degraded_forward_recovery=True,
+        )
         _write_status(
             {
                 "state": "running",
@@ -529,6 +543,7 @@ def run_update_job(
 ) -> int:
     """Run crawler then embedding pipeline, updating status as each phase completes."""
     try:
+        guard_before_retrieval_write(config.DB_PATH)
         normalized_dates = normalize_date_list(selected_dates)
         selected_categories = normalize_update_categories(categories)
         if normalized_dates:

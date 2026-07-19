@@ -1,5 +1,8 @@
+import pytest
+
 from src.core import db_manager
 from src.core.db_manager import parse_filename
+from src.retrieval.bootstrap import RetrievalBootstrapError
 
 
 def test_parse_filename_accepts_current_five_part_rule():
@@ -55,3 +58,19 @@ def test_embedding_failure_reason_and_extraction_engine_are_recorded_and_cleared
     assert row["embedding_last_error"] is None
     assert row["embedding_last_attempt_at"] is None
     assert row["embedding_extraction_engine"] == "opendataloader"
+
+
+def test_missing_native_catalog_footprint_blocks_legacy_database_creation(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "reports.db"
+    evidence = tmp_path / "retrieval" / "v2" / "evidence"
+    evidence.mkdir(parents=True)
+    (evidence / "native-authority.marker").write_text("present", encoding="utf-8")
+    monkeypatch.setattr(db_manager, "DB_PATH", str(db_path))
+
+    with pytest.raises(RetrievalBootstrapError, match="V2 recovery evidence"):
+        db_manager.init_db()
+
+    assert not db_path.exists()

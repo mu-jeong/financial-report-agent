@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import csv
 import re
-import sqlite3
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from src.configs.config import DB_PATH
+from src.core.db_manager import get_connection
 from src.configs.settings import BASE_DIR, get_config_value
 
 KRX_LISTED_COMPANY_SOURCE_URL = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage"
@@ -111,14 +111,9 @@ def resolve_report_file_scope_for_companies(
     """Return embedded company-report files for an already resolved company universe."""
     base_filters = dict(base_filters or {})
     sql, params = _report_scope_sql(base_filters, list(company_names or []))
-    database_path = Path(db_path) if db_path else Path(DB_PATH)
-    rows: list[sqlite3.Row]
-    if not database_path.exists():
-        rows = []
-    else:
-        with sqlite3.connect(database_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(sql, params).fetchall()
+    database_path = str(db_path or DB_PATH)
+    with get_connection(database_path) as conn:
+        rows = conn.execute(sql, params).fetchall()
 
     file_names = sorted({row["file_name"] for row in rows if row["file_name"]})
     matched_targets = sorted({row["target_name"] for row in rows if row["target_name"]})
