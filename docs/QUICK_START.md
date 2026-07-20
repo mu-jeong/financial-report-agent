@@ -74,7 +74,7 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 ## 6. 처음 실행이 오래 걸리는 이유
 
 처음 실행할 때는 패키지 설치, PDF 다운로드, 텍스트 추출, 임베딩 생성이 함께 진행됩니다.
-배포 템플릿의 미임베딩 문서 추출기는 `opendataloader`이므로 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. Java를 설치하지 않을 경우 데이터 준비 전에 `.env`의 `UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf`로 바꾸세요.
+배포 템플릿은 일반 문서와 미임베딩 문서를 모두 `pymupdf`로 추출하므로 별도 Java 런타임이 필요하지 않습니다.
 `RUN_QUICKSTART.bat`을 다시 실행하면 이미 설치된 항목과 이미 임베딩된 리포트를 재사용하므로 처음보다는 빠르지만, 실행일 기준 데이터 수집과 임베딩 확인 단계를 다시 거칩니다. 단순히 앱만 열려면 `RUN_APP.bat`을 사용하세요.
 
 ## 7. 자주 생기는 문제

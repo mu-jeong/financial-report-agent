@@ -178,4 +178,4 @@ python -m compileall -q apps src scripts
 python -m pytest -q
 ```
 
-Native V2 migration/publication의 상세 상태 전이와 현재 release blocker는 [V2 native retrieval migration runbook](migrations/v2/V2_MIGRATION.md)과 [V2 아키텍처 PDF](migrations/v2/Finance_LLM_V2_Migration_Architecture.pdf)를 참고합니다.
+V1/V2 차이, SSOT 원칙, migration/publication 구조는 [V2 마이그레이션과 검색 아키텍처](migrations/v2/V2_MIGRATION.md)를 참고합니다. 실제 릴리스 검증 절차와 release blocker는 [V2 native retrieval release certification runbook](migrations/v2/V2_RELEASE_CERTIFICATION.md)을 참고합니다.
