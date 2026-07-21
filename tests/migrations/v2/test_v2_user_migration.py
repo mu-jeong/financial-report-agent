@@ -596,4 +596,5 @@ def test_windows_batch_uses_project_venv_and_preserves_arguments_and_exit_code()
     assert 'set "VENV_PYTHON=.venv\\Scripts\\python.exe"' in batch
     assert '"%VENV_PYTHON%" scripts\\migrations\\v2\\migrate_v2_user.py %*' in batch
     assert 'set "EXIT_CODE=%errorlevel%"' in batch
+    assert '@if "%EXIT_CODE%"=="0" (' in batch
     assert "exit /b %EXIT_CODE%" in batch

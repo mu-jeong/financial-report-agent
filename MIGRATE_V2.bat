@@ -28,7 +28,7 @@ echo.
 set "EXIT_CODE=%errorlevel%"
 
 echo.
-if "%EXIT_CODE%"=="0" (
+@if "%EXIT_CODE%"=="0" (
     echo 쓰기 가능한 V2 마이그레이션이 정상적으로 끝났습니다.
 ) else (
     echo 마이그레이션이 중단되었습니다. V1 원본과 실패 기록을 확인하세요.
