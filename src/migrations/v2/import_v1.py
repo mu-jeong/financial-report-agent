@@ -153,6 +153,7 @@ def plan_v1_seed(
         copied_install_root,
         expected_hashes=expected_hashes,
         prefix_template=profile.prefix_template,
+        child_policy=profile.child_policy,
         provenance=provenance,
     )
     report_rows = _read_report_rows(Path(copied_install_root) / "reports.db")
@@ -425,7 +426,7 @@ def convert_v1_seed(
     mapping_path = evidence_root / "legacy-mapping.json"
     _write_json_once(mapping_path, mapping_payload)
     mapping_hash = _sha256_file(mapping_path)
-    evidence_payload = {
+    evidence_payload: dict[str, Any] = {
         "schema_version": 1,
         "publication_id": plan.publication_id,
         "build_id": plan.build_id,
@@ -465,8 +466,42 @@ def convert_v1_seed(
             "pdf_reads": 0,
         },
     }
+    if plan.reconstruction.replay_claims:
+        replay_policy = plan.reconstruction.replay_policy
+        if replay_policy is None:
+            raise ConversionError("replay evidence is missing its frozen policy")
+        evidence_payload["schema_version"] = 2
+        evidence_payload["span_reconstruction"] = {
+            "claims": [asdict(claim) for claim in plan.reconstruction.replay_claims],
+            "method": "ordered-span-v1-with-ambiguity-replay",
+            "operations": {
+                "embedding": 0,
+                "legacy_replay_chunking": len(plan.reconstruction.replay_claims),
+                "network": 0,
+                "pdf_reads": 0,
+                "source_pdf_chunking": 0,
+            },
+            "policy": replay_policy.canonical_payload,
+            "policy_sha256": replay_policy.policy_sha256,
+            "replayed_parent_count": len(plan.reconstruction.replay_claims),
+            "resolver_version": 2,
+        }
     evidence_path = evidence_root / "manifest.json"
     _write_json_once(evidence_path, evidence_payload)
+    _validate_conversion_evidence_files(
+        evidence_path,
+        mapping_path,
+        expected_identity={
+            "assessment_digest": plan.reconstruction.assessment.digest,
+            "build_id": plan.build_id,
+            "compatibility_bundle_id": plan.compatibility_bundle_id,
+            "profile_hash": plan.profile.profile_hash,
+            "publication_id": plan.publication_id,
+            "reconstruction_digest": plan.reconstruction.reconstruction_digest,
+            "snapshot_id": plan.snapshot_id,
+        },
+        expected_counts=(len(plan.reports), len(plan.parents), len(plan.chunks)),
+    )
     evidence_hash = _sha256_file(evidence_path)
     evidence_relative = f"retrieval/v2/evidence/{plan.publication_id}/manifest.json"
 
@@ -585,6 +620,23 @@ def convert_v1_seed(
 
 def validate_converted_seed(data_root: str | Path, result: ConversionResult) -> None:
     root = Path(data_root).resolve(strict=True)
+    evidence_path = root / result.evidence_manifest_relative_path
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        mapping_relative = evidence["legacy_mapping"]["relative_path"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ConversionError("native seed conversion evidence cannot be read") from exc
+    _validate_conversion_evidence_files(
+        evidence_path,
+        root / mapping_relative,
+        expected_identity={
+            "build_id": result.build_id,
+            "profile_hash": result.profile_hash,
+            "publication_id": result.publication_id,
+            "snapshot_id": result.snapshot_id,
+        },
+        expected_counts=(result.report_count, result.parent_count, result.chunk_count),
+    )
     catalog = root / result.catalog_relative_path
     uri = f"file:{catalog.as_posix()}?mode=ro&immutable=1"
     with sqlite3.connect(uri, uri=True) as connection:
@@ -995,6 +1047,141 @@ def _write_catalog_checkpoint(connection: sqlite3.Connection, target: Path) -> N
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _validate_conversion_evidence_files(
+    manifest_path: Path,
+    mapping_path: Path,
+    *,
+    expected_identity: dict[str, str],
+    expected_counts: tuple[int, int, int],
+) -> None:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConversionError("conversion evidence is not readable canonical JSON") from exc
+    base_keys = {
+        "assessment_digest",
+        "build_id",
+        "compatibility_bundle_id",
+        "counts",
+        "legacy_mapping",
+        "profile_hash",
+        "prohibited_conversion_calls",
+        "publication_id",
+        "reconstruction_digest",
+        "schema_version",
+        "snapshot",
+        "snapshot_id",
+        "source_manifest_sha256",
+        "vector_max_absolute_error",
+    }
+    if not isinstance(manifest, dict) or manifest.get("schema_version") not in (1, 2):
+        raise ConversionError("conversion evidence schema version is invalid")
+    expected_keys = base_keys | (
+        {"span_reconstruction"} if manifest["schema_version"] == 2 else set()
+    )
+    if set(manifest) != expected_keys:
+        raise ConversionError("conversion evidence fields are invalid")
+    if any(manifest.get(key) != value for key, value in expected_identity.items()):
+        raise ConversionError("conversion evidence identity is invalid")
+    if manifest["counts"] != dict(zip(("reports", "parents", "chunks"), expected_counts)):
+        raise ConversionError("conversion evidence counts are invalid")
+    mapping_descriptor = manifest["legacy_mapping"]
+    if not isinstance(mapping_descriptor, dict) or set(mapping_descriptor) != {
+        "relative_path",
+        "sha256",
+    } or mapping_descriptor["sha256"] != _sha256_file(mapping_path):
+        raise ConversionError("conversion mapping descriptor is invalid")
+    if not isinstance(mapping, dict) or set(mapping) != {
+        "assessment_digest",
+        "reconstruction_digest",
+        "rows",
+        "schema_version",
+    }:
+        raise ConversionError("conversion mapping fields are invalid")
+    if (
+        mapping["schema_version"] != 1
+        or mapping["assessment_digest"] != manifest["assessment_digest"]
+        or mapping["reconstruction_digest"] != manifest["reconstruction_digest"]
+        or not isinstance(mapping["rows"], list)
+        or len(mapping["rows"]) != expected_counts[2]
+    ):
+        raise ConversionError("conversion mapping identity or count is invalid")
+    if manifest["schema_version"] == 2:
+        _validate_span_reconstruction_evidence(manifest["span_reconstruction"])
+
+
+def _validate_span_reconstruction_evidence(value: Any) -> None:
+    required = {
+        "claims",
+        "method",
+        "operations",
+        "policy",
+        "policy_sha256",
+        "replayed_parent_count",
+        "resolver_version",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ConversionError("span reconstruction evidence fields are invalid")
+    claims = value["claims"]
+    if (
+        value["resolver_version"] != 2
+        or value["method"] != "ordered-span-v1-with-ambiguity-replay"
+        or not isinstance(claims, list)
+        or not claims
+        or value["replayed_parent_count"] != len(claims)
+    ):
+        raise ConversionError("span reconstruction evidence identity is invalid")
+    operations = value["operations"]
+    if operations != {
+        "embedding": 0,
+        "legacy_replay_chunking": len(claims),
+        "network": 0,
+        "pdf_reads": 0,
+        "source_pdf_chunking": 0,
+    }:
+        raise ConversionError("span reconstruction operation evidence is invalid")
+    policy = value["policy"]
+    if not isinstance(policy, dict) or value["policy_sha256"] != sha256_text(
+        canonical_json(policy)
+    ):
+        raise ConversionError("span reconstruction policy digest is invalid")
+    claim_keys = {
+        "ambiguous_child_order",
+        "full_sequence_replay_matched",
+        "global_assignment_cardinality",
+        "legacy_parent_id",
+        "local_occurrence_count",
+        "method",
+        "policy_id",
+        "policy_sha256",
+        "selected_start",
+    }
+    for claim in claims:
+        if (
+            not isinstance(claim, dict)
+            or set(claim) != claim_keys
+            or claim["method"] != "legacy-recursive-splitter-v1"
+            or claim["policy_id"] != "legacy-recursive-splitter-v1"
+            or claim["policy_sha256"] != value["policy_sha256"]
+            or claim["global_assignment_cardinality"] != "multiple"
+            or claim["full_sequence_replay_matched"] is not True
+            or not isinstance(claim["legacy_parent_id"], str)
+            or not claim["legacy_parent_id"]
+        ):
+            raise ConversionError("span reconstruction claim is invalid")
+        for field in (
+            "ambiguous_child_order",
+            "local_occurrence_count",
+            "selected_start",
+        ):
+            item = claim[field]
+            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+                raise ConversionError("span reconstruction claim offset is invalid")
+        if claim["local_occurrence_count"] < 2:
+            raise ConversionError("span reconstruction ambiguity count is invalid")
 
 
 def _write_json_once(path: Path, value: dict[str, Any]) -> None:

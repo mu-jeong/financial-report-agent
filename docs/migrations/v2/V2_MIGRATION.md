@@ -305,6 +305,17 @@ continues to fail closed. Parent/child split sizes, overlap, Markdown headers,
 and embedding prefixes remain the V1 values; deterministic identities and child
 spans are V2 storage metadata rather than text-processing changes.
 
+During V1 seed conversion, exact child text normally proves one ordered parent
+span assignment. If repeated punctuation (including a child whose complete body
+is `.`) leaves more than one textual assignment, conversion replays a frozen
+copy of the V1 recursive splitter solely as a migration proof. Replay is
+accepted only when its complete child sequence equals the stored V1 sequence
+with exact Python string equality; otherwise conversion still fails closed.
+This path reads no PDF, performs no embedding, and is not imported by the V2
+reader or writer. Replay-used conversions record resolver/policy evidence in
+conversion manifest schema 2; ordinary unique conversions retain schema 1 and
+their existing identities.
+
 ## 7. Post-successor launcher matrix
 
 This gate requires the healthy active+predecessor pair created by the

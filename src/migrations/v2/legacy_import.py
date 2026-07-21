@@ -6,7 +6,7 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import faiss
 import numpy as np
@@ -18,10 +18,14 @@ from src.migrations.v2.assess import (
     load_trusted_legacy_docstore,
 )
 from src.migrations.v2.reconstruct import (
+    AmbiguousSpanError,
+    LegacyReplayPolicy,
     ReconstructedSpan,
     ReconstructionError,
+    legacy_replay_policy_from_mapping,
     render_embedding_prefix,
     resolve_ordered_spans,
+    resolve_ordered_spans_with_replay,
 )
 from src.retrieval.identity import canonical_json, sha256_text
 from src.retrieval.vector_index import read_faiss_index_file
@@ -62,10 +66,25 @@ class LegacyParent:
 
 
 @dataclass(frozen=True)
+class LegacyReplayClaim:
+    legacy_parent_id: str
+    method: str
+    policy_id: str
+    policy_sha256: str
+    global_assignment_cardinality: str
+    ambiguous_child_order: int
+    local_occurrence_count: int
+    selected_start: int
+    full_sequence_replay_matched: bool
+
+
+@dataclass(frozen=True)
 class LegacyReconstruction:
     assessment: V1Assessment
     parents: tuple[LegacyParent, ...]
     reconstruction_digest: str
+    replay_claims: tuple[LegacyReplayClaim, ...] = ()
+    replay_policy: LegacyReplayPolicy | None = None
 
     @property
     def parent_count(self) -> int:
@@ -81,6 +100,7 @@ def reconstruct_v1_documents(
     *,
     expected_hashes: dict[str, str],
     prefix_template: str,
+    child_policy: Mapping[str, object] | None = None,
     provenance: ProvenanceEvidence | None = None,
 ) -> LegacyReconstruction:
     """Prove all V1 child spans without PDF, extraction, embedding, or network."""
@@ -107,6 +127,8 @@ def reconstruct_v1_documents(
         grouped.setdefault(parent_id, []).append((legacy_ordinal, document_id, document))
 
     converted: list[LegacyParent] = []
+    replay_claims: list[LegacyReplayClaim] = []
+    replay_policy: LegacyReplayPolicy | None = None
     for parent_id, parent_row in parents.items():
         raw_children = grouped.get(parent_id)
         if not raw_children:
@@ -138,6 +160,46 @@ def reconstruct_v1_documents(
                 parent_row["content"],
                 embedding_texts,
                 prefix,
+            )
+        except AmbiguousSpanError:
+            if child_policy is None:
+                raise LegacyImportError(
+                    f"legacy span reconstruction failed for parent {parent_id}: "
+                    "legacy children have multiple valid global span assignments"
+                ) from None
+            try:
+                candidate_policy = legacy_replay_policy_from_mapping(child_policy)
+                resolution = resolve_ordered_spans_with_replay(
+                    parent_row["content"],
+                    embedding_texts,
+                    prefix,
+                    replay_policy=candidate_policy,
+                )
+            except ReconstructionError as exc:
+                raise LegacyImportError(
+                    f"legacy span reconstruction failed for parent {parent_id}: {exc}"
+                ) from exc
+            if resolution.ambiguity is None:
+                raise LegacyImportError("legacy replay lost its ambiguity evidence")
+            if replay_policy is not None and replay_policy != candidate_policy:
+                raise LegacyImportError("legacy replay policy changed during reconstruction")
+            replay_policy = candidate_policy
+            spans = resolution.spans
+            ambiguity = resolution.ambiguity
+            replay_claims.append(
+                LegacyReplayClaim(
+                    legacy_parent_id=parent_id,
+                    method=resolution.method,
+                    policy_id=candidate_policy.policy_id,
+                    policy_sha256=candidate_policy.policy_sha256,
+                    global_assignment_cardinality=(
+                        ambiguity.global_assignment_cardinality
+                    ),
+                    ambiguous_child_order=ambiguity.ambiguous_child_order,
+                    local_occurrence_count=ambiguity.local_occurrence_count,
+                    selected_start=spans[ambiguity.ambiguous_child_order].span_start,
+                    full_sequence_replay_matched=True,
+                )
             )
         except ReconstructionError as exc:
             raise LegacyImportError(
@@ -197,35 +259,56 @@ def reconstruct_v1_documents(
             parent.vector_payload_sha256,
         )
     )
-    digest = sha256_text(
-        canonical_json(
+    digest_payload: dict[str, Any] = {
+        "assessment_digest": before.digest,
+        "parents": [
             {
-                "assessment_digest": before.digest,
-                "parents": [
+                "canonical_order_key": parent.canonical_order_key,
+                "content_sha256": parent.content_sha256,
+                "file_name": parent.file_name,
+                "legacy_parent_id": parent.legacy_parent_id,
+                "vector_payload_sha256": parent.vector_payload_sha256,
+                "children": [
                     {
-                        "canonical_order_key": parent.canonical_order_key,
-                        "content_sha256": parent.content_sha256,
-                        "file_name": parent.file_name,
-                        "legacy_parent_id": parent.legacy_parent_id,
-                        "vector_payload_sha256": parent.vector_payload_sha256,
-                        "children": [
-                            {
-                                "child_order": child.child_order,
-                                "embedding_text_sha256": child.span.embedding_text_sha256,
-                                "legacy_document_id": child.legacy_document_id,
-                                "legacy_ordinal": child.legacy_ordinal,
-                                "span_end": child.span.span_end,
-                                "span_start": child.span.span_start,
-                            }
-                            for child in parent.children
-                        ],
+                        "child_order": child.child_order,
+                        "embedding_text_sha256": child.span.embedding_text_sha256,
+                        "legacy_document_id": child.legacy_document_id,
+                        "legacy_ordinal": child.legacy_ordinal,
+                        "span_end": child.span.span_end,
+                        "span_start": child.span.span_start,
                     }
-                    for parent in converted
+                    for child in parent.children
                 ],
-                "schema_version": 1,
             }
-        )
-    )
+            for parent in converted
+        ],
+        "schema_version": 1,
+    }
+    if replay_claims:
+        assert replay_policy is not None
+        digest_payload["schema_version"] = 2
+        digest_payload["span_reconstruction"] = {
+            "claims": [
+                {
+                    "ambiguous_child_order": claim.ambiguous_child_order,
+                    "full_sequence_replay_matched": claim.full_sequence_replay_matched,
+                    "global_assignment_cardinality": (
+                        claim.global_assignment_cardinality
+                    ),
+                    "legacy_parent_id": claim.legacy_parent_id,
+                    "local_occurrence_count": claim.local_occurrence_count,
+                    "method": claim.method,
+                    "policy_id": claim.policy_id,
+                    "policy_sha256": claim.policy_sha256,
+                    "selected_start": claim.selected_start,
+                }
+                for claim in replay_claims
+            ],
+            "method": "ordered-span-v1-with-ambiguity-replay",
+            "policy": replay_policy.canonical_payload,
+            "policy_sha256": replay_policy.policy_sha256,
+        }
+    digest = sha256_text(canonical_json(digest_payload))
     after = assess_v1_install(
         root,
         expected_hashes=expected_hashes,
@@ -233,7 +316,13 @@ def reconstruct_v1_documents(
     )
     if before != after:
         raise LegacyImportError("copied V1 artifacts changed during reconstruction")
-    return LegacyReconstruction(before, tuple(converted), digest)
+    return LegacyReconstruction(
+        before,
+        tuple(converted),
+        digest,
+        tuple(replay_claims),
+        replay_policy,
+    )
 
 
 def _read_legacy_catalog(
@@ -319,6 +408,7 @@ __all__ = [
     "LegacyChild",
     "LegacyImportError",
     "LegacyParent",
+    "LegacyReplayClaim",
     "LegacyReconstruction",
     "reconstruct_v1_documents",
 ]

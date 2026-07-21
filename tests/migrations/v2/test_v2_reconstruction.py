@@ -1,17 +1,33 @@
 from __future__ import annotations
 
 import pytest
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.migrations.v2.reconstruct import (
+    LegacyReplayPolicy,
     ReconstructionError,
+    frozen_legacy_split,
     render_embedding_prefix,
     resolve_ordered_spans,
+    resolve_ordered_spans_with_replay,
     strip_embedding_prefix,
 )
 from src.retrieval.identity import sha256_text
 
 
 PREFIX = "[Company: A, Title: Result]\n"
+
+
+def _replay_policy() -> LegacyReplayPolicy:
+    return LegacyReplayPolicy(
+        chunk_size=12,
+        chunk_overlap=1,
+        separators=("\n\n", "\n", ". ", " ", ""),
+        keep_separator=True,
+        strip_whitespace=True,
+        is_separator_regex=False,
+        length_function="python-len",
+    )
 
 
 def test_prefix_rendering_and_stripping_are_exact():
@@ -65,6 +81,65 @@ def test_multiple_global_sequences_fail_closed():
         resolve_ordered_spans(parent, texts, PREFIX)
 
 
+def test_frozen_replay_resolves_ambiguous_dot_without_normalizing_text():
+    parent = "aaaaaaaaa. b.b.bbbbb. . ccccccccc."
+    policy = _replay_policy()
+    bodies = frozen_legacy_split(parent, policy)
+    assert bodies == ("aaaaaaaaa", ". b.b.bbbbb", ".", ". ccccccccc.")
+    oracle = RecursiveCharacterTextSplitter(
+        chunk_size=12,
+        chunk_overlap=1,
+        separators=["\n\n", "\n", ". ", " ", ""],
+        add_start_index=True,
+    ).create_documents([parent])
+    assert tuple(document.page_content for document in oracle) == bodies
+    assert tuple(document.metadata["start_index"] for document in oracle) == (0, 9, 20, 22)
+    with pytest.raises(ReconstructionError, match="multiple valid"):
+        resolve_ordered_spans(parent, [PREFIX + body for body in bodies], PREFIX)
+
+    resolution = resolve_ordered_spans_with_replay(
+        parent,
+        [PREFIX + body for body in bodies],
+        PREFIX,
+        replay_policy=policy,
+    )
+
+    assert resolution.method == "legacy-recursive-splitter-v1"
+    assert [span.span_start for span in resolution.spans] == [0, 9, 20, 22]
+    assert resolution.ambiguity is not None
+    assert resolution.ambiguity.global_assignment_cardinality == "multiple"
+    assert resolution.ambiguity.ambiguous_child_order == 2
+    assert resolution.ambiguity.local_occurrence_count == 6
+
+
+def test_frozen_replay_must_reproduce_every_legacy_child_exactly():
+    parent = "same--same--same"
+    with pytest.raises(ReconstructionError, match="does not exactly reproduce"):
+        resolve_ordered_spans_with_replay(
+            parent,
+            [PREFIX + "same", PREFIX + "same"],
+            PREFIX,
+            replay_policy=_replay_policy(),
+        )
+
+
+def test_unique_resolution_does_not_use_replay():
+    parent = "same--middle--same"
+    texts = [PREFIX + "same", PREFIX + "middle", PREFIX + "same"]
+
+    ordinary = resolve_ordered_spans(parent, texts, PREFIX)
+    replay_capable = resolve_ordered_spans_with_replay(
+        parent,
+        texts,
+        PREFIX,
+        replay_policy=_replay_policy(),
+    )
+
+    assert replay_capable.spans == ordinary
+    assert replay_capable.method == "ordered-span-v1"
+    assert replay_capable.ambiguity is None
+
+
 def test_missing_or_non_monotonic_sequence_fails_closed():
     with pytest.raises(ReconstructionError, match="absent from its parent"):
         resolve_ordered_spans("alpha", [PREFIX + "missing"], PREFIX)
@@ -85,4 +160,3 @@ def test_expected_embedding_hash_must_match_every_child():
             PREFIX,
             expected_embedding_hashes=["00" * 32],
         )
-

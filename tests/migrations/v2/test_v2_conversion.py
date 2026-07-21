@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import pickle
 import sqlite3
 from pathlib import Path
@@ -96,6 +97,73 @@ def _profile() -> EmbeddingProfile:
         parent_policy={"size": 2000, "overlap": 200},
         child_policy={"size": 500, "overlap": 50},
     )
+
+
+def _dot_profile() -> EmbeddingProfile:
+    return EmbeddingProfile(
+        model="model-a",
+        dimension=3,
+        metric="l2",
+        normalization="none",
+        prefix_template=PREFIX,
+        extractor="legacy-v1-parent-content",
+        parent_policy={"size": 2000, "overlap": 200},
+        child_policy={
+            "algorithm": "langchain-recursive-v1",
+            "chunk_overlap": 1,
+            "chunk_size": 12,
+            "is_separator_regex": False,
+            "keep_separator": True,
+            "length_function": "python-len",
+            "separators": ["\n\n", "\n", ". ", " ", ""],
+            "strip_whitespace": True,
+        },
+    )
+
+
+def _legacy_dot_source(root: Path) -> None:
+    (root / "vector_db").mkdir(parents=True)
+    with sqlite3.connect(root / "reports.db") as connection:
+        connection.executescript(
+            """
+            CREATE TABLE reports (
+                id INTEGER PRIMARY KEY, report_type TEXT NOT NULL,
+                report_date TEXT NOT NULL, target_name TEXT, title TEXT NOT NULL,
+                broker TEXT NOT NULL, file_name TEXT NOT NULL UNIQUE,
+                is_embedded INTEGER NOT NULL
+            );
+            CREATE TABLE parent_chunks (
+                id TEXT PRIMARY KEY, content TEXT NOT NULL,
+                file_name TEXT NOT NULL, metadata TEXT
+            );
+            INSERT INTO reports VALUES
+                (1, 'company', '2026-01-01', 'A', 'Result', 'Broker', 'a.pdf', 1);
+            INSERT INTO parent_chunks VALUES
+                ('p1', 'aaaaaaaaa. b.b.bbbbb. . ccccccccc.', 'a.pdf', NULL);
+            """
+        )
+    metadata = {
+        "parent_id": "p1",
+        "file_name": "a.pdf",
+        "report_type": "company",
+        "report_date": "2026-01-01",
+        "target_name": "A",
+        "title": "Result",
+        "broker": "Broker",
+    }
+    bodies = ("aaaaaaaaa", ". b.b.bbbbb", ".", ". ccccccccc.")
+    documents = {
+        f"d{order}": Document(
+            page_content=PREFIX.format(target_name="A", title="Result") + body,
+            metadata={**metadata, "child_index": order},
+        )
+        for order, body in enumerate(bodies)
+    }
+    index = faiss.IndexFlatL2(3)
+    index.add(np.asarray([[float(i), 1.0, 0.5] for i in range(4)], dtype=np.float32))
+    faiss.write_index(index, str(root / "vector_db" / "index.faiss"))
+    with (root / "vector_db" / "index.pkl").open("wb") as stream:
+        pickle.dump((InMemoryDocstore(documents), {i: f"d{i}" for i in range(4)}), stream)
 
 
 def _copied_fixture(tmp_path: Path):
@@ -198,6 +266,16 @@ def test_full_n_conversion_publishes_native_epoch_zero_seed_without_prohibited_c
         "committed-floor.json",
     }
     assert not list((data_root / "retrieval" / "v2").rglob("index.pkl"))
+    manifest = json.loads((evidence_dir / "manifest.json").read_text("utf-8"))
+    mapping = json.loads((evidence_dir / "legacy-mapping.json").read_text("utf-8"))
+    assert manifest["schema_version"] == 1
+    assert "span_reconstruction" not in manifest
+    assert set(mapping) == {
+        "assessment_digest",
+        "reconstruction_digest",
+        "rows",
+        "schema_version",
+    }
     with sqlite3.connect(data_root / result.catalog_relative_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM active_reports").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM snapshot_membership").fetchone()[0] == 2
@@ -234,6 +312,52 @@ def test_clean_conversions_are_logically_and_vector_deterministic(tmp_path):
     assert first[0].snapshot_id == second[0].snapshot_id
     assert first[0].snapshot_sha256 == second[0].snapshot_sha256
     assert first[1] == second[1]
+
+
+def test_ambiguous_dot_conversion_is_deterministic_and_emits_redacted_v2_evidence(
+    tmp_path,
+):
+    source = tmp_path / "dot-source"
+    source.mkdir()
+    _legacy_dot_source(source)
+    copied = tmp_path / "dot-copied"
+    copied_evidence = create_copied_v1_install(source, copied)
+    expected = {
+        item.relative_path: item.sha256 for item in copied_evidence.copied_artifacts
+    }
+    observed = []
+    for suffix in ("dot-one", "dot-two"):
+        data_root = tmp_path / suffix
+        data_root.mkdir()
+        bundle = seal_compatibility_bundle(copied, data_root)
+        result = convert_v1_seed(
+            copied,
+            data_root,
+            expected_hashes=expected,
+            profile=_dot_profile(),
+            source_hashes={"a.pdf": "11" * 32},
+            compatibility_bundle_id=bundle.bundle_id,
+        )
+        evidence = json.loads(
+            (data_root / result.evidence_manifest_relative_path).read_text("utf-8")
+        )
+        with sqlite3.connect(data_root / result.catalog_relative_path) as connection:
+            rows = connection.execute(
+                "SELECT chunk_uid, faiss_id, span_start, span_end "
+                "FROM retrieval_chunks JOIN snapshot_membership USING (chunk_uid) "
+                "ORDER BY child_order"
+            ).fetchall()
+        assert [row[2] for row in rows] == [0, 9, 20, 22]
+        assert result.max_vector_absolute_error == 0.0
+        assert evidence["schema_version"] == 2
+        replay = evidence["span_reconstruction"]
+        assert replay["claims"][0]["ambiguous_child_order"] == 2
+        assert replay["claims"][0]["selected_start"] == 20
+        encoded = json.dumps(replay, sort_keys=True)
+        assert "aaaaaaaaa. b.b.bbbbb. . ccccccccc." not in encoded
+        observed.append((result.build_id, result.snapshot_id, rows))
+
+    assert observed[0] == observed[1]
 
 
 def test_missing_source_evidence_leaves_native_candidate_unpublished(tmp_path):

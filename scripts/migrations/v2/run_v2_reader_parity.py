@@ -641,24 +641,28 @@ def _validate_conversion_manifest(
     source_hash: str,
     counts: tuple[int, int, int],
 ) -> None:
+    base_fields = {
+        "schema_version",
+        "publication_id",
+        "build_id",
+        "snapshot_id",
+        "profile_hash",
+        "compatibility_bundle_id",
+        "assessment_digest",
+        "reconstruction_digest",
+        "source_manifest_sha256",
+        "snapshot",
+        "counts",
+        "legacy_mapping",
+        "vector_max_absolute_error",
+        "prohibited_conversion_calls",
+    }
+    if not isinstance(manifest, dict) or manifest.get("schema_version") not in (1, 2):
+        raise ReaderParityError("conversion manifest schema version is invalid")
     manifest = _object(
         manifest,
-        {
-            "schema_version",
-            "publication_id",
-            "build_id",
-            "snapshot_id",
-            "profile_hash",
-            "compatibility_bundle_id",
-            "assessment_digest",
-            "reconstruction_digest",
-            "source_manifest_sha256",
-            "snapshot",
-            "counts",
-            "legacy_mapping",
-            "vector_max_absolute_error",
-            "prohibited_conversion_calls",
-        },
+        base_fields
+        | ({"span_reconstruction"} if manifest["schema_version"] == 2 else set()),
         "conversion manifest",
     )
     identity = (
@@ -671,7 +675,7 @@ def _validate_conversion_manifest(
         manifest["source_manifest_sha256"],
     )
     expected = (
-        1,
+        manifest["schema_version"],
         row["publication_id"],
         row["build_id"],
         row["snapshot_id"],
@@ -681,6 +685,8 @@ def _validate_conversion_manifest(
     )
     if identity != expected:
         raise ReaderParityError("conversion manifest identity is invalid")
+    if manifest["schema_version"] == 2:
+        _validate_span_reconstruction(manifest["span_reconstruction"])
     expected_snapshot = {
         "relative_path": row["snapshot_path"],
         "sha256": row["snapshot_sha256"],
@@ -725,6 +731,74 @@ def _validate_conversion_manifest(
         "pdf_reads",
     } or any(value != 0 for value in prohibited.values()):
         raise ReaderParityError("conversion prohibited-call evidence is invalid")
+
+
+def _validate_span_reconstruction(value: Any) -> None:
+    value = _object(
+        value,
+        {
+            "claims",
+            "method",
+            "operations",
+            "policy",
+            "policy_sha256",
+            "replayed_parent_count",
+            "resolver_version",
+        },
+        "span reconstruction",
+    )
+    claims = value["claims"]
+    if (
+        value["resolver_version"] != 2
+        or value["method"] != "ordered-span-v1-with-ambiguity-replay"
+        or not isinstance(claims, list)
+        or not claims
+        or value["replayed_parent_count"] != len(claims)
+        or value["policy_sha256"]
+        != _sha256(canonical_json(value["policy"]).encode("utf-8"))
+    ):
+        raise ReaderParityError("span reconstruction identity is invalid")
+    if value["operations"] != {
+        "embedding": 0,
+        "legacy_replay_chunking": len(claims),
+        "network": 0,
+        "pdf_reads": 0,
+        "source_pdf_chunking": 0,
+    }:
+        raise ReaderParityError("span reconstruction operations are invalid")
+    fields = {
+        "ambiguous_child_order",
+        "full_sequence_replay_matched",
+        "global_assignment_cardinality",
+        "legacy_parent_id",
+        "local_occurrence_count",
+        "method",
+        "policy_id",
+        "policy_sha256",
+        "selected_start",
+    }
+    for raw in claims:
+        claim = _object(raw, fields, "span reconstruction claim")
+        if (
+            claim["method"] != "legacy-recursive-splitter-v1"
+            or claim["policy_id"] != "legacy-recursive-splitter-v1"
+            or claim["policy_sha256"] != value["policy_sha256"]
+            or claim["global_assignment_cardinality"] != "multiple"
+            or claim["full_sequence_replay_matched"] is not True
+            or not isinstance(claim["legacy_parent_id"], str)
+            or not claim["legacy_parent_id"]
+        ):
+            raise ReaderParityError("span reconstruction claim is invalid")
+        for field in (
+            "ambiguous_child_order",
+            "local_occurrence_count",
+            "selected_start",
+        ):
+            item = claim[field]
+            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+                raise ReaderParityError("span reconstruction claim offset is invalid")
+        if claim["local_occurrence_count"] < 2:
+            raise ReaderParityError("span reconstruction ambiguity count is invalid")
 
 
 def _validate_mapping(

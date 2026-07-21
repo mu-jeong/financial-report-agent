@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,7 +14,111 @@ import pytest
 from scripts.migrations.v2 import run_v2_reader_parity
 from src.migrations.v2.evidence import seal_compatibility_bundle
 from src.migrations.v2.import_v1 import convert_v1_seed
+from src.retrieval.identity import canonical_json
 from tests.migrations.v2.fixtures_factory.v1 import build_v1_fixture
+
+
+def test_gate_c_accepts_exact_replay_evidence_and_rejects_tampering():
+    policy = {
+        "chunk_overlap": 1,
+        "chunk_size": 12,
+        "is_separator_regex": False,
+        "keep_separator": True,
+        "length_function": "python-len",
+        "policy_id": "legacy-recursive-splitter-v1",
+        "separators": ["\n\n", "\n", ". ", " ", ""],
+        "strip_whitespace": True,
+    }
+    policy_hash = hashlib.sha256(canonical_json(policy).encode()).hexdigest()
+    row = {
+        "publication_id": "11" * 32,
+        "build_id": "22" * 32,
+        "snapshot_id": "33" * 32,
+        "profile_hash": "44" * 32,
+        "snapshot_path": "retrieval/v2/snapshots/example.faiss",
+        "snapshot_sha256": "55" * 32,
+        "size_bytes": 10,
+        "dimension": 3,
+        "metric": "l2",
+        "ntotal": 4,
+    }
+    manifest = {
+        "schema_version": 2,
+        "publication_id": row["publication_id"],
+        "build_id": row["build_id"],
+        "snapshot_id": row["snapshot_id"],
+        "profile_hash": row["profile_hash"],
+        "compatibility_bundle_id": "66" * 32,
+        "assessment_digest": "77" * 32,
+        "reconstruction_digest": "88" * 32,
+        "source_manifest_sha256": "99" * 32,
+        "snapshot": {
+            "relative_path": row["snapshot_path"],
+            "sha256": row["snapshot_sha256"],
+            "size_bytes": 10,
+            "dimension": 3,
+            "metric": "l2",
+            "ntotal": 4,
+        },
+        "counts": {"reports": 1, "parents": 1, "chunks": 4},
+        "legacy_mapping": {
+            "relative_path": "retrieval/v2/evidence/example/legacy-mapping.json",
+            "sha256": "aa" * 32,
+        },
+        "vector_max_absolute_error": 0.0,
+        "prohibited_conversion_calls": {
+            "api": 0,
+            "chunking": 0,
+            "crawler": 0,
+            "embedding": 0,
+            "extraction": 0,
+            "network": 0,
+            "pdf_reads": 0,
+        },
+        "span_reconstruction": {
+            "claims": [{
+                "ambiguous_child_order": 2,
+                "full_sequence_replay_matched": True,
+                "global_assignment_cardinality": "multiple",
+                "legacy_parent_id": "p1",
+                "local_occurrence_count": 6,
+                "method": "legacy-recursive-splitter-v1",
+                "policy_id": "legacy-recursive-splitter-v1",
+                "policy_sha256": policy_hash,
+                "selected_start": 20,
+            }],
+            "method": "ordered-span-v1-with-ambiguity-replay",
+            "operations": {
+                "embedding": 0,
+                "legacy_replay_chunking": 1,
+                "network": 0,
+                "pdf_reads": 0,
+                "source_pdf_chunking": 0,
+            },
+            "policy": policy,
+            "policy_sha256": policy_hash,
+            "replayed_parent_count": 1,
+            "resolver_version": 2,
+        },
+    }
+
+    run_v2_reader_parity._validate_conversion_manifest(
+        manifest,
+        row=row,
+        bundle_id="66" * 32,
+        source_hash="99" * 32,
+        counts=(1, 1, 4),
+    )
+    tampered = deepcopy(manifest)
+    tampered["span_reconstruction"]["claims"][0]["selected_start"] = -1
+    with pytest.raises(run_v2_reader_parity.ReaderParityError, match="offset"):
+        run_v2_reader_parity._validate_conversion_manifest(
+            tampered,
+            row=row,
+            bundle_id="66" * 32,
+            source_hash="99" * 32,
+            counts=(1, 1, 4),
+        )
 
 
 def test_cli_canonicalizes_identical_vector_ties_and_redacts_evidence(tmp_path: Path):
@@ -192,4 +297,3 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-

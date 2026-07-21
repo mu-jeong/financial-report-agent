@@ -21,9 +21,19 @@ def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _fixture(root: Path, *, ambiguous: bool = False) -> dict[str, str]:
+def _fixture(
+    root: Path,
+    *,
+    ambiguous: bool = False,
+    replayable_dot: bool = False,
+) -> dict[str, str]:
     (root / "vector_db").mkdir(parents=True)
-    content = "same--middle--same" if not ambiguous else "same--same--same"
+    if replayable_dot:
+        content = "aaaaaaaaa. b.b.bbbbb. . ccccccccc."
+        bodies = ["aaaaaaaaa", ". b.b.bbbbb", ".", ". ccccccccc."]
+    else:
+        content = "same--middle--same" if not ambiguous else "same--same--same"
+        bodies = ["same", "middle", "same"] if not ambiguous else ["same", "same"]
     with sqlite3.connect(root / "reports.db") as connection:
         connection.executescript(
             f"""
@@ -48,7 +58,6 @@ def _fixture(root: Path, *, ambiguous: bool = False) -> dict[str, str]:
             INSERT INTO parent_chunks VALUES ('p1', '{content}', 'a.pdf', NULL);
             """
         )
-    bodies = ["same", "middle", "same"] if not ambiguous else ["same", "same"]
     documents = {}
     mapping = {}
     for index, body in enumerate(bodies):
@@ -110,6 +119,40 @@ def test_ambiguous_global_mapping_blocks_the_complete_import(tmp_path):
         )
 
 
+def test_ambiguous_dot_is_replayed_deterministically_from_the_frozen_policy(tmp_path):
+    expected = _fixture(tmp_path, replayable_dot=True)
+    child_policy = {
+        "algorithm": "langchain-recursive-v1",
+        "chunk_overlap": 1,
+        "chunk_size": 12,
+        "is_separator_regex": False,
+        "keep_separator": True,
+        "length_function": "python-len",
+        "separators": ["\n\n", "\n", ". ", " ", ""],
+        "strip_whitespace": True,
+    }
+
+    first = reconstruct_v1_documents(
+        tmp_path,
+        expected_hashes=expected,
+        prefix_template=PREFIX_TEMPLATE,
+        child_policy=child_policy,
+    )
+    second = reconstruct_v1_documents(
+        tmp_path,
+        expected_hashes=expected,
+        prefix_template=PREFIX_TEMPLATE,
+        child_policy=child_policy,
+    )
+
+    assert first.reconstruction_digest == second.reconstruction_digest
+    assert [child.span.span_start for child in first.parents[0].children] == [0, 9, 20, 22]
+    assert len(first.replay_claims) == 1
+    assert first.replay_claims[0].ambiguous_child_order == 2
+    assert first.replay_claims[0].selected_start == 20
+    assert first.replay_claims[0].full_sequence_replay_matched is True
+
+
 def test_metadata_mismatch_blocks_the_complete_import(tmp_path):
     expected = _fixture(tmp_path)
     pickle_path = tmp_path / "vector_db" / "index.pkl"
@@ -126,4 +169,3 @@ def test_metadata_mismatch_blocks_the_complete_import(tmp_path):
             expected_hashes=expected,
             prefix_template=PREFIX_TEMPLATE,
         )
-
