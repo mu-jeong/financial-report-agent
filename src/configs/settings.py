@@ -315,7 +315,7 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 name="UNEMBEDDED_PDF_EXTRACTION_ENGINE",
                 default="",
                 parser=as_lower_str,
-                env_example="opendataloader",
+                env_example="pymupdf",
                 description=(
                     "PDF parsing/extraction engine used when embedding pending/unembedded reports. "
                     "Set empty to reuse PDF_EXTRACTION_ENGINE. Legacy env alias: UNEMBEDDED_EXTRACTION_ENGINE."

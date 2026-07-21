@@ -15,7 +15,7 @@ Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면
 
 Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법과 `RUN_APP.bat` 사용 구분은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
 
-기존 V1 검색 데이터가 있다면 `MIGRATE_V2.bat`을 더블클릭해 백업·임베딩 공간 확인·GUI 실행 테스트를 거친 뒤, 기존 청크와 벡터를 그대로 사용하는 쓰기 가능한 V2로 안전하게 전환할 수 있습니다. 전체 PDF를 다시 파싱하거나 재임베딩하지 않으며, 전환 후에는 새 문서와 변경된 문서만 처리합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
+기존 V1 검색 데이터가 있다면 `MIGRATE_V2.bat`을 더블클릭해 백업·임베딩 공간 확인·GUI 실행 테스트를 거친 뒤, 기존 청크와 벡터를 그대로 사용하는 쓰기 가능한 V2로 안전하게 전환할 수 있습니다. 전체 PDF를 다시 파싱하거나 재임베딩하지 않으며, 전환 후에는 새 문서와 변경된 문서만 처리합니다. 설계 배경은 [V2 마이그레이션과 검색 아키텍처](docs/migrations/v2/V2_MIGRATION.md), 실행 절차는 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
 ---
 
@@ -75,10 +75,10 @@ RERANK_MODEL=cohere/rerank-v3.5
 SEARCH_TOP_K=20
 RECENCY_WEIGHT=0.15
 PDF_EXTRACTION_ENGINE=pymupdf
-UNEMBEDDED_PDF_EXTRACTION_ENGINE=opendataloader
+UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 ```
 
-배포 템플릿의 미임베딩 문서 추출기는 `opendataloader`이므로 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. Java를 사용하지 않으려면 데이터 준비 전에 `.env`의 `UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf`로 설정하세요. 이 전용 추출기가 primary 추출기와 다르면 PyMuPDF 자동 fallback을 사용하지 않습니다.
+배포 템플릿은 일반 문서와 미임베딩 문서를 모두 `pymupdf`로 추출합니다. 다른 추출기를 명시적으로 비교하거나 선택할 때만 해당 엔진의 추가 런타임 요구사항을 확인하세요.
 
 과거 로컬 측정에서는 약 2,000건의 리포트를 임베딩하는 데 약 **$0.05**가 들었습니다. 이 수치는 재현 가능한 비용 보장이 아니며 문서 길이, 청크 수, 호출량, 모델 가격에 따라 달라집니다.
 
@@ -208,7 +208,7 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## PDF 추출 엔진 비교
 
-`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있습니다. `pymupdf`가 기본값이고, `docling`과 `pdf-to-markdown`은 각각 별도 설치/CLI가 필요한 선택형 엔진입니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`을 설정하면 미임베딩/재시도 문서만 별도 엔진으로 처리할 수 있습니다. 빈 값이면 `PDF_EXTRACTION_ENGINE`을 그대로 사용합니다. 기존 `EXTRACTION_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE` 환경변수도 alias로 동작합니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다.
+`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있습니다. `pymupdf`가 기본값이고, `docling`과 `pdf-to-markdown`은 각각 별도 설치/CLI가 필요한 선택형 엔진입니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`은 미임베딩 문서에 적용할 엔진이며 배포 템플릿에서는 `pymupdf`를 사용합니다. 빈 값이면 `PDF_EXTRACTION_ENGINE`을 그대로 사용합니다. 기존 `EXTRACTION_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE` 환경변수도 alias로 동작합니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다.
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10
@@ -295,6 +295,8 @@ python -m pytest -q
 - [x] 일반 사용자 UX와 분리된 Monitoring Mode의 진입 방식과 노출 범위를 정합니다.
 - [x] 데이터 준비 상태와 검색 가능 여부를 한눈에 파악할 수 있는 대시보드 방향을 잡습니다.
 - [x] 질문 처리 흐름을 추적해 검색 실패, 라우팅 오류, 답변 품질 저하 원인을 확인할 수 있게 합니다.
+- [ ] 기존 OpenDataLoader 기반 활성 V2 profile을 검증된 PyMuPDF full-corpus successor로 전환하고 snapshot 전환 증거를 남깁니다.
+- [ ] PyMuPDF 추출 실패 이력을 DB SSOT에 영구 기록하고, 한 번 이상 실패한 문서만 OpenDataLoader로 재시도하는 fallback 정책을 설계·구현합니다.
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
 - [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.
