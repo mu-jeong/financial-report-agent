@@ -1,13 +1,15 @@
 import sys
 import os
 import argparse
+import json
 
 # 모듈 경로 추가 (finance_llm 패키지 접근)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from src.configs.config import SEARCH_TOP_K
+from src.configs.config import DB_PATH, SEARCH_TOP_K
 from src.core.conversation_store import append_message, delete_thread, ensure_thread
 from src.core.status import format_status_text
+from src.retrieval.bootstrap import reconcile_and_inspect_runtime
 
 
 CLI_DEPRECATION_NOTICE = (
@@ -117,13 +119,39 @@ def main():
         action="store_true",
         help="LLM 그래프를 실행하지 않고 로컬 데이터/인덱스 상태만 출력합니다.",
     )
+    parser.add_argument(
+        "--runtime-smoke",
+        action="store_true",
+        help="validate retrieval startup and exit before the interactive CLI",
+    )
     args = parser.parse_args()
+
+    if args.runtime_smoke:
+        selection = reconcile_and_inspect_runtime(DB_PATH)
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "surface": "cli",
+                    "mode": selection.mode,
+                    "active_snapshot_id": selection.active_snapshot_id,
+                    "publication_generation": selection.publication_generation,
+                    "write_epoch": selection.write_epoch,
+                    "v1_fallback_open": selection.v1_fallback_open,
+                    "degraded": selection.degraded,
+                    "write_enabled": selection.write_enabled,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
 
     if args.status:
         print_deprecation_notice()
         print(format_status_text())
         return
 
+    reconcile_and_inspect_runtime(DB_PATH)
     run_cli()
 
 if __name__ == "__main__":

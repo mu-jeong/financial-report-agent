@@ -651,6 +651,38 @@ def test_summarize_data_integrity_flags_missing_indexes_and_pending_embeddings()
     assert summary["checks"]["pdf_vs_db"]["status"] == "warning"
 
 
+def test_summarize_data_integrity_uses_native_snapshot_membership_not_pickle_shape():
+    summary = summarize_data_integrity(
+        {
+            "db": {
+                "total_reports": 4,
+                "embedded_reports": 4,
+                "pending_reports": 0,
+            },
+            "vector_db": {
+                "has_faiss_index": True,
+                "has_pickle_index": False,
+                "ntotal": 12,
+            },
+            "retrieval": {
+                "mode": "native",
+                "publication_generation": 3,
+                "write_epoch": 2,
+                "write_enabled": True,
+                "degraded": False,
+                "build_state": "fully_complete",
+                "snapshot_state": "ready",
+                "membership_count": 12,
+            },
+            "downloaded_pdfs": 4,
+        }
+    )
+
+    assert summary["checks"]["native_snapshot"]["status"] == "pass"
+    assert summary["checks"]["native_membership"]["status"] == "pass"
+    assert "embedding_backlog" not in summary["checks"]
+
+
 def test_monitoring_tab_labels_separate_global_and_chat_monitoring():
     assert build_monitoring_tab_labels() == [
         "운영 상태",

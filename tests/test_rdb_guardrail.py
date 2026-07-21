@@ -2,7 +2,15 @@ import sqlite3
 
 import pytest
 
+from src.core.company_industry import resolve_report_file_scope_for_companies
 from src.nodes import rdb
+from src.retrieval.build_service import materialize_candidate, publish_candidate
+from tests.retrieval.test_retrieval_build_service import (
+    DeterministicEmbeddings,
+    _metadata,
+    _native_seed,
+    _prepare,
+)
 
 
 def test_execute_sql_allows_readonly_select(tmp_path, monkeypatch):
@@ -82,6 +90,68 @@ def test_execute_sql_allows_readonly_cte_aliases(tmp_path, monkeypatch):
         "columns": ["target_name"],
         "rows": [("올릭스",)],
     }
+
+
+def test_native_rdb_readers_follow_active_successor_without_legacy_db(
+    tmp_path,
+    monkeypatch,
+):
+    data_root, sources = _native_seed(tmp_path)
+    legacy_anchor = data_root / "reports.db"
+    assert not legacy_anchor.exists()
+    monkeypatch.setattr(rdb, "DB_PATH", str(legacy_anchor))
+
+    def company_metadata(file_name: str):
+        value = dict(_metadata(file_name) or {})
+        if file_name == "b.pdf":
+            value.update(report_type="company", target_name="B")
+        return value
+
+    initial = rdb.execute_sql("SELECT id, file_name FROM reports ORDER BY file_name")
+    assert [row[1] for row in initial["rows"]] == ["a.pdf"]
+
+    successor_plan = _prepare(
+        data_root,
+        sources,
+        DeterministicEmbeddings(),
+        metadata_parser=company_metadata,
+    )
+    publish_candidate(materialize_candidate(successor_plan, data_root), data_root)
+    successor = rdb.execute_sql("SELECT id, file_name FROM reports ORDER BY file_name")
+    assert [row[1] for row in successor["rows"]] == ["a.pdf", "b.pdf"]
+    successor_b_id = next(row[0] for row in successor["rows"] if row[1] == "b.pdf")
+    assert resolve_report_file_scope_for_companies(
+        ["A", "B"],
+        db_path=legacy_anchor,
+    )["file_names"] == ["a.pdf", "b.pdf"]
+
+    (sources / "b.pdf").write_bytes(b"corrected-b")
+    correction_plan = _prepare(
+        data_root,
+        sources,
+        DeterministicEmbeddings(),
+        metadata_parser=company_metadata,
+    )
+    publish_candidate(materialize_candidate(correction_plan, data_root), data_root)
+    corrected = rdb.execute_sql("SELECT id, file_name FROM reports ORDER BY file_name")
+    corrected_b_id = next(row[0] for row in corrected["rows"] if row[1] == "b.pdf")
+    assert corrected_b_id != successor_b_id
+
+    (sources / "a.pdf").unlink()
+    deletion_plan = _prepare(
+        data_root,
+        sources,
+        DeterministicEmbeddings(),
+        metadata_parser=company_metadata,
+        deleted_relative_paths=("downloaded/a.pdf",),
+    )
+    publish_candidate(materialize_candidate(deletion_plan, data_root), data_root)
+    deleted = rdb.execute_sql("SELECT file_name FROM reports ORDER BY file_name")
+    assert deleted == {"columns": ["file_name"], "rows": [("b.pdf",)]}
+    assert resolve_report_file_scope_for_companies(
+        ["A", "B"],
+        db_path=legacy_anchor,
+    )["file_names"] == ["b.pdf"]
 
 
 @pytest.mark.parametrize(

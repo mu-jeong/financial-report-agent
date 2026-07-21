@@ -73,7 +73,7 @@ OpenRouter Activity 또는 Credits 화면에서 사용량과 잔액을 확인할
 - Activity: <https://openrouter.ai/activity>
 - Models and pricing: <https://openrouter.ai/models>
 
-개발자용 credits API도 제공됩니다. OpenRouter 문서 기준으로 `/api/v1/credits`는 구매한 총 크레딧과 사용량을 반환합니다.
+개발자용 조회 API도 있습니다. 일반 API 키는 `GET /api/v1/key`로 해당 키의 사용량과 한도를 조회할 수 있습니다. `GET /api/v1/credits`는 Management API key가 필요하며 계정의 총 구매 크레딧과 사용량을 반환합니다.
 
 ## 9. 비용 주의사항
 

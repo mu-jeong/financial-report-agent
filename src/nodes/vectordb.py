@@ -3,7 +3,9 @@ import sqlite3
 from collections import Counter
 from datetime import datetime
 
+import numpy as np
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
 from src.configs.config import (
@@ -16,16 +18,29 @@ from src.configs.config import (
     get_logger,
 )
 from src.configs.prompts import VECTORDB_PROMPT
-from src.core.db_manager import fetch_parent_content
+from src.core.db_manager import fetch_parent_content, get_connection
 from src.core.metadata_filters import filter_docs_with_scores, infer_search_filters
 from src.graphs.state import State
 from src.nodes.stock_price import stock_price_tools
 from src.llms.embeddings import build_embeddings_model
 from src.llms.factory import build_chat_model
+from src.retrieval.bootstrap import RetrievalBootstrapError
+from src.retrieval.dispatch import (
+    RetrievalDispatchStateError,
+    resolve_retrieval_dispatch,
+)
+from src.retrieval.repository import (
+    RepositoryError,
+    RetrievedChunk,
+)
 from src.utils.citations import remove_unavailable_citations
 from src.utils.ranker import get_ranker
 
 logger = get_logger(__name__)
+
+
+class RetrievalDispatchError(RuntimeError):
+    """Raised when the selected retrieval backend cannot safely serve a request."""
 
 
 def build_embeddings_fn():
@@ -47,15 +62,18 @@ def _build_passages(docs_with_scores: list[tuple]) -> list[dict]:
     for rank, (doc, score) in enumerate(docs_with_scores):
         meta = doc.metadata
         page_content = doc.page_content
-        parent_id = meta.get("parent_id")
+        parent_id = meta.get("parent_id") or meta.get("parent_uid")
 
         if parent_id:
             if parent_id in seen_parent_ids:
                 continue
             seen_parent_ids.add(parent_id)
-            parent_content = fetch_parent_content(parent_id)
-            if parent_content:
-                page_content = parent_content
+            # Native results already contain the canonical parent slice.  Only
+            # legacy documents need the V1 parent_chunks lookup.
+            if meta.get("parent_id"):
+                parent_content = fetch_parent_content(parent_id)
+                if parent_content:
+                    page_content = parent_content
 
         passages.append(
             {
@@ -142,13 +160,8 @@ def _report_universe_query(filters: dict | None) -> tuple[str, list]:
 def fetch_report_universe_for_filters(filters: dict | None) -> list[dict]:
     """Return embedded report metadata rows used to plan broad temporal summaries."""
     query, params = _report_universe_query(filters)
-    db_uri = f"file:{os.path.abspath(DB_PATH)}?mode=ro"
-    conn = sqlite3.connect(db_uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
+    with get_connection(DB_PATH) as conn:
         return [dict(row) for row in conn.execute(query, params).fetchall()]
-    finally:
-        conn.close()
 
 
 def _month_bucket(report_date: object) -> str:
@@ -414,7 +427,7 @@ def required_file_names_from_prior_scope(
 def _doc_identity(doc) -> tuple:
     metadata = getattr(doc, "metadata", {}) or {}
     return (
-        metadata.get("parent_id"),
+        metadata.get("parent_id") or metadata.get("parent_uid"),
         metadata.get("file_name"),
         metadata.get("child_index"),
         id(doc),
@@ -512,6 +525,171 @@ def select_top_passages(
     }
 
 
+def _native_document(chunk: RetrievedChunk) -> Document:
+    metadata = dict(chunk.metadata)
+    metadata.update(
+        {
+            "child_index": chunk.child_order,
+            "span_start": chunk.span_start,
+            "span_end": chunk.span_end,
+            "physical_id": chunk.physical_id,
+            "snapshot_id": chunk.snapshot_id,
+            "publication_generation": chunk.publication_generation,
+        }
+    )
+    return Document(page_content=chunk.parent_slice, metadata=metadata)
+
+
+def _requested_candidate_count() -> int:
+    return max(
+        SEARCH_TOP_K,
+        SEARCH_TOP_K * 8,
+        SEARCH_TOP_K * max(RERANK_CANDIDATE_MULTIPLIER, 1),
+    )
+
+
+def _retrieve_docs_with_scores(
+    query: str,
+    search_filters: dict | None,
+) -> tuple[list[tuple[Document, float]], dict]:
+    """Dispatch one query to the runtime selected by the canonical bootstrap."""
+
+    try:
+        dispatch = resolve_retrieval_dispatch(DB_PATH)
+    except RetrievalBootstrapError:
+        raise
+    except (
+        OSError,
+        sqlite3.Error,
+        RepositoryError,
+        RetrievalDispatchStateError,
+        ValueError,
+    ) as exc:
+        raise RetrievalDispatchError("retrieval bootstrap inspection failed") from exc
+    try:
+        embeddings_fn = build_embeddings_fn()
+        query_vector = embeddings_fn.embed_query(query)
+    except Exception as exc:
+        raise RetrievalDispatchError("query embedding failed") from exc
+
+    requested_k = _requested_candidate_count()
+    if dispatch.native is not None:
+        try:
+            response = dispatch.native.reader.search(
+                np.asarray(query_vector, dtype=np.float32),
+                requested_k,
+                scope=search_filters or None,
+            )
+        except (RepositoryError, OSError, sqlite3.Error, ValueError) as exc:
+            raise RetrievalDispatchError("native retrieval request failed") from exc
+        docs_with_scores = [
+            (_native_document(chunk), float(chunk.score)) for chunk in response.results
+        ]
+        metrics = {
+            "runtime_mode": dispatch.mode,
+            "requested_k": requested_k,
+            "fetch_k": response.faiss_fetch_k,
+            "native_candidate_count": response.candidate_count,
+            "native_eligible_count": response.eligible_count,
+            "native_snapshot_total": response.snapshot_total,
+            "native_search_strategy": response.strategy.value,
+            "native_faiss_calls": response.faiss_calls,
+            "native_hydration_batches": response.hydration_batches,
+            "native_hydration_rows": response.hydration_rows,
+            "native_hydration_cache_hits": response.hydration_cache_hits,
+            "native_hydration_cache_misses": response.hydration_cache_misses,
+            "snapshot_id": response.revision.snapshot_id,
+            "publication_generation": response.revision.publication_generation,
+        }
+        timings = getattr(response, "timings", None)
+        if timings is not None:
+            metrics.update(
+                {
+                    "native_scope_compile_ns": timings.scope_compile_ns,
+                    "native_eligibility_ns": timings.eligibility_ns,
+                    "native_faiss_ns": timings.faiss_ns,
+                    "native_hydration_ns": timings.hydration_ns,
+                    "native_lease_ns": timings.lease_ns,
+                    "native_total_ns": timings.total_ns,
+                }
+            )
+        return docs_with_scores, metrics
+
+    selection = dispatch.selection
+    if selection is None:
+        raise RetrievalDispatchError("non-native runtime selection is missing")
+    if selection.mode == "legacy_v1":
+        if not os.path.exists(FAISS_DIR):
+            raise RetrievalDispatchError("legacy FAISS directory is missing")
+        try:
+            faiss_store = FAISS.load_local(
+                FAISS_DIR,
+                embeddings_fn,
+                allow_dangerous_deserialization=True,
+            )
+            fetch_k = _metadata_aware_fetch_k(faiss_store, search_filters)
+            docs_with_scores = faiss_store.similarity_search_with_score_by_vector(
+                query_vector,
+                k=fetch_k,
+            )
+        except Exception as exc:
+            raise RetrievalDispatchError("legacy V1 retrieval request failed") from exc
+        return docs_with_scores, {
+            "runtime_mode": selection.mode,
+            "requested_k": fetch_k,
+            "fetch_k": fetch_k,
+            "candidate_count_before_filter": len(docs_with_scores),
+        }
+
+    if selection.mode == "epoch_zero_compatibility":
+        if not selection.compatibility_bundle_id:
+            raise RetrievalDispatchError("validated compatibility bundle is missing")
+        # This import remains outside the native path: compatibility.py is the
+        # sole runtime surface permitted to deserialize a sealed V1 index.pkl.
+        from src.migrations.v2.compatibility import V1CompatibilityReader
+
+        try:
+            with V1CompatibilityReader(
+                selection.paths.data_root,
+                selection.compatibility_bundle_id,
+            ) as reader:
+                if reader.ntotal == 0:
+                    results = []
+                    fetch_k = 0
+                else:
+                    fetch_k = (
+                        reader.ntotal
+                        if search_filters
+                        else min(requested_k, reader.ntotal)
+                    )
+                    results = reader.search(
+                        np.asarray(query_vector, dtype=np.float32),
+                        k=fetch_k,
+                        fetch_k=fetch_k,
+                    )
+        except Exception as exc:
+            raise RetrievalDispatchError("sealed V1 compatibility request failed") from exc
+        docs_with_scores = [
+            (
+                Document(
+                    page_content=result.embedding_text,
+                    metadata=dict(result.metadata),
+                ),
+                float(result.score),
+            )
+            for result in results
+        ]
+        return docs_with_scores, {
+            "runtime_mode": selection.mode,
+            "requested_k": fetch_k,
+            "fetch_k": fetch_k,
+            "candidate_count_before_filter": len(docs_with_scores),
+            "compatibility_bundle_id": selection.compatibility_bundle_id,
+        }
+
+    raise RetrievalDispatchError(f"unsupported retrieval runtime mode: {selection.mode}")
+
+
 def vectordb_node(state: State) -> dict:
     query = state.get("rewritten_query", state["question"])
     search_filters = state.get("search_filters") or infer_search_filters(query)
@@ -536,27 +714,40 @@ def vectordb_node(state: State) -> dict:
     if selection_context:
         temporal_context_text += f"\n[검색 대상 선정 근거]\n{selection_context}\n"
     scope_decision = state.get("scope_decision")
-    if not os.path.exists(FAISS_DIR):
-        msg = "faiss_db/ 폴더가 없어 검색을 진행할 수 없습니다. 먼저 임베딩 파이프라인을 실행해 주세요."
-        logger.warning(msg)
-        return {"generation": msg}
-
-    embeddings_fn = build_embeddings_fn()
-    faiss_store = FAISS.load_local(
-        FAISS_DIR,
-        embeddings_fn,
-        allow_dangerous_deserialization=True,
-    )
-
-    fetch_k = _metadata_aware_fetch_k(faiss_store, search_filters)
-    all_docs_with_scores = faiss_store.similarity_search_with_score(query, k=fetch_k)
-    candidate_count_before_filter = len(all_docs_with_scores)
-    docs_with_scores = filter_docs_with_scores(all_docs_with_scores, search_filters)
     prior_required_file_names = required_file_names_from_prior_scope(
         state["question"],
         state.get("prior_search_scope"),
         search_filters,
     )
+    retrieval_scope = search_filters
+    if prior_required_file_names:
+        retrieval_scope = dict(search_filters)
+        retrieval_scope["file_names"] = prior_required_file_names
+    try:
+        all_docs_with_scores, backend_metrics = _retrieve_docs_with_scores(
+            query,
+            retrieval_scope,
+        )
+    except (RetrievalBootstrapError, RetrievalDispatchError) as exc:
+        logger.error("Retrieval bootstrap/search failed closed: %s", exc)
+        return {
+            "generation": "검색 저장소를 안전하게 열 수 없어 결과를 제공할 수 없습니다.",
+            "no_vector_results": True,
+            "search_filters": search_filters,
+            "monitoring_metrics": {
+                "retrieval": {
+                    "runtime_mode": "unavailable",
+                    "error_code": type(exc).__name__,
+                    "candidate_count_before_filter": 0,
+                    "candidate_count_after_filter": 0,
+                    "search_top_k": SEARCH_TOP_K,
+                    "use_reranker": USE_RERANKER,
+                }
+            },
+        }
+
+    candidate_count_before_filter = len(all_docs_with_scores)
+    docs_with_scores = filter_docs_with_scores(all_docs_with_scores, search_filters)
     if prior_required_file_names:
         supplemental_filters = dict(search_filters)
         supplemental_filters.pop("target_name", None)
@@ -578,7 +769,7 @@ def vectordb_node(state: State) -> dict:
         ]
     candidate_count_after_filter = len(docs_with_scores)
     retrieval_metrics = {
-        "fetch_k": fetch_k,
+        **backend_metrics,
         "candidate_count_before_filter": candidate_count_before_filter,
         "candidate_count_after_filter": candidate_count_after_filter,
         "search_top_k": SEARCH_TOP_K,

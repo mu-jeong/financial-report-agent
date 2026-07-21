@@ -1,4 +1,4 @@
-﻿# Finance LLM
+# Finance LLM
 
 > Version: `0.5.0`
 
@@ -11,13 +11,15 @@ Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면
 3. 처음 실행 시 API 키를 붙여넣고 Enter를 누릅니다.
 4. 브라우저가 열리면 바로 질문을 입력합니다.
 
-초기 준비가 끝난 뒤 앱만 다시 열 때는 `RUN_APP.bat`을 사용하세요. `RUN_APP.bat`은 `.venv`와 `.env`가 있는지 확인한 뒤 Streamlit GUI만 실행하므로, 매번 패키지 설치·리포트 수집·임베딩을 반복하지 않습니다.
+초기 준비가 끝난 뒤 앱만 다시 열 때는 `RUN_APP.bat`을 사용하세요. 이 파일은 `.venv`와 `.env`를 확인하고 retrieval runtime의 catalog와 active snapshot을 검증한 뒤 Streamlit GUI를 실행합니다. 패키지 설치·리포트 수집·임베딩은 반복하지 않습니다.
 
 Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법과 `RUN_APP.bat` 사용 구분은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
 
+기존 V1 검색 데이터가 있다면 `MIGRATE_V2.bat`을 더블클릭해 백업·임베딩 공간 확인·GUI 실행 테스트를 거친 뒤, 기존 청크와 벡터를 그대로 사용하는 쓰기 가능한 V2로 안전하게 전환할 수 있습니다. 전체 PDF를 다시 파싱하거나 재임베딩하지 않으며, 전환 후에는 새 문서와 변경된 문서만 처리합니다. 설계 배경은 [V2 마이그레이션과 검색 아키텍처](docs/migrations/v2/V2_MIGRATION.md), 실행 절차는 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
+
 ---
 
-증권사 리포트 PDF를 수집하고 SQLite + FAISS에 색인한 뒤, LangGraph 기반 RAG 파이프라인으로 재무 질문에 답하는 프로젝트입니다. 생성 모델, 임베딩, 선택형 rerank는 OpenRouter API를 기준으로 연동합니다.
+증권사 리포트 PDF를 수집하고 V2 SQLite catalog와 immutable FAISS snapshot에 색인한 뒤, LangGraph 기반 RAG 파이프라인으로 재무 질문에 답하는 프로젝트입니다. 기존 V1 `reports.db`/`vector_db`는 마이그레이션 전 설치에서만 검색 권위로 사용합니다. 생성 모델, 임베딩, 선택형 rerank는 OpenRouter API를 기준으로 연동합니다.
 
 > 이 프로젝트는 투자 조언이나 매수/매도 추천을 제공하지 않습니다. 답변은 수집·색인된 리포트와 공개 데이터 기반의 참고 정보로만 사용하세요.
 
@@ -25,13 +27,13 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 
 - 증권사 리포트 PDF 다운로드 및 파일명 기반 메타데이터 파싱
 - `company`, `industry`, `economy` 카테고리별 리포트 수집
-- SQLite `reports` 테이블과 FAISS 벡터 인덱스 동기화
+- V2 SQLite catalog(`data/retrieval/v2/catalog.sqlite3`)와 immutable FAISS snapshot의 membership·publication 동기화
 - PyMuPDF, OpenDataLoader, Marker, Docling, pdf-to-markdown 중 선택 가능한 PDF 텍스트 추출 엔진
 - Parent-Child Chunking 기반 문맥 확장 검색
 - LangGraph 기반 query rewrite, routing, RDB 검색, VectorDB 검색, 답변 생성
 - SQL guardrail: `SELECT`와 `reports` 테이블 중심의 read-only SQLite 접근
 - OpenRouter 임베딩(`baai/bge-m3`) 지원
-- 선택형 OpenRouter rerank(`cohere/rerank-v3.5`) 또는 FlashRank fallback
+- 선택형 OpenRouter rerank(`cohere/rerank-v3.5`) 또는 명시적으로 설정하는 로컬 FlashRank adapter 지원(자동 fallback 없음)
 - `report_date` 기준 날짜/월/분기/연도 필터링과 최신성 가중치(`RECENCY_WEIGHT`) 지원
 - KRX 상장법인 업종 CSV 기반 섹터/분야 질문의 회사 universe lookup 지원
 - VectorDB 검색 실패 시 short-term memory 영향을 제거하고 원질문으로 재검색
@@ -42,12 +44,12 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 
 ## 설치
 
-```bash
+```powershell
 git clone <repository-url>
 cd finance_llm
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
 Python 3.10 이상을 권장합니다.
@@ -62,7 +64,7 @@ Python 3.10 이상을 권장합니다.
 Copy-Item .env.example .env
 ```
 
-주요 기본값은 다음과 같습니다.
+Quick Start와 배포용 `.env.example`의 주요 값은 다음과 같습니다.
 
 ```env
 GENERATION_MODEL=deepseek/deepseek-v4-flash
@@ -73,10 +75,12 @@ RERANK_MODEL=cohere/rerank-v3.5
 SEARCH_TOP_K=20
 RECENCY_WEIGHT=0.15
 PDF_EXTRACTION_ENGINE=pymupdf
-UNEMBEDDED_PDF_EXTRACTION_ENGINE=opendataloader
+UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 ```
 
-약 2,000건의 리포트를 임베딩 벡터화하는 데 약 **$0.05**가 소요되었습니다. 실제 비용은 문서 길이, 청크 수, 호출량, 모델 가격에 따라 달라질 수 있습니다.
+배포 템플릿은 일반 문서와 미임베딩 문서를 모두 `pymupdf`로 추출합니다. 다른 추출기를 명시적으로 비교하거나 선택할 때만 해당 엔진의 추가 런타임 요구사항을 확인하세요.
+
+과거 로컬 측정에서는 약 2,000건의 리포트를 임베딩하는 데 약 **$0.05**가 들었습니다. 이 수치는 재현 가능한 비용 보장이 아니며 문서 길이, 청크 수, 호출량, 모델 가격에 따라 달라집니다.
 
 `.env.example`을 다시 생성해야 할 때는 아래 명령을 실행합니다.
 
@@ -138,28 +142,14 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 ## 임베딩 인덱스 생성
 
 ```bash
-python -m src.core.embed_pipeline          # TEST_LIMIT 적용
-python -m src.core.embed_pipeline --all    # pending 전체 처리
-python -m src.core.embed_pipeline --limit 100
+python -m src.core.embed_pipeline              # V1: TEST_LIMIT 적용, V2: 전체 inventory 검사
+python -m src.core.embed_pipeline --all        # V1: pending 전체, V2: 같은 incremental 검사
+python -m src.core.embed_pipeline --limit 100  # V1에서만 처리량 제한
 ```
 
-Quick Start는 pending 문서 전체 처리를 위해 `--all`을 사용합니다. 직접 실행할 때 `.env`의 `TEST_LIMIT=10`이 남아 있으면 일부 문서만 처리될 수 있습니다.
+V1에서는 `TEST_LIMIT`, `--limit`, `--all`이 pending 처리량을 결정합니다. V2에서는 limit 옵션을 무시하고 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩하고 변경되지 않은 청크와 벡터를 재사용합니다. 변화가 없으면 새 publication을 만들지 않습니다.
 
-모델, chunk 크기, PDF 추출 엔진을 바꾼 뒤에는 기존 FAISS 인덱스를 재생성하는 것이 안전합니다.
-
-```powershell
-Remove-Item -Recurse -Force data\vector_db
-python - <<'PY'
-from src.core.db_manager import get_connection
-
-conn = get_connection()
-conn.execute("UPDATE reports SET is_embedded = 0")
-conn.execute("DELETE FROM parent_chunks")
-conn.commit()
-conn.close()
-PY
-python -m src.core.embed_pipeline --all
-```
+V2 활성 상태에서는 `data/retrieval/v2`, `data/reports.db`, `data/vector_db`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. Profile 전체를 바꾸는 작업은 별도로 검증된 full-corpus 전환 절차가 필요합니다.
 
 PDF 추출 엔진 비교는 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.
 
@@ -186,11 +176,11 @@ GUI 대화 이력은 `data/conversations.db`에 저장됩니다. deprecated CLI�
 
 GUI 답변 생성은 백그라운드 thread에서 실행됩니다. 답변 생성 중인 대화는 입력창이 잠기고, 다른 대화로 이동해도 작업은 계속되며 완료/실패 상태가 toast와 대화 목록 배지로 표시됩니다.
 
-채팅 입력창 아래의 `⚠ 신고` 버튼은 현재 대화에서 발생한 문제를 텍스트 파일로 저장합니다. 신고 파일은 기본적으로 `debug/issue_report_*.txt`에 생성되며, `debug/` 폴더 내용은 Git에 포함하지 않습니다(`debug/.gitkeep`만 폴더 유지용). 민감정보가 포함될 수 있으므로 외부로 전달하기 전에 내용을 확인하세요.
+채팅 입력창 아래의 `⚠ 신고` 버튼은 현재 대화에서 발생한 문제를 사람이 읽는 `debug/issue_report_*.txt`와 같은 stem의 구조화 `.json` sidecar로 저장합니다. `debug/` 폴더 내용은 Git에 포함하지 않습니다(`debug/.gitkeep`만 폴더 유지용). 민감정보가 포함될 수 있으므로 외부로 전달하기 전에 두 파일을 모두 확인하세요.
 
-참고 문서의 `열기` 버튼은 브라우저 링크가 아니라 Streamlit 서버가 실행 중인 PC에서 PDF를 직접 엽니다. 파일은 `REPORT_PDF_DIR` 환경 변수의 폴더와 참고 문서의 파일명을 조합해 찾습니다. `REPORT_PDF_DIR`은 임베딩 파이프라인이 문서 폴더의 절대경로를 기준으로 `.env`에 자동 생성하거나 기존 값만 갱신합니다. 로컬 사용에는 적합하지만, 원격 서버에 배포한 경우에는 서버 PC에서 파일이 열립니다.
+참고 문서의 `열기` 버튼은 브라우저 링크가 아니라 Streamlit 서버가 실행 중인 PC에서 PDF를 직접 엽니다. 파일은 `REPORT_PDF_DIR` 환경 변수의 폴더와 참고 문서의 파일명을 조합해 찾습니다. V1 임베딩 경로는 이 값을 `.env`에 자동 동기화합니다. V2는 기존 `REPORT_PDF_DIR` 또는 기본 `data/downloaded`를 사용하므로 PDF 위치를 바꿨다면 `.env`에서 직접 갱신하세요. 로컬 사용에는 적합하지만 원격 배포에서는 서버 PC에서 파일이 열립니다.
 
-사이드바 캘린더는 임베딩 완료 날짜를 데이터 있음으로 표시합니다. 데이터 업데이트에서는 `company`, `industry`, `economy` 카테고리를 선택할 수 있고, 선택한 카테고리 중 하나라도 비어 있는 평일은 업데이트 대상으로 포함합니다. 필요한 다운로드와 임베딩은 백그라운드 작업으로 실행됩니다.
+사이드바 캘린더는 검색 가능한 리포트 날짜를 데이터 있음으로 표시합니다. V1은 `reports.is_embedded=1`, V2는 active snapshot의 `active_reports`를 기준으로 집계합니다. 데이터 업데이트에서는 `company`, `industry`, `economy` 카테고리를 선택할 수 있고, 선택한 카테고리 중 하나라도 비어 있는 평일은 업데이트 대상으로 포함합니다. 필요한 다운로드와 임베딩은 백그라운드 작업으로 실행됩니다.
 
 ### 대화 후속 질문과 참고 문서 표시
 
@@ -218,7 +208,7 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## PDF 추출 엔진 비교
 
-`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있습니다. `pymupdf`가 기본값이고, `docling`과 `pdf-to-markdown`은 각각 별도 설치/CLI가 필요한 선택형 엔진입니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`을 설정하면 미임베딩/재시도 문서만 별도 엔진으로 처리할 수 있습니다. 빈 값이면 `PDF_EXTRACTION_ENGINE`을 그대로 사용합니다. 기존 `EXTRACTION_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE` 환경변수도 alias로 동작합니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다.
+`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있습니다. `pymupdf`가 기본값이고, `docling`과 `pdf-to-markdown`은 각각 별도 설치/CLI가 필요한 선택형 엔진입니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`은 미임베딩 문서에 적용할 엔진이며 배포 템플릿에서는 `pymupdf`를 사용합니다. 빈 값이면 `PDF_EXTRACTION_ENGINE`을 그대로 사용합니다. 기존 `EXTRACTION_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE` 환경변수도 alias로 동작합니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다.
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10
@@ -235,11 +225,11 @@ python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marke
 python -m pytest -q
 ```
 
-현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, 답변 섹션 기반 follow-up scope 결정, 섹션 follow-up의 문서 coverage, OpenRouter embedding/rerank payload, PDF 추출 엔진/표 제거 계약, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다.
+현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, 답변 섹션 기반 follow-up scope 결정, 섹션 follow-up의 문서 coverage, OpenRouter embedding/rerank payload, PDF 추출 엔진/표 제거 계약, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다. 또한 native V2 schema/catalog, V1 무재임베딩 변환, launcher guard, snapshot publication·recovery·rollback, writer/update lock, reader parity와 변경 문서만 처리하는 incremental vector reuse를 검증합니다.
 
 ### 평가용 테스트셋
 
-현재 로컬 `data/reports.db` 메타데이터에서 뽑은 평가용 fixture는 `tests/fixtures/evaluation_dataset.json`에 있습니다. PDF 본문은 포함하지 않고, 질문/기대 라우팅/기대 필터/기대 출처 파일명/RDB 기대 집계값만 담았습니다.
+평가용 fixture는 `tests/fixtures/evaluation_dataset.json`에 있습니다. 재현 기준은 `tests/fixtures/eval_snapshot/`에 고정된 V1형 `reports.db`와 `vector_db`이며, live `data/reports.db`가 아닙니다. PDF 본문은 포함하지 않고 질문/기대 라우팅/기대 필터/기대 출처 파일명/RDB 기대 집계값만 담았습니다.
 
 테스트셋은 한 번 기준선으로 정하면 변경 사유가 생기기 전까지 그대로 유지합니다. 선정 기준과 고정 정책은 fixture의 `selection_criteria`, `stability_policy`, [`docs/EVALUATION_DATASET.md`](docs/EVALUATION_DATASET.md)에 함께 저장합니다. `scripts/build_evaluation_dataset.py`는 source가 사라졌거나 지표 축이 바뀌는 등 명시적 변경 사유가 있을 때만 재생성에 사용합니다.
 
@@ -247,7 +237,7 @@ python -m pytest -q
 python -m pytest tests/test_evaluation_dataset.py -q
 ```
 
-이 테스트셋은 향후 parsing, chunking, retrieval/rerank, 모델 변경에 따른 답변 변화, RDB 라우팅, 날짜별 데이터 캘린더, latency/비용 측정 회귀 평가에 사용할 고정 기준 데이터입니다.
+이 테스트셋은 향후 parsing, chunking, retrieval/rerank, 모델 변경에 따른 답변 변화, RDB 라우팅, 날짜별 데이터 캘린더와 latency 회귀 평가에 사용할 고정 기준 데이터입니다. 현재 자동 evaluator는 provider cost나 answer similarity를 직접 계산하지 않습니다.
 
 ## 주의사항
 
@@ -259,7 +249,7 @@ python -m pytest tests/test_evaluation_dataset.py -q
 
 ## Monitoring Mode
 
-Monitoring Mode는 성능 개선과 회귀 확인을 위한 개발자용 지표 모니터링 모드입니다. 일반 채팅 UX와 분리된 `Monitoring` 탭에서 데이터/설정 상태, 고정 평가 테스트셋 커버리지, 대화별 route/source/latency metadata, PDF parsing engine 비교 결과를 확인합니다. 일반 GUI에서는 이 진단 정보를 숨기고, `.env`에서 명시적으로 켰을 때만 노출합니다. 전체 Monitoring과 개별 Chat Monitoring의 구현 세부 내용은 [`docs/MONITORING.md`](docs/MONITORING.md)에 별도로 정리되어 있습니다.
+Monitoring Mode는 성능 개선과 회귀 확인을 위한 개발자용 지표 모니터링 모드입니다. 일반 GUI에서는 이 진단 정보를 숨기고 `.env`에서 명시적으로 켰을 때만 노출합니다. `Chat` 화면의 `Chat Monitoring`과 별도 `전체 Monitoring` 화면에서 데이터 상태, 고정 평가셋, 대화별 route/source/latency metadata, PDF parsing 비교와 issue report를 확인합니다. 구현 세부 내용은 [`docs/MONITORING.md`](docs/MONITORING.md)에 정리되어 있습니다.
 
 ### 실행 방법
 
@@ -275,7 +265,7 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 상단에 `Chat` / `Monitoring` 탭이 생기고, `Monitoring` 탭에서 데이터/설정 상태, 고정 평가 테스트셋 커버리지, PDF parsing engine 비교 실행/결과, 현재 대화의 route/source/latency 지표를 확인할 수 있습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 사이드바에 `Chat`과 `전체 Monitoring` 화면 선택이 표시됩니다. `Chat` 화면에는 `Chat / Chat Monitoring` 탭이 있고, `전체 Monitoring`에서는 `운영 상태`, `평가/실험`, `이슈/회귀` 범주별 데이터 상태, 누락 문서, 평가 실행·비교, parsing 비교, issue report와 회귀 후보를 확인합니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
 
 ### 테스트 방법
 
@@ -294,10 +284,10 @@ python -m pytest -q
 
 ### 현재 구현된 화면
 
-- Data status: 다운로드 PDF, DB row, 임베딩 완료/대기, FAISS 파일, 주요 설정 상태
-- Evaluation dataset: 고정 평가셋 case 수, route coverage, monitoring dimension 분포
-- Parsing engine evaluation: 선택한 PDF/폴더를 여러 엔진으로 추출해 latency, 문자 수, block 수, table-like line 등 지표를 CSV/JSON/sample로 저장
-- Conversation metrics: 현재 대화의 route, source 수, latency, `scope_decision`, retrieval coverage 등 monitoring metadata 요약
+- 운영 상태: backend별 데이터 상태, 임베딩 누락 문서, 전체 응답 품질과 native runtime health
+- 평가/실험: 고정 평가셋, current/fixed-snapshot 실험 실행·비교, parsing engine 평가 결과
+- 이슈/회귀: 구조화 issue report와 회귀 후보 관리
+- Conversation metrics: 현재 대화의 route, source 수, latency, `scope_decision`, native retrieval coverage 등 monitoring metadata 요약
 - Chat Monitoring trace viewer: assistant 응답 row에서 특정 턴을 선택해 `Trace summary`, `Scope / routing`, `Advanced diagnostics` 세 tab으로 확인합니다. 기본 화면에는 핵심 trace, 직전 성공 응답 대비 diff, 자동 debug hint를 모으고, retrieval/rerank, sources, answer/citation raw detail은 필요할 때만 펼쳐 봅니다. 선택한 trace는 issue report로 바로 저장할 수 있습니다.
 
 ### TODO
@@ -305,6 +295,8 @@ python -m pytest -q
 - [x] 일반 사용자 UX와 분리된 Monitoring Mode의 진입 방식과 노출 범위를 정합니다.
 - [x] 데이터 준비 상태와 검색 가능 여부를 한눈에 파악할 수 있는 대시보드 방향을 잡습니다.
 - [x] 질문 처리 흐름을 추적해 검색 실패, 라우팅 오류, 답변 품질 저하 원인을 확인할 수 있게 합니다.
+- [ ] 기존 OpenDataLoader 기반 활성 V2 profile을 검증된 PyMuPDF full-corpus successor로 전환하고 snapshot 전환 증거를 남깁니다.
+- [ ] PyMuPDF 추출 실패 이력을 DB SSOT에 영구 기록하고, 한 번 이상 실패한 문서만 OpenDataLoader로 재시도하는 fallback 정책을 설계·구현합니다.
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
 - [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.

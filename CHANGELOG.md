@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+### Added
+
+- V1 원본을 유지한 채 기존 청크와 벡터를 재사용해 쓰기 가능한 native V2로 전환하는 `MIGRATE_V2.bat` 사용자 마이그레이션을 추가했습니다.
+- SQLite native catalog, immutable FAISS snapshot, crash-safe publication과 startup recovery, writer/update lock, launcher runtime guard를 추가했습니다.
+- 마이그레이션 canary, GUI/runtime smoke, 자동 rollback과 재시작 journal 검증을 추가했습니다.
+
+### Changed
+
+- V2 데이터 업데이트는 전체 source inventory를 확인하되 새 문서와 변경된 문서만 파싱·임베딩하고, 변경되지 않은 청크와 벡터를 재사용합니다.
+- `RUN_APP.bat`, Quick Start, CLI/GUI 진입점은 retrieval runtime을 검증한 뒤 실행하도록 변경했습니다.
+- Monitoring과 평가 문서를 native V2 backend, 고정 snapshot 기준선, 현재 화면 구조에 맞게 갱신했습니다.
+
 ## v0.5.0 - 2026-07-03
 
 ### Added

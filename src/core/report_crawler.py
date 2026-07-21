@@ -1,18 +1,28 @@
 import os
 import re
-from bs4 import BeautifulSoup
-import requests
 from datetime import datetime, date, timedelta
+from pathlib import Path
 import sys
 
 # 프로젝트 루트 경로를 참조할 수 있도록 설정
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from src.retrieval.update_lock import RetrievalUpdateLock
 
 REPORT_CATEGORY_URLS = {
     "company": "/research/company_list.naver",
     "industry": "/research/industry_list.naver",
     "economy": "/research/economy_list.naver",
 }
+
+
+def guard_before_report_download():
+    """Fail closed before crawler dependencies, network, or source writes start."""
+
+    from src.configs.config import DB_PATH
+    from src.retrieval.runtime_guard import guard_before_retrieval_write
+
+    return guard_before_retrieval_write(DB_PATH)
 
 
 def normalize_report_categories(categories: str | list[str] | tuple[str, ...] | None) -> list[str]:
@@ -94,6 +104,31 @@ def download_naver_reports(
     max_lookback_days: int = 30,
     categories: str | list[str] | tuple[str, ...] | None = None,
 ):
+    """Download reports while holding the V1/V2 cutover fence."""
+
+    from src.configs.config import DB_PATH
+
+    with RetrievalUpdateLock(Path(DB_PATH).parent):
+        guard_before_report_download()
+        return _download_naver_reports_locked(
+            target_date_str,
+            target_count=target_count,
+            lookback_days=lookback_days,
+            max_lookback_days=max_lookback_days,
+            categories=categories,
+        )
+
+
+def _download_naver_reports_locked(
+    target_date_str=None,
+    target_count: int = 0,
+    lookback_days: int = 0,
+    max_lookback_days: int = 30,
+    categories: str | list[str] | tuple[str, ...] | None = None,
+):
+    import requests
+    from bs4 import BeautifulSoup
+
     total_processed = 0
     base_url = "https://finance.naver.com"
     stop_all_categories = False
@@ -287,6 +322,7 @@ def download_naver_reports(
 # ==========================================
 
 if __name__ == "__main__":
+    guard_before_report_download()
     from src.configs.config import (
         CRAWLER_CATEGORIES,
         CRAWLER_LOOKBACK_DAYS,

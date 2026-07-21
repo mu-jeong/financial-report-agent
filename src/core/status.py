@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from src.configs import config
+from src.retrieval.bootstrap import (
+    RetrievalBootstrapError,
+    inspect_runtime,
+    retrieval_paths,
+)
 
 DB_PATH = config.DB_PATH
 EMBEDDING_MODEL = config.EMBEDDING_MODEL
@@ -155,12 +160,320 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
     return info
 
 
+def _safe_native_info(
+    db_path: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    paths = retrieval_paths(db_path)
+    try:
+        selection = inspect_runtime(db_path)
+    except Exception as exc:
+        return _unavailable_native_info(paths, exc)
+    if selection.mode == "legacy_v1":
+        return None
+    db = {
+        "exists": True,
+        "size_bytes": paths.catalog.stat().st_size,
+        "total_reports": 0,
+        "embedded_reports": 0,
+        "pending_reports": 0,
+        "parent_chunks": 0,
+        "min_report_date": None,
+        "max_report_date": None,
+        "report_date_counts": {},
+        "report_date_type_counts": {},
+        "report_types": {},
+        "error": None,
+    }
+    retrieval: dict[str, Any] = {
+        "mode": "native",
+        "catalog_path": str(paths.catalog),
+        "schema_version": None,
+        "publication_generation": None,
+        "write_epoch": None,
+        "active_build_id": None,
+        "active_snapshot_id": None,
+        "predecessor_snapshot_id": None,
+        "v1_fallback_open": None,
+        "compatibility_bundle_id": None,
+        "degraded": None,
+        "write_enabled": None,
+        "membership_count": 0,
+        "profile_hash": None,
+        "build_state": None,
+        "snapshot_state": None,
+        "error": None,
+    }
+    vector_db: dict[str, Any] = {
+        "exists": False,
+        "file_count": 0,
+        "total_size_bytes": 0,
+        "files": [],
+        "has_faiss_index": False,
+        "has_pickle_index": False,
+        "legacy_pickle_bridge": False,
+        "snapshot_id": None,
+        "ntotal": 0,
+    }
+    try:
+        retrieval.update(
+            {
+                "mode": selection.mode,
+                "publication_generation": selection.publication_generation,
+                "write_epoch": selection.write_epoch,
+                "active_build_id": selection.active_build_id,
+                "active_snapshot_id": selection.active_snapshot_id,
+                "predecessor_snapshot_id": selection.predecessor_snapshot_id,
+                "v1_fallback_open": selection.v1_fallback_open,
+                "compatibility_bundle_id": selection.compatibility_bundle_id,
+                "degraded": selection.degraded,
+                "write_enabled": selection.write_enabled,
+            }
+        )
+        connection = sqlite3.connect(paths.catalog)
+        connection.row_factory = sqlite3.Row
+        try:
+            runtime = connection.execute(
+                "SELECT schema_version FROM retrieval_runtime WHERE runtime_id = 1"
+            ).fetchone()
+            retrieval["schema_version"] = int(runtime[0]) if runtime else None
+            summary = connection.execute(
+                """
+                WITH latest AS (
+                    SELECT canonical_relative_path, MAX(report_id) AS report_id
+                    FROM reports GROUP BY canonical_relative_path
+                )
+                SELECT COUNT(*) AS total_reports,
+                       COALESCE(SUM(CASE WHEN active.report_uid IS NOT NULL THEN 1 ELSE 0 END), 0)
+                           AS embedded_reports,
+                       MIN(CASE WHEN active.report_uid IS NOT NULL THEN report.report_date END)
+                           AS min_report_date,
+                       MAX(CASE WHEN active.report_uid IS NOT NULL THEN report.report_date END)
+                           AS max_report_date
+                FROM latest
+                JOIN reports AS report ON report.report_id = latest.report_id
+                LEFT JOIN active_reports AS active ON active.report_uid = report.report_uid
+                """
+            ).fetchone()
+            total = int(summary["total_reports"] or 0)
+            embedded = int(summary["embedded_reports"] or 0)
+            db.update(
+                {
+                    "total_reports": total,
+                    "embedded_reports": embedded,
+                    "pending_reports": max(total - embedded, 0),
+                    "min_report_date": summary["min_report_date"],
+                    "max_report_date": summary["max_report_date"],
+                }
+            )
+            db["parent_chunks"] = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT parent.parent_uid)
+                    FROM snapshot_membership AS membership
+                    JOIN retrieval_chunks AS chunk ON chunk.chunk_uid = membership.chunk_uid
+                    JOIN retrieval_parents AS parent ON parent.parent_uid = chunk.parent_uid
+                    WHERE membership.snapshot_id = ?
+                    """,
+                    (selection.active_snapshot_id,),
+                ).fetchone()[0]
+            )
+            type_rows = connection.execute(
+                "SELECT report_type, COUNT(*) AS count FROM active_reports GROUP BY report_type"
+            ).fetchall()
+            db["report_types"] = {
+                row["report_type"]: int(row["count"]) for row in type_rows
+            }
+            date_rows = connection.execute(
+                "SELECT report_date, COUNT(*) AS count FROM active_reports GROUP BY report_date"
+            ).fetchall()
+            db["report_date_counts"] = {
+                row["report_date"]: int(row["count"]) for row in date_rows
+            }
+            date_type_rows = connection.execute(
+                """
+                SELECT report_date, report_type, COUNT(*) AS count
+                FROM active_reports GROUP BY report_date, report_type
+                """
+            ).fetchall()
+            date_types: dict[str, dict[str, int]] = {}
+            for row in date_type_rows:
+                date_types.setdefault(row["report_date"], {})[row["report_type"]] = int(
+                    row["count"]
+                )
+            db["report_date_type_counts"] = date_types
+            snapshot = connection.execute(
+                """
+                SELECT snapshot.relative_path, snapshot.size_bytes, snapshot.ntotal,
+                       snapshot.state AS snapshot_state, build.state AS build_state,
+                       profile.profile_hash,
+                       (SELECT COUNT(*) FROM snapshot_membership AS membership
+                        WHERE membership.snapshot_id = snapshot.snapshot_id) AS membership_count
+                FROM vector_snapshots AS snapshot
+                JOIN retrieval_builds AS build ON build.build_id = snapshot.build_id
+                JOIN embedding_profiles AS profile ON profile.profile_id = build.profile_id
+                WHERE snapshot.snapshot_id = ?
+                """,
+                (selection.active_snapshot_id,),
+            ).fetchone()
+            if snapshot:
+                snapshot_path = paths.data_root.joinpath(*snapshot["relative_path"].split("/"))
+                size = snapshot_path.stat().st_size if snapshot_path.is_file() else 0
+                retrieval.update(
+                    {
+                        "membership_count": int(snapshot["membership_count"]),
+                        "profile_hash": snapshot["profile_hash"],
+                        "build_state": snapshot["build_state"],
+                        "snapshot_state": snapshot["snapshot_state"],
+                    }
+                )
+                vector_db.update(
+                    {
+                        "exists": snapshot_path.parent.exists(),
+                        "file_count": int(snapshot_path.is_file()),
+                        "total_size_bytes": size,
+                        "files": (
+                            [{"name": snapshot_path.name, "size_bytes": size}]
+                            if snapshot_path.is_file()
+                            else []
+                        ),
+                        "has_faiss_index": selection.mode == "native" and snapshot_path.is_file(),
+                        "legacy_pickle_bridge": selection.mode == "epoch_zero_compatibility",
+                        "snapshot_id": selection.active_snapshot_id,
+                        "ntotal": int(snapshot["ntotal"]),
+                    }
+                )
+            if selection.mode == "epoch_zero_compatibility":
+                bundle = (
+                    paths.data_root
+                    / "retrieval"
+                    / "compat"
+                    / "v1"
+                    / str(selection.compatibility_bundle_id)
+                )
+                compat_index = bundle / "index.faiss"
+                size = compat_index.stat().st_size if compat_index.is_file() else 0
+                vector_db.update(
+                    {
+                        "exists": bundle.is_dir(),
+                        "file_count": int(compat_index.is_file()),
+                        "total_size_bytes": size,
+                        "files": (
+                            [{"name": "compat/index.faiss", "size_bytes": size}]
+                            if compat_index.is_file()
+                            else []
+                        ),
+                        "has_faiss_index": compat_index.is_file(),
+                        "has_pickle_index": False,
+                        "legacy_pickle_bridge": True,
+                    }
+                )
+        finally:
+            connection.close()
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        db["error"] = message
+        retrieval["error"] = message
+    return db, vector_db, retrieval
+
+
+def _unavailable_native_info(
+    paths,
+    error: Exception,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    message = f"{type(error).__name__}: {error}"
+    db = {
+        "exists": paths.catalog.is_file(),
+        "size_bytes": paths.catalog.stat().st_size if paths.catalog.is_file() else 0,
+        "total_reports": 0,
+        "embedded_reports": 0,
+        "pending_reports": 0,
+        "parent_chunks": 0,
+        "min_report_date": None,
+        "max_report_date": None,
+        "report_date_counts": {},
+        "report_date_type_counts": {},
+        "report_types": {},
+        "error": message,
+    }
+    vector_db = {
+        "exists": False,
+        "file_count": 0,
+        "total_size_bytes": 0,
+        "files": [],
+        "has_faiss_index": False,
+        "has_pickle_index": False,
+        "legacy_pickle_bridge": False,
+        "snapshot_id": None,
+        "ntotal": 0,
+    }
+    retrieval = {
+        "mode": "unavailable",
+        "catalog_path": str(paths.catalog),
+        "schema_version": None,
+        "publication_generation": None,
+        "write_epoch": None,
+        "active_build_id": None,
+        "active_snapshot_id": None,
+        "predecessor_snapshot_id": None,
+        "v1_fallback_open": None,
+        "compatibility_bundle_id": None,
+        "degraded": True,
+        "write_enabled": False,
+        "membership_count": 0,
+        "profile_hash": None,
+        "build_state": None,
+        "snapshot_state": None,
+        "error": message,
+    }
+    return db, vector_db, retrieval
+
+
 def _reports_columns(conn: sqlite3.Connection) -> set[str]:
     return {row["name"] for row in conn.execute("PRAGMA table_info(reports)").fetchall()}
 
 
 def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list[dict[str, Any]]:
     """Return recent reports that exist in SQLite but are not embedded yet."""
+    native_paths = retrieval_paths(db_path)
+    try:
+        selection = inspect_runtime(db_path, validate_snapshot=False)
+    except RetrievalBootstrapError:
+        return []
+    if selection.mode != "legacy_v1":
+        safe_limit = max(1, int(limit or 1))
+        connection = sqlite3.connect(native_paths.catalog)
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                WITH latest AS (
+                    SELECT canonical_relative_path, MAX(report_id) AS report_id
+                    FROM reports GROUP BY canonical_relative_path
+                )
+                SELECT report.report_id AS id, report.report_date, report.report_type,
+                       report.target_name, report.title, report.broker,
+                       report.canonical_relative_path
+                FROM latest
+                JOIN reports AS report ON report.report_id = latest.report_id
+                LEFT JOIN active_reports AS active ON active.report_uid = report.report_uid
+                WHERE active.report_uid IS NULL
+                ORDER BY report.report_date DESC, report.report_id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            {
+                **dict(row),
+                "file_name": str(row["canonical_relative_path"]).split("/")[-1],
+                "embedding_extraction_engine": None,
+                "embedding_last_error": None,
+                "embedding_last_attempt_at": None,
+            }
+            for row in rows
+        ]
     path = Path(db_path)
     if not path.exists():
         return []
@@ -227,8 +540,18 @@ def get_data_status(
     faiss_dir: str = FAISS_DIR,
 ) -> dict[str, Any]:
     """Return a read-only snapshot of local data, index, and config state."""
-    db = _safe_db_info(db_path)
-    vector_db = _safe_vector_info(faiss_dir)
+    native = _safe_native_info(db_path)
+    if native is None:
+        db = _safe_db_info(db_path)
+        vector_db = _safe_vector_info(faiss_dir)
+        retrieval = {"mode": "legacy_v1"}
+        effective_db_path = db_path
+        effective_faiss_dir = faiss_dir
+    else:
+        db, vector_db, retrieval = native
+        paths = retrieval_paths(db_path)
+        effective_db_path = str(paths.catalog)
+        effective_faiss_dir = str(paths.v2_root / "snapshots")
     downloaded_pdfs = _safe_count_pdfs(save_dir)
 
     embedding_limit_active = bool(TEST_LIMIT and TEST_LIMIT > 0)
@@ -241,12 +564,13 @@ def get_data_status(
     return {
         "paths": {
             "save_dir": save_dir,
-            "db_path": db_path,
-            "faiss_dir": faiss_dir,
+            "db_path": effective_db_path,
+            "faiss_dir": effective_faiss_dir,
         },
         "downloaded_pdfs": downloaded_pdfs,
         "db": db,
         "vector_db": vector_db,
+        "retrieval": retrieval,
         "config": {
             "generation_model": GENERATION_MODEL,
             "embedding_model": EMBEDDING_MODEL,
@@ -278,6 +602,7 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
     vector_db = status["vector_db"]
     config = status["config"]
     ratio = status["search_coverage_ratio"] * 100
+    retrieval = status.get("retrieval") or {"mode": "legacy_v1"}
 
     lines = [
         "Finance LLM 데이터 상태",
@@ -306,6 +631,31 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
         ),
         f"모델: generation={config['generation_model']}, embedding={config['embedding_model']}",
     ]
+
+    if retrieval.get("mode") != "legacy_v1":
+        lines.extend(
+            [
+                (
+                    "Native retrieval: "
+                    f"mode={retrieval.get('mode')}, "
+                    f"generation={retrieval.get('publication_generation')}, "
+                    f"epoch={retrieval.get('write_epoch')}"
+                ),
+                (
+                    "Native snapshot: "
+                    f"build={retrieval.get('build_state')}, "
+                    f"snapshot={retrieval.get('snapshot_state')}, "
+                    f"members={retrieval.get('membership_count')}/{vector_db.get('ntotal', 0)}, "
+                    f"degraded={retrieval.get('degraded')}, "
+                    f"write_enabled={retrieval.get('write_enabled')}"
+                ),
+            ]
+        )
+        if retrieval.get("mode") == "epoch_zero_compatibility":
+            lines.append(
+                "Warning: sealed V1 compatibility bundle is serving the epoch-zero bridge; "
+                "native writes are blocked."
+            )
 
     if db.get("error"):
         lines.append(f"DB 상태 확인 오류: {db['error']}")
@@ -336,6 +686,7 @@ def assess_readiness(status: dict[str, Any]) -> dict[str, Any]:
     """
     db = status["db"]
     vector_db = status["vector_db"]
+    retrieval = status.get("retrieval") or {"mode": "legacy_v1"}
     messages: list[str] = []
     next_actions: list[str] = []
     level = "ready"
@@ -392,6 +743,23 @@ def assess_readiness(status: dict[str, Any]) -> dict[str, Any]:
             "FAISS index.pkl은 pickle 기반입니다.",
             "직접 생성한 신뢰 가능한 인덱스만 로드하고 외부에서 받은 index.pkl은 사용하지 마세요.",
         )
+
+    if retrieval.get("mode") != "legacy_v1":
+        if retrieval.get("membership_count") != vector_db.get("ntotal"):
+            block(
+                "Native snapshot membership does not match raw FAISS ntotal.",
+                "Run startup recovery; do not reopen the legacy index path.",
+            )
+        if retrieval.get("degraded"):
+            warn(
+                "Native retrieval is serving a verified predecessor in degraded read-only mode.",
+                "Run a complete forward build before enabling writes.",
+            )
+        if retrieval.get("mode") == "epoch_zero_compatibility":
+            warn(
+                "The sealed epoch-zero V1 compatibility bundle is active.",
+                "Repair the converted seed before attempting the first native successor.",
+            )
 
     if not messages:
         messages.append("리포트 DB와 FAISS 인덱스가 준비되어 질문할 수 있습니다.")

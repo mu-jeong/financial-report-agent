@@ -9,10 +9,10 @@ Finance LLM은 증권사 PDF 리포트를 수집, 추출, 색인하고 질문에
 | 데이터 수집 | `src/core/report_crawler.py` |
 | GUI 백그라운드 업데이트 | `src/core/data_update_jobs.py` |
 | PDF 추출 | `src/core/pdf_extraction.py`, `src/core/compare_pdf_extractors.py` (`pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown`) |
-| 메타데이터 저장 | SQLite `data/reports.db` |
+| 리포트/검색 메타데이터 | V1: SQLite `data/reports.db`; V2: SQLite `data/retrieval/v2/catalog.sqlite3`가 활성 권위이며 `data/reports.db`는 legacy anchor로 보존 |
 | 대화 저장 | SQLite `data/conversations.db` |
-| 임베딩 색인 | FAISS `data/vector_db` |
-| 문제 신고 저장 | 텍스트 파일 `debug/issue_report_*.txt` |
+| 임베딩 색인 | V1: `data/vector_db/index.faiss` + `index.pkl`; V2: immutable `data/retrieval/v2/snapshots/<snapshot_id>.faiss` + catalog membership |
+| 문제 신고 저장 | `debug/issue_report_*.txt`와 같은 stem의 구조화 `.json` sidecar |
 | 생성 모델 | OpenRouter `deepseek/deepseek-v4-flash` |
 | 임베딩 모델 | OpenRouter `baai/bge-m3` |
 | Rerank | 기본 비활성화, 필요 시 OpenRouter `cohere/rerank-v3.5` |
@@ -23,23 +23,21 @@ Finance LLM은 증권사 PDF 리포트를 수집, 추출, 색인하고 질문에
 ## 2. 데이터 흐름
 
 ```text
-report_crawler
-  -> data/downloaded/*.pdf
-  -> SQLite reports
-  -> embed_pipeline
-  -> PDF extraction
-  -> chunking / parent-child chunking
-  -> OpenRouter embeddings
-  -> FAISS vector_db + SQLite parent_chunks
-  -> LangGraph retrieval
-  -> final answer + references
+V1:
+report_crawler → data/downloaded/*.pdf
+  → embed_pipeline가 filename metadata를 reports.db에 동기화
+  → 추출/chunk/embedding → data/vector_db + parent_chunks
+  → reports.is_embedded=1 → LangGraph retrieval → answer + references
+
+V2:
+report_crawler → data/downloaded/*.pdf → embed_pipeline runtime dispatch
+  → source inventory hash 비교 → 신규·변경 PDF만 추출/chunk/embedding
+  → 변경 없는 chunk/vector 재사용 → off-path catalog/snapshot 검증
+  → publication generation/write epoch를 올려 원자적으로 활성화
+  → native catalog + immutable snapshot reader → answer + references
 ```
 
-Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 별도 Python
-프로세스로 실행합니다. 사용자가 지정한 업데이트 기간 중 이미 임베딩 완료된
-날은 건너뛰고, 남은 날짜만 다운로드와 임베딩 대상으로 전달합니다. 진행 상태는
-`logs/data_update_jobs/status.json`에 기록되며 GUI는 fragment로 이 파일만 주기적으로
-읽어 다운로드/임베딩/완료 단계를 갱신합니다.
+Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 별도 Python 프로세스로 실행합니다. 이미 완료된 날짜/카테고리 조합을 제외한 날짜 범위만 crawler에 전달합니다. V1 embedding은 pending row를 처리하지만 V2 embedding은 전체 source inventory를 스캔한 뒤 신규·변경 PDF만 파싱·임베딩하고 변경 없는 vector를 재사용합니다. 진행 상태는 `logs/data_update_jobs/status.json`에 기록되며 GUI는 fragment로 이 파일을 주기적으로 읽습니다.
 
 ## 3. 수집 계층
 
@@ -51,19 +49,17 @@ Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 �
 
 ## 4. 추출 및 색인 계층
 
-`src/core/embed_pipeline.py`는 미처리 PDF를 가져와 다음 순서로 처리합니다.
+추출과 chunking 계약은 backend 공통이지만 저장 단계는 다릅니다.
 
 1. `extract_pdf_text()`로 PDF 텍스트 또는 Markdown을 추출합니다.
    - 지원 엔진은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown`입니다.
-   - 선택 엔진이 실패하면 기본 설정에서는 PyMuPDF fallback을 사용합니다.
    - 모든 엔진 출력은 색인 전에 표 제거 계약을 통과합니다. PyMuPDF는 `find_tables()` bbox를 제외하고, Marker는 table processor를 빼며, OpenDataLoader JSON table node와 Docling table structure는 비활성/제거합니다. 별도 off 옵션이 없는 CLI 출력은 공통 Markdown/HTML/plain-text table 제거 후처리를 거칩니다.
+   - `extract_pdf_text()` API 자체의 기본 fallback은 켜져 있지만 production embedding은 pending extractor가 primary extractor와 같을 때만 PyMuPDF fallback을 허용합니다.
 2. `MarkdownHeaderTextSplitter`와 `RecursiveCharacterTextSplitter`로 문서를 chunk로 나눕니다.
-3. `USE_PARENT_CHILD=true`이면 parent chunk는 SQLite `parent_chunks`에 저장하고 child chunk를 FAISS 검색 대상으로 사용합니다.
-4. `build_embeddings_model()`이 OpenRouter 임베딩 모델을 생성합니다.
-5. FAISS 인덱스를 새로 만들거나 기존 인덱스에 추가합니다.
-6. `reports.is_embedded=1`로 처리 완료 표시합니다.
+3. V1은 parent를 `parent_chunks`, 검색 chunk를 mutable `data/vector_db`에 추가하고 `reports.is_embedded=1`을 기록합니다.
+4. V2는 신규·변경 문서만 처리하고 기존 불변 parent/chunk/vector를 재사용한 뒤 완전한 candidate catalog와 새 immutable FAISS snapshot을 검증·게시합니다. 삭제된 source는 provider 호출 없이 다음 complete snapshot에서 제외하고 변화가 없으면 publication을 만들지 않습니다.
 
-추출 엔진, 임베딩 모델, chunk 전략을 바꿀 때는 FAISS 인덱스를 초기화하고 재색인해야 합니다.
+V1에서는 profile 변경 시 legacy index 재생성이 필요합니다. 활성 V2에서는 `data/vector_db` 삭제나 `reports.is_embedded` 수정을 재구축 방법으로 사용하지 않습니다. Profile 변경은 incremental writer가 거부하므로 별도로 검증된 full native successor를 준비·게시해야 합니다.
 
 ## 5. 검색 계층
 
@@ -81,12 +77,14 @@ LangGraph는 대략 다음 노드로 구성됩니다.
 3. Router: RDB 검색이 적합한지 VectorDB 검색이 적합한지 선택합니다.
 4. RDB path: SQL guardrail을 통과한 read-only SELECT만 SQLite에 실행합니다.
 5. VectorDB path: FAISS 후보를 넉넉히 가져온 뒤 metadata filter, 최신성 가중치, 선택형 rerank를 적용합니다.
+   - VectorDB 진입점은 canonical bootstrap으로 `legacy_v1`, `epoch_zero_compatibility`, `native` backend를 선택합니다.
+   - Native 요청은 catalog에서 scope를 compile하고 한 publication revision의 snapshot lease를 잡은 뒤 DIRECT/SELECTOR/ADAPTIVE 전략으로 검색·hydrate합니다. Native authority가 손상되면 임의의 V1 파일로 fallback하지 않고 fail closed합니다.
    - `metadata_matches()`는 날짜/종목/증권사/리포트 유형뿐 아니라 `file_names` 필터도 처리해 직전 답변에 실제 사용된 PDF 범위로 재검색할 수 있습니다.
    - `select_top_passages()`는 명시 파일 scope, 복수 문서/list 의도, 섹션 follow-up에서 `ensure_document_coverage()`를 적용해 최종 context가 한 PDF의 여러 chunk로만 채워지는 상황을 줄입니다. 적용 여부와 이유는 `document_coverage_applied`, `document_coverage_reason`으로 monitoring metadata에 남습니다.
 6. VectorDB 결과가 없으면 해당 thread의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.
 7. Final response: 검색 결과와 참고 문서를 바탕으로 답변을 생성합니다.
-   - GUI는 성공한 assistant 메시지 metadata에 `rerank_info`와 `search_scope`를 저장합니다. `search_scope`는 다음 후속 질문의 `prior_search_scope` 입력으로 전달됩니다.
-   - `rerank_info`에는 답변에 사용된 source의 `report_type`도 포함되어, 이후 `answer_scope_index` 구성과 monitoring에서 섹션별 source 확인에 사용됩니다.
+   - GUI는 성공한 assistant 메시지 metadata에 `selected_sources`와 `search_scope`를 저장합니다. `search_scope`는 다음 후속 질문의 `prior_search_scope` 입력으로 전달됩니다.
+   - `selected_sources`에는 답변에 사용된 source의 `report_type`도 포함되어 이후 `answer_scope_index` 구성과 monitoring의 섹션별 source 확인에 사용됩니다. `rerank_info`는 기존 대화 호환용 read fallback입니다.
    - GUI source renderer는 같은 PDF에서 검색된 여러 chunk를 `group_sources_by_document()`로 문서 단위로 묶고, `document_rank_aliases()`로 원래 chunk rank를 1부터 시작하는 문서 표시 번호로 다시 매깁니다.
 
 ## 6. 메타데이터 필터와 최신성 가중치
@@ -127,18 +125,16 @@ RERANK_MODEL=cohere/rerank-v3.5
 - GUI는 저장된 thread와 메시지를 불러와 화면에 표시합니다.
 - GUI 답변 생성은 백그라운드 thread에서 실행되고, assistant 메시지는 먼저 `status=running`으로 저장된 뒤 완료 시 `status=succeeded`, 실패 시 `status=failed` metadata로 갱신됩니다.
 - deprecated CLI는 기존 호환성을 위해 기본 thread를 계속 사용하지만 신규 기능 개발 대상이 아닙니다.
-- assistant 메시지는 참고 문서와 rerank 정보를 metadata로 함께 저장할 수 있습니다.
+- assistant 메시지는 참고 문서와 `selected_sources` 정보를 metadata로 함께 저장할 수 있습니다. 기존 `rerank_info`는 read fallback으로만 지원합니다.
 - GUI assistant 메시지는 성공 시 `search_scope` metadata를 추가로 저장합니다. 값에는 `route`, `search_filters`, `temporal_context`, `scope_source`, `file_names`, `answer_scope_index`가 포함될 수 있으며, 이후 같은 thread의 후속 질문에서 가장 최근 성공 답변의 scope를 재사용합니다.
 
 ## 9. 문제 신고
 
-`src/core/issue_report_store.py`는 GUI의 `⚠ 신고` 버튼에서 제출된 문제 내용을
-읽기 쉬운 텍스트 파일로 저장합니다. 기본 저장 위치는 `debug/`이며 파일명은
-`issue_report_*.txt` 형식입니다.
+`src/core/issue_report_store.py`는 GUI의 `⚠ 신고` 버튼에서 제출된 문제를 사람이 읽는 `.txt`와 모니터링·회귀 후보 승격용 구조화 `.json` sidecar로 함께 저장합니다. 기본 저장 위치는 `debug/`이며 두 파일은 같은 `issue_report_*` stem을 사용합니다.
 
 - 신고 내용에는 문제 유형, 사용자가 작성한 설명, thread 정보, 선택 시 대화 전문과 축약된 metadata가 포함됩니다.
 - `debug/*`는 Git에 포함하지 않고 `debug/.gitkeep`만 폴더 유지용으로 추적합니다.
-- 신고 파일은 사용자가 내용을 확인한 뒤 복사하거나 `.txt` 파일로 전달하는 로컬 디버깅 산출물입니다.
+- 두 파일 모두 로컬 디버깅 산출물이며 사용자가 내용을 확인한 뒤 전달해야 합니다.
 
 ### Chat Monitoring trace viewer
 
@@ -165,30 +161,21 @@ anchor에는 scroll margin을 둡니다.
 1부터 순차적으로 다시 부여됩니다. 따라서 원래 검색 rank가 `[1], [2], [4], [13]`
 처럼 건너뛰어도 화면에는 `[1], [2], [3], [4]`처럼 표시됩니다.
 
-참고 문서의 `열기` 버튼은 로컬 PDF 파일 자체를 엽니다. PDF 파일의 정확한
-페이지나 좌표로 바로 이동하려면 chunk 생성 단계에서 page number, bounding box,
-text offset 같은 위치 metadata를 함께 저장해야 합니다. 현재 구조에서는 해당
-정밀 위치 이동까지는 제공하지 않으며, 별도 개선 과제로 남겨두는 것이 좋습니다.
+참고 문서의 `열기` 버튼은 로컬 PDF 파일 자체를 엽니다. V2 chunk에는 parent content 내부의 `span_start`/`span_end`가 있지만 원본 PDF의 page number와 bounding box는 없습니다. 따라서 parent text 위치는 복원해도 GUI에서 원본 PDF의 정확한 페이지·좌표로 이동하는 기능은 아직 제공하지 않습니다.
 
 ## 11. 데이터 상태와 캘린더
 
-`src/core/status.py`는 DB/FAISS/설정 상태를 읽기 전용으로 요약합니다. GUI의
-리포트 캘린더는 `reports.is_embedded=1`인 날짜만 데이터 있음으로 표시하므로,
-다운로드만 끝난 PDF가 아니라 실제 검색 가능한 임베딩 완료 리포트 기준으로
-초록색 상태가 표시됩니다.
+`src/core/status.py`는 canonical runtime을 통해 DB/FAISS/설정 상태를 읽기 전용으로 요약합니다. V1 calendar는 `reports.is_embedded=1`, V2 calendar는 active snapshot의 `active_reports`를 기준으로 검색 가능한 날짜를 표시합니다.
 
-업데이트 대상 계산은 날짜만 보지 않고 `reports.report_date + reports.report_type`
-집계를 함께 봅니다. 예를 들어 특정 날짜에 `company`는 임베딩되어 있지만
-`industry`가 없으면, 사용자가 `industry`를 선택했을 때 해당 날짜는 다시
-수집/임베딩 대상으로 포함됩니다. 이 판단은 기존 `reports` 테이블의
-`report_date`, `report_type`, `is_embedded` 컬럼으로 계산하므로 별도 스키마
-마이그레이션이 필요하지 않습니다.
+업데이트 대상 계산은 날짜와 report type을 함께 봅니다. 예를 들어 특정 날짜에 `company`는 있지만 `industry`가 없으면 사용자가 `industry`를 선택했을 때 그 날짜를 다시 수집/임베딩 대상으로 포함합니다. V1은 legacy row 집계, V2는 latest report objects와 active manifest 집계를 사용합니다.
 
 ## 12. 검증
 
 주요 검증 명령은 다음과 같습니다.
 
 ```bash
-python -m py_compile apps/gui/app.py apps/cli/app.py src/core/data_update_jobs.py src/graphs/main_graph.py src/core/followup_scope.py src/nodes/search_scope.py src/nodes/vectordb.py
+python -m compileall -q apps src scripts
 python -m pytest -q
 ```
+
+V1/V2 차이, SSOT 원칙, migration/publication 구조는 [V2 마이그레이션과 검색 아키텍처](migrations/v2/V2_MIGRATION.md)를 참고합니다. 실제 릴리스 검증 절차와 release blocker는 [V2 native retrieval release certification runbook](migrations/v2/V2_RELEASE_CERTIFICATION.md)을 참고합니다.

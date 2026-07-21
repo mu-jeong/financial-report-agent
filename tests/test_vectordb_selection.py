@@ -369,3 +369,400 @@ def test_build_temporal_preflight_plan_selects_month_representatives_when_over_t
     assert plan["metrics"]["bucket_by"] == "month"
     assert plan["metrics"]["bucket_count"] == 3
     assert plan["metrics"]["selection_reason"] == "month_bucket_representatives"
+
+
+def test_native_dispatch_embeds_once_uses_one_scoped_reader_request_and_never_loads_v1(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    import src.nodes.vectordb as vectordb
+
+    calls = {"embed": 0, "search": 0, "reader": 0}
+
+    class FakeEmbeddings:
+        def embed_query(self, query):
+            calls["embed"] += 1
+            assert query == "native query"
+            return [0.25, 0.75]
+
+    monkeypatch.setattr(vectordb, "build_embeddings_fn", FakeEmbeddings)
+
+    repository = object()
+    scope = {
+        "file_names": ["prior.pdf"],
+        "report_date_start": "2026-07-01",
+        "report_date_end": "2026-07-31",
+    }
+    chunk = SimpleNamespace(
+        metadata={
+            "parent_uid": "parent-1",
+            "chunk_uid": "chunk-1",
+            "file_name": "prior.pdf",
+            "target_name": "Acme",
+            "report_date": "2026-07-15",
+            "title": "Outlook",
+            "broker": "Broker",
+            "report_type": "company",
+        },
+        child_order=2,
+        span_start=5,
+        span_end=20,
+        physical_id=7,
+        snapshot_id="snapshot-1",
+        publication_generation=4,
+        parent_slice="canonical parent slice",
+        score=0.125,
+    )
+    response = SimpleNamespace(
+        results=(chunk,),
+        faiss_fetch_k=8,
+        candidate_count=1,
+        eligible_count=1,
+        snapshot_total=10,
+        strategy=SimpleNamespace(value="selector"),
+        faiss_calls=1,
+        hydration_batches=1,
+        hydration_rows=1,
+        hydration_cache_hits=1,
+        hydration_cache_misses=0,
+        revision=SimpleNamespace(snapshot_id="snapshot-1", publication_generation=4),
+    )
+
+    class FakeReader:
+        def __init__(self, received_repository):
+            calls["reader"] += 1
+            assert received_repository is repository
+
+        def search(self, vector, k, *, scope):
+            calls["search"] += 1
+            assert vector.tolist() == [0.25, 0.75]
+            assert k >= vectordb.SEARCH_TOP_K
+            assert scope == {
+                "file_names": ["prior.pdf"],
+                "report_date_start": "2026-07-01",
+                "report_date_end": "2026-07-31",
+            }
+            return response
+
+    reader = FakeReader(repository)
+    monkeypatch.setattr(
+        vectordb,
+        "resolve_retrieval_dispatch",
+        lambda _path: SimpleNamespace(
+            mode="native",
+            native=SimpleNamespace(reader=reader),
+            selection=None,
+        ),
+    )
+    monkeypatch.setattr(
+        vectordb.FAISS,
+        "load_local",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native V2 must not load index.pkl")
+        ),
+    )
+
+    docs_with_scores, metrics = vectordb._retrieve_docs_with_scores(
+        "native query",
+        scope,
+    )
+    second_docs_with_scores, second_metrics = vectordb._retrieve_docs_with_scores(
+        "native query",
+        scope,
+    )
+
+    assert calls == {"embed": 2, "search": 2, "reader": 1}
+    assert docs_with_scores[0][0].page_content == "canonical parent slice"
+    assert docs_with_scores[0][0].metadata["parent_uid"] == "parent-1"
+    assert docs_with_scores[0][0].metadata["child_index"] == 2
+    assert docs_with_scores[0][1] == 0.125
+    assert metrics["runtime_mode"] == "native"
+    assert metrics["snapshot_id"] == "snapshot-1"
+    assert metrics["publication_generation"] == 4
+    assert metrics["native_hydration_rows"] == 1
+    assert metrics["native_hydration_cache_hits"] == 1
+    assert metrics["native_hydration_cache_misses"] == 0
+    assert second_docs_with_scores == docs_with_scores
+    assert second_metrics == metrics
+
+
+def test_native_repository_failure_returns_no_results_without_legacy_fallback(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    import src.nodes.vectordb as vectordb
+
+    monkeypatch.setattr(
+        vectordb,
+        "build_embeddings_fn",
+        lambda: SimpleNamespace(embed_query=lambda query: [0.0, 1.0]),
+    )
+
+    class FailingReader:
+        def search(self, *args, **kwargs):
+            raise vectordb.RepositoryError("catalog lease failed")
+
+    monkeypatch.setattr(
+        vectordb,
+        "resolve_retrieval_dispatch",
+        lambda _path: SimpleNamespace(
+            mode="native",
+            native=SimpleNamespace(reader=FailingReader()),
+            selection=None,
+        ),
+    )
+    monkeypatch.setattr(
+        vectordb.FAISS,
+        "load_local",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native failure must not fall back to V1")
+        ),
+    )
+
+    result = vectordb.vectordb_node(
+        {"question": "query", "search_filters": {"report_type": "company"}}
+    )
+
+    assert result["no_vector_results"] is True
+    assert result["monitoring_metrics"]["retrieval"]["runtime_mode"] == "unavailable"
+    assert result["monitoring_metrics"]["retrieval"]["error_code"] == "RetrievalDispatchError"
+
+
+def test_bootstrap_failure_returns_no_results_before_embedding_or_v1_load(monkeypatch):
+    import src.nodes.vectordb as vectordb
+
+    def fail_bootstrap(path):
+        raise vectordb.RetrievalBootstrapError("native catalog is invalid")
+
+    monkeypatch.setattr(vectordb, "resolve_retrieval_dispatch", fail_bootstrap)
+    monkeypatch.setattr(
+        vectordb,
+        "build_embeddings_fn",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("bootstrap must complete before embedding")
+        ),
+    )
+    monkeypatch.setattr(
+        vectordb.FAISS,
+        "load_local",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bootstrap failure must not fall back to V1")
+        ),
+    )
+
+    result = vectordb.vectordb_node(
+        {"question": "query", "search_filters": {"report_type": "company"}}
+    )
+
+    assert result["no_vector_results"] is True
+    assert result["monitoring_metrics"]["retrieval"]["error_code"] == "RetrievalBootstrapError"
+
+
+def test_native_parent_slice_deduplicates_without_legacy_parent_lookup(monkeypatch):
+    import src.nodes.vectordb as vectordb
+
+    monkeypatch.setattr(
+        vectordb,
+        "fetch_parent_content",
+        lambda parent_id: (_ for _ in ()).throw(
+            AssertionError("native parent slices must not query the legacy parent table")
+        ),
+    )
+    docs_with_scores = [
+        (
+            Document(
+                page_content="canonical parent slice",
+                metadata={"parent_uid": "parent-1", "file_name": "native.pdf"},
+            ),
+            0.1,
+        ),
+        (
+            Document(
+                page_content="same parent from another child",
+                metadata={"parent_uid": "parent-1", "file_name": "native.pdf"},
+            ),
+            0.2,
+        ),
+    ]
+
+    passages = vectordb._build_passages(docs_with_scores)
+
+    assert len(passages) == 1
+    assert passages[0]["text"] == "canonical parent slice"
+
+
+def test_vectordb_passes_matching_prior_files_into_single_retrieval_scope(monkeypatch):
+    import src.nodes.vectordb as vectordb
+
+    captured_scopes = []
+
+    def fake_retrieve(query, scope):
+        captured_scopes.append(scope)
+        return [], {
+            "runtime_mode": "native",
+            "fetch_k": 0,
+            "requested_k": 8,
+        }
+
+    monkeypatch.setattr(vectordb, "_retrieve_docs_with_scores", fake_retrieve)
+    file_name = "company_2026-07-15_Acme_Broker_Outlook.pdf"
+
+    result = vectordb.vectordb_node(
+        {
+            "question": "Acme outlook",
+            "search_filters": {
+                "target_name": "Acme",
+                "report_type": "company",
+                "report_date_start": "2026-07-01",
+                "report_date_end": "2026-07-31",
+            },
+            "prior_search_scope": {"file_names": [file_name]},
+        }
+    )
+
+    assert result["no_vector_results"] is True
+    assert captured_scopes == [
+        {
+            "target_name": "Acme",
+            "report_type": "company",
+            "report_date_start": "2026-07-01",
+            "report_date_end": "2026-07-31",
+            "file_names": [file_name],
+        }
+    ]
+
+
+def test_legacy_store_is_loaded_only_for_legacy_v1_selection(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import src.nodes.vectordb as vectordb
+
+    selection = SimpleNamespace(
+        mode="legacy_v1",
+        paths=SimpleNamespace(catalog=tmp_path / "catalog.sqlite3", data_root=tmp_path),
+    )
+    monkeypatch.setattr(
+        vectordb,
+        "resolve_retrieval_dispatch",
+        lambda _path: SimpleNamespace(
+            mode="legacy_v1",
+            native=None,
+            selection=selection,
+        ),
+    )
+    embed_calls = []
+    monkeypatch.setattr(
+        vectordb,
+        "build_embeddings_fn",
+        lambda: SimpleNamespace(
+            embed_query=lambda query: embed_calls.append(query) or [1.0, 2.0]
+        ),
+    )
+    monkeypatch.setattr(vectordb.os.path, "exists", lambda path: True)
+    document = Document(page_content="legacy", metadata={"file_name": "legacy.pdf"})
+
+    class FakeLegacyStore:
+        index_to_docstore_id = {0: "doc-0"}
+
+        def similarity_search_with_score_by_vector(self, vector, *, k):
+            assert vector == [1.0, 2.0]
+            assert k >= vectordb.SEARCH_TOP_K
+            return [(document, 0.25)]
+
+    load_calls = []
+
+    def fake_load(path, embeddings, *, allow_dangerous_deserialization):
+        load_calls.append((path, embeddings, allow_dangerous_deserialization))
+        return FakeLegacyStore()
+
+    monkeypatch.setattr(vectordb.FAISS, "load_local", fake_load)
+
+    docs_with_scores, metrics = vectordb._retrieve_docs_with_scores("legacy query", None)
+
+    assert embed_calls == ["legacy query"]
+    assert len(load_calls) == 1
+    assert load_calls[0][2] is True
+    assert docs_with_scores == [(document, 0.25)]
+    assert metrics["runtime_mode"] == "legacy_v1"
+
+
+def test_epoch_zero_compatibility_uses_only_validated_bundle_dispatch(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import src.nodes.vectordb as vectordb
+    import src.migrations.v2.compatibility as compatibility
+
+    selection = SimpleNamespace(
+        mode="epoch_zero_compatibility",
+        paths=SimpleNamespace(catalog=tmp_path / "catalog.sqlite3", data_root=tmp_path),
+        compatibility_bundle_id="bundle-1",
+        write_epoch=0,
+        v1_fallback_open=True,
+    )
+    monkeypatch.setattr(
+        vectordb,
+        "resolve_retrieval_dispatch",
+        lambda _path: SimpleNamespace(
+            mode="epoch_zero_compatibility",
+            native=None,
+            selection=selection,
+        ),
+    )
+    monkeypatch.setattr(
+        vectordb,
+        "build_embeddings_fn",
+        lambda: SimpleNamespace(embed_query=lambda query: [0.5, 0.5]),
+    )
+    monkeypatch.setattr(
+        vectordb.FAISS,
+        "load_local",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("compatibility dispatch must not open arbitrary V1 files")
+        ),
+    )
+    constructor_calls = []
+    search_calls = []
+
+    class FakeCompatibilityReader:
+        ntotal = 2
+
+        def __init__(self, root, bundle_id):
+            constructor_calls.append((root, bundle_id))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def search(self, vector, *, k, fetch_k):
+            search_calls.append((vector.tolist(), k, fetch_k))
+            return [
+                SimpleNamespace(
+                    embedding_text="sealed legacy text",
+                    metadata={"file_name": "prior.pdf"},
+                    score=0.75,
+                )
+            ]
+
+    monkeypatch.setattr(compatibility, "V1CompatibilityReader", FakeCompatibilityReader)
+
+    docs_with_scores, metrics = vectordb._retrieve_docs_with_scores(
+        "compat query",
+        {"file_names": ["prior.pdf"]},
+    )
+    vectordb._retrieve_docs_with_scores(
+        "compat query",
+        {"file_names": ["prior.pdf"]},
+    )
+
+    assert constructor_calls == [
+        (tmp_path, "bundle-1"),
+        (tmp_path, "bundle-1"),
+    ]
+    assert search_calls == [([0.5, 0.5], 2, 2), ([0.5, 0.5], 2, 2)]
+    assert docs_with_scores[0][0].page_content == "sealed legacy text"
+    assert metrics["runtime_mode"] == "epoch_zero_compatibility"
+    assert metrics["compatibility_bundle_id"] == "bundle-1"

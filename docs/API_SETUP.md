@@ -52,7 +52,7 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | `RERANK_TIMEOUT` | `60.0` | rerank 요청 timeout(초) |
 | `RERANK_CANDIDATE_MULTIPLIER` | `3` | rerank 전에 `SEARCH_TOP_K`의 몇 배 후보를 가져올지 결정 |
 
-`RERANK_PROVIDER=flashrank`는 OpenRouter 호출이 아닌 로컬 FlashRank adapter를 명시적으로 사용할 때만 설정합니다. Quick Start와 기본 실행은 비용을 줄이기 위해 `USE_RERANKER=false`를 권장합니다.
+`RERANK_PROVIDER=flashrank`는 자동 fallback이 아니라 명시적 로컬 adapter입니다. 이 경우 `RERANK_MODEL`도 FlashRank가 지원하는 로컬 model name으로 바꿔야 합니다(예: `ms-marco-TinyBERT-L-2-v2`). 기본값 `cohere/rerank-v3.5`는 OpenRouter rerank 전용입니다. Quick Start와 기본 실행은 비용을 줄이기 위해 `USE_RERANKER=false`를 권장합니다.
 
 ## 검색 및 임베딩 설정
 
@@ -60,14 +60,16 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | --- | --- |
 | `SEARCH_TOP_K` | 답변 파이프라인으로 넘길 vector search 결과 수 |
 | `RECENCY_WEIGHT` | 최신 리포트에 부여하는 검색 점수 가중치 |
-| `TEST_LIMIT` | 기본 임베딩 처리 제한. `0`이면 pending 전체 처리 |
+| `TEST_LIMIT` | V1 기본 임베딩 처리 제한. `0`이면 V1 pending 전체 처리. Native V2는 이 값을 무시하고 전체 source inventory를 검사 |
 | `USE_PARENT_CHILD` | parent-child chunking 사용 여부 |
 | `PARENT_CHUNK_SIZE` | parent chunk 크기 |
 | `CHILD_CHUNK_SIZE` | child chunk 크기 |
 | `CHUNK_SIZE` | parent-child 미사용 시 fallback/general chunk 크기 |
 | `CHUNK_OVERLAP` | fallback/general chunk overlap |
 | `PDF_EXTRACTION_ENGINE` | 일반 임베딩 run의 PDF 파싱/추출 엔진. `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 선택. 기존 `EXTRACTION_ENGINE`도 alias로 동작 |
-| `UNEMBEDDED_PDF_EXTRACTION_ENGINE` | 미임베딩/재시도 문서에 사용할 PDF 파싱 엔진. 빈 값이면 `PDF_EXTRACTION_ENGINE` 사용. 기존 `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 동작 |
+| `UNEMBEDDED_PDF_EXTRACTION_ENGINE` | 미임베딩 문서에 사용할 PDF 파싱 엔진. 배포 템플릿은 `pymupdf`를 사용하며, 빈 값이면 `PDF_EXTRACTION_ENGINE`을 사용. 기존 `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 동작 |
+
+배포 템플릿은 일반 문서와 미임베딩 문서를 모두 `pymupdf`로 추출하므로 Java 런타임이 필요하지 않습니다. `opendataloader`를 명시적으로 선택할 때는 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 서로 다른 `UNEMBEDDED_PDF_EXTRACTION_ENGINE` override는 자동 fallback 없이 해당 엔진을 사용합니다.
 
 ## 크롤러 설정
 
@@ -87,6 +89,11 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | 설정 | 설명 |
 | --- | --- |
 | `REPORT_PDF_DIR` | GUI의 `열기` 버튼이 PDF를 찾는 폴더. 비워두면 `data/downloaded` 사용 |
+| `SAVE_DIR` | 다운로드 PDF이자 V2 source inventory의 기본 폴더 |
+| `DB_PATH` | V1 DB 경로. 이 파일의 부모 폴더가 native V2 data root를 결정 |
+| `FAISS_DIR` | Legacy V1 FAISS 경로. Native V2는 `retrieval/v2/snapshots/` 사용 |
+| `CONVERSATION_DB_PATH` | GUI/CLI 대화 SQLite 경로 |
+| `COMPANY_INDUSTRY_DATA_PATH` | 선택형 KRX 업종 CSV 경로 |
 
 임베딩 파이프라인과 다른 위치의 PDF를 열어야 하면 `.env`에서 `REPORT_PDF_DIR`을 해당 폴더로 지정합니다.
 
@@ -97,23 +104,11 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 - 비용은 PDF 길이, chunk 수, 추출 품질, OpenRouter 모델 가격에 따라 달라집니다.
 - 사용량과 잔액은 OpenRouter Credits 또는 Activity 화면에서 주기적으로 확인하세요.
 
-## FAISS 인덱스 재생성
+## V2 embedding profile 변경 주의
 
-임베딩 모델, PDF 추출 엔진, chunk 전략을 바꾼 경우 기존 FAISS 인덱스와 SQLite의 임베딩 상태를 초기화한 뒤 다시 색인하세요.
+V2 활성 상태에서는 `data/retrieval/v2`, `reports.db`, `vector_db`를 수동으로 삭제하거나 수정하지 마세요. 일반 V2 updater는 활성 profile과 모델·추출기·chunk 설정이 다르면 fail closed로 중단하며, 같은 profile에서는 전체 source inventory를 비교해 변경된 PDF만 처리합니다. Profile 전체 변경은 별도로 검증된 full-corpus 전환 절차로 수행해야 합니다.
 
-```powershell
-Remove-Item -Recurse -Force data\vector_db
-python - <<'PY'
-from src.core.db_manager import get_connection
-
-conn = get_connection()
-conn.execute("UPDATE reports SET is_embedded = 0")
-conn.execute("DELETE FROM parent_chunks")
-conn.commit()
-conn.close()
-PY
-python -m src.core.embed_pipeline --all
-```
+Legacy V1 설치의 수동 재색인은 V2 migration/rollback artifact가 없고 V1이 canonical authority인 경우에만 수행하세요. PowerShell에서는 Bash heredoc(`python - <<'PY'`)을 사용할 수 없습니다.
 
 ## 보안 주의사항
 

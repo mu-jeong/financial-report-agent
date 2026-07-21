@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import argparse
 from pathlib import Path
 
 from src.configs.settings import quickstart_env_updates
@@ -208,6 +209,10 @@ def ensure_env(progress: ProgressTracker | None = None) -> None:
 
 def prepare_data(progress: ProgressTracker | None = None) -> None:
     run_command(
+        [str(VENV_PYTHON), "-m", "src.retrieval.launcher_guard", "--write"],
+        description="Retrieval runtime write gate",
+    )
+    run_command(
         [str(VENV_PYTHON), "-m", "src.core.report_crawler"],
         description="실행일 기준 이전 7일 리포트 수집",
         progress=progress,
@@ -250,7 +255,24 @@ def launch_gui(progress: ProgressTracker | None = None) -> None:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Finance LLM Quick Start")
+    parser.add_argument(
+        "--runtime-smoke",
+        action="store_true",
+        help="validate the installed retrieval runtime and exit without updates",
+    )
+    args = parser.parse_args(argv)
+    if args.runtime_smoke:
+        if not VENV_PYTHON.is_file():
+            print("[error] .venv Python is unavailable for runtime smoke validation")
+            return 1
+        return subprocess.run(
+            [str(VENV_PYTHON), "-m", "src.retrieval.launcher_guard"],
+            cwd=ROOT,
+            check=False,
+        ).returncode
+
     _configure_console()
     print("=" * 70)
     print("Finance LLM Quick Start")

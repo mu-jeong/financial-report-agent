@@ -1,4 +1,5 @@
 import quickstart
+from types import SimpleNamespace
 
 
 def test_ensure_env_writes_quickstart_defaults_without_prompt(tmp_path, monkeypatch, capsys):
@@ -51,6 +52,23 @@ def test_print_runtime_status_uses_status_module_not_deprecated_cli(monkeypatch)
     assert "format_readiness_text" not in command[-1]
 
 
+def test_prepare_data_runs_write_guard_before_crawler(monkeypatch):
+    calls = []
+
+    def fake_run_command(command, *, description, progress=None):
+        calls.append((command, description, progress))
+
+    monkeypatch.setattr(quickstart, "run_command", fake_run_command)
+    monkeypatch.setattr(quickstart, "VENV_PYTHON", "python")
+    monkeypatch.setattr(quickstart, "print_runtime_status", lambda progress=None: None)
+
+    quickstart.prepare_data()
+
+    assert calls[0][0] == ["python", "-m", "src.retrieval.launcher_guard", "--write"]
+    assert calls[1][0] == ["python", "-m", "src.core.report_crawler"]
+    assert calls[2][0] == ["python", "-m", "src.core.embed_pipeline", "--all"]
+
+
 def test_progress_tracker_prints_step_progress(capsys):
     progress = quickstart.ProgressTracker(total=3, width=6)
 
@@ -62,3 +80,21 @@ def test_progress_tracker_prints_step_progress(capsys):
     assert "1/3" in output
     assert "2/3" in output
     assert "[####--]" in output
+
+
+def test_runtime_smoke_runs_only_installed_launcher_guard(tmp_path, monkeypatch):
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"")
+    calls = []
+
+    def fake_run(command, *, cwd, check):
+        calls.append((command, cwd, check))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(quickstart, "VENV_PYTHON", python)
+    monkeypatch.setattr(quickstart.subprocess, "run", fake_run)
+
+    assert quickstart.main(["--runtime-smoke"]) == 0
+    assert calls == [
+        ([str(python), "-m", "src.retrieval.launcher_guard"], quickstart.ROOT, False)
+    ]

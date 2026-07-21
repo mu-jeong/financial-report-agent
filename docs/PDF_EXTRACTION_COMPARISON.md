@@ -21,9 +21,8 @@ Finance LLM은 PDF에서 텍스트 또는 Markdown을 추출하기 위해 여러
 ```env
 PDF_EXTRACTION_ENGINE=pymupdf
 
-# 미임베딩/재시도 문서만 다른 엔진으로 처리하고 싶을 때 사용합니다.
-# 빈 값이면 PDF_EXTRACTION_ENGINE을 그대로 씁니다.
-UNEMBEDDED_PDF_EXTRACTION_ENGINE=opendataloader
+# 미임베딩 문서에 사용할 엔진입니다. 빈 값이면 PDF_EXTRACTION_ENGINE을 그대로 씁니다.
+UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 ```
 
 기본값과 설명은 `src/configs/settings.py`에 정의되어 있고, 실제 실행값은 `src/configs/config.py`를 통해 로드됩니다. 기존 `.env`의 `EXTRACTION_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 계속 동작합니다. `marker`, `opendataloader`, `docling`, `pdf-to-markdown`는 선택형 엔진이므로 로컬 런타임 요구사항을 확인한 뒤 사용하세요.
@@ -42,7 +41,7 @@ UNEMBEDDED_PDF_EXTRACTION_ENGINE=opendataloader
 
 ## downstream 처리 계약
 
-추출 엔진이 달라도 embedding pipeline의 downstream 흐름은 동일합니다.
+추출·표 제거·chunking 계약은 공통이지만 저장 단계는 backend별로 다릅니다.
 
 1. PDF에서 텍스트 또는 Markdown 추출
 2. 표 제거 및 금융 리포트 cleanup filter 적용
@@ -50,9 +49,9 @@ UNEMBEDDED_PDF_EXTRACTION_ENGINE=opendataloader
 4. `USE_PARENT_CHILD=true`이면 parent-child chunking 적용
 5. `USE_PARENT_CHILD=false`이면 recursive chunking 사용
 6. OpenRouter 임베딩 모델로 벡터 생성
-7. FAISS와 SQLite에 저장
+7. V1은 SQLite parent와 mutable `data/vector_db`를 갱신하고, V2는 신규·변경 문서만 처리해 unchanged vector를 재사용한 완전한 immutable snapshot/catalog successor를 게시
 
-선택한 production 엔진이 실패하면 `allow_fallback=True` 기본값에 따라 PyMuPDF로 fallback합니다. `pymupdf` 자체가 실패하거나 비교 CLI에서 `allow_fallback=False`를 사용하는 경우에는 오류로 기록됩니다.
+현재 production embedding은 신규·미임베딩 문서를 `pymupdf`로 처리하며, PyMuPDF 실패 이력에 따라 OpenDataLoader로 자동 전환하지 않습니다. DB 기반 실패 이력과 재시도 정책은 별도 TODO로 관리합니다. 서로 다른 `UNEMBEDDED_PDF_EXTRACTION_ENGINE` override와 비교 CLI는 fallback하지 않으며, `pymupdf` 자체가 실패하거나 `allow_fallback=False`인 경우에는 오류로 기록됩니다.
 
 ## 엔진 비교 실행
 
@@ -124,13 +123,15 @@ Streamlit Monitoring Mode의 Parsing engine evaluation은 `run_id`별 파일을 
 
 JSON summary로 엔진별 경향을 먼저 보고, CSV row로 특정 PDF의 이상치를 확인하세요.
 
-## 인덱스 재생성
+## Profile 변경과 재구축
 
-추출 엔진, 임베딩 모델, chunk 전략을 바꾸면 chunk 텍스트와 벡터가 달라질 수 있습니다. production 인덱스를 깨끗하게 다시 만들려면 기존 FAISS와 임베딩 상태를 초기화한 뒤 재색인하세요.
+활성 V2에서는 아래 V1 수동 reset 절차를 사용하지 않습니다. Extraction engine, embedding model, chunk policy가 active profile과 다르면 incremental update는 fail closed합니다. 변경된 profile은 별도로 완전한 native successor를 만들고 검증·게시해야 하며 `data/vector_db` 삭제나 legacy `reports.db` 수정으로 V2가 재구축되지는 않습니다.
+
+아래 절차는 canonical authority가 legacy V1이고 V2 migration/rollback artifact가 없는 설치에만 적용됩니다.
 
 ```powershell
 Remove-Item -Recurse -Force data\vector_db
-python - <<'PY'
+@'
 from src.core.db_manager import get_connection
 
 conn = get_connection()
@@ -138,6 +139,6 @@ conn.execute("UPDATE reports SET is_embedded = 0")
 conn.execute("DELETE FROM parent_chunks")
 conn.commit()
 conn.close()
-PY
+'@ | python -
 python -m src.core.embed_pipeline --all
 ```

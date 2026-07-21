@@ -82,6 +82,8 @@ def test_render_env_example_contains_generated_defaults():
     assert "OPENROUTER_API_KEY=your_openrouter_api_key_here" in content
     assert "CRAWLER_TARGET_DATE=" in content
     assert "CRAWLER_LOOKBACK_DAYS=7" in content
+    assert "PDF_EXTRACTION_ENGINE=pymupdf" in content
+    assert "UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf" in content
     assert "REPORT_PDF_DIR=" in content
     assert "COMPANY_INDUSTRY_DATA_PATH=" in content
     assert "MONITORING_MODE=false" in content
