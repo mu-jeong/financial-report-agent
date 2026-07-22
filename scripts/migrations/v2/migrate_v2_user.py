@@ -38,7 +38,11 @@ from src.migrations.v2.evidence import (
 )
 from src.migrations.v2.import_v1 import convert_v1_seed, validate_converted_seed
 from src.retrieval.bootstrap import RuntimeSelection, inspect_runtime
-from src.retrieval.build_service import validate_epoch_zero_same_space_canary
+from src.retrieval.build_service import (
+    NativeBuildError,
+    format_legacy_import_extraction_profile,
+    validate_epoch_zero_same_space_canary,
+)
 from src.retrieval.identity import EmbeddingProfile, canonical_json
 from src.retrieval.publication import PublicationOutcome, activate_epoch_zero_seed
 from src.retrieval.update_lock import RetrievalUpdateLock
@@ -85,6 +89,7 @@ class UserMigrationSettings:
     child_chunk_size: int
     single_chunk_size: int
     use_parent_child: bool
+    fallback_extractor: str | None = None
 
 
 CutoverHook = Callable[[str], None]
@@ -863,6 +868,17 @@ def _validated_settings(settings: UserMigrationSettings) -> UserMigrationSetting
         raise MigrationError("embedding model is missing")
     if not isinstance(settings.extractor, str) or not settings.extractor.strip():
         raise MigrationError("PDF extractor is missing")
+    fallback_extractor = str(settings.fallback_extractor or "").strip() or None
+    if fallback_extractor == settings.extractor.strip():
+        fallback_extractor = None
+    try:
+        format_legacy_import_extraction_profile(
+            settings.extractor,
+            allow_fallback=fallback_extractor is not None,
+            fallback_engine=fallback_extractor,
+        )
+    except NativeBuildError as exc:
+        raise MigrationError("PDF extraction policy is invalid") from exc
     for name, value in (
         ("parent chunk size", settings.parent_chunk_size),
         ("child chunk size", settings.child_chunk_size),
@@ -890,6 +906,7 @@ def _validated_settings(settings: UserMigrationSettings) -> UserMigrationSetting
         child_chunk_size=settings.child_chunk_size,
         single_chunk_size=settings.single_chunk_size,
         use_parent_child=settings.use_parent_child,
+        fallback_extractor=fallback_extractor,
     )
 
 
@@ -920,7 +937,11 @@ def _embedding_profile(
         metric=metric,
         normalization="none",
         prefix_template=V1_PREFIX_TEMPLATE,
-        extractor=f"legacy-v1-import|configured={settings.extractor}|unattested",
+        extractor=format_legacy_import_extraction_profile(
+            settings.extractor,
+            allow_fallback=settings.fallback_extractor is not None,
+            fallback_engine=settings.fallback_extractor,
+        ),
         parent_policy=parent_policy,
         child_policy=child_policy,
     )
@@ -1485,7 +1506,13 @@ def _settings_from_cli(data_root_override: Path | None) -> UserMigrationSettings
         db_path = data_root / "reports.db"
         faiss_dir = data_root / "vector_db"
         source_dir = data_root / "downloaded"
-    extractor = str(config.UNEMBEDDED_EXTRACTION_ENGINE or config.EXTRACTION_ENGINE)
+    primary_extractor = str(config.EXTRACTION_ENGINE or "").strip()
+    extractor = str(config.UNEMBEDDED_EXTRACTION_ENGINE or primary_extractor).strip()
+    fallback_extractor = None
+    if extractor == primary_extractor:
+        fallback_extractor = str(config.EXTRACTION_FALLBACK_ENGINE or "").strip() or None
+    if fallback_extractor == extractor:
+        fallback_extractor = None
     return UserMigrationSettings(
         install_root=REPOSITORY_ROOT,
         data_root=data_root,
@@ -1498,6 +1525,7 @@ def _settings_from_cli(data_root_override: Path | None) -> UserMigrationSettings
         child_chunk_size=config.CHILD_CHUNK_SIZE,
         single_chunk_size=config.CHUNK_SIZE,
         use_parent_child=config.USE_PARENT_CHILD,
+        fallback_extractor=fallback_extractor,
     )
 
 

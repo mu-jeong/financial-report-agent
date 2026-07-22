@@ -74,7 +74,8 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 ## 6. 처음 실행이 오래 걸리는 이유
 
 처음 실행할 때는 패키지 설치, PDF 다운로드, 텍스트 추출, 임베딩 생성이 함께 진행됩니다.
-배포 템플릿은 일반 문서와 미임베딩 문서를 모두 `pymupdf`로 추출하므로 별도 Java 런타임이 필요하지 않습니다.
+배포 템플릿은 일반 문서와 미임베딩 문서를 먼저 `pymupdf`로 추출하고 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시합니다. fallback을 사용하려면 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 새 키가 없는 기존 `.env`와 빈 값은 fallback을 비활성화합니다. Native V2에서는 active profile과 다른 fallback 설정을 incremental update에 섞지 않으며, 정책을 바꾸려면 full-corpus successor가 필요합니다.
+일부 PDF에서 primary와 fallback 파싱이 모두 실패해도 Quick Start는 실패 파일을 기록하고 다음 단계로 진행합니다. V1에서는 성공한 파일의 색인을 유지하고, V2에서는 corpus가 불완전한 새 snapshot을 게시하지 않고 기존 검색 snapshot을 유지한 채 앱을 실행합니다. 일반 `embed_pipeline` CLI 실행은 `--continue-on-extraction-error`를 명시하지 않는 한 기존처럼 실패 exit code를 반환합니다.
 `RUN_QUICKSTART.bat`을 다시 실행하면 이미 설치된 항목과 이미 임베딩된 리포트를 재사용하므로 처음보다는 빠르지만, 실행일 기준 데이터 수집과 임베딩 확인 단계를 다시 거칩니다. 단순히 앱만 열려면 `RUN_APP.bat`을 사용하세요.
 
 ## 7. 자주 생기는 문제

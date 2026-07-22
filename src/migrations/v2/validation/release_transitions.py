@@ -23,6 +23,7 @@ from src.retrieval.build_service import (
     ExtractorPort,
     MetadataParser,
     NativeBuildError,
+    parse_extraction_profile,
     prepare_full_corpus_build,
     materialize_candidate,
     publish_candidate,
@@ -125,7 +126,11 @@ def execute_release_transitions(
     protected_tree_before = protected_proof_before["tree"]
     _append_event(events, "initial_health_validated")
 
-    replay, build_options = _load_replay_contract(root, initial_selection)
+    replay, build_options = _load_replay_contract(
+        root,
+        initial_selection,
+        allow_custom_extractor=extractor is not None,
+    )
     corrupted_snapshot_id = str(initial["active_snapshot_id"])
     corrupted_path = _snapshot_path(root, corrupted_snapshot_id)
     corrupted_sha256_before = _sha256_file(corrupted_path)
@@ -397,6 +402,8 @@ def _build_candidate(
 def _load_replay_contract(
     root: Path,
     selection: RuntimeSelection,
+    *,
+    allow_custom_extractor: bool = False,
 ) -> tuple[_ReplayEmbeddings, dict[str, Any]]:
     connection = _open_catalog(_catalog(root))
     connection.row_factory = sqlite3.Row
@@ -478,9 +485,15 @@ def _load_replay_contract(
     parent_policy = _json_object(profile[5], "parent policy")
     child_policy = _json_object(profile[6], "child policy")
     extractor_profile = str(profile[4])
-    extractor_name, separator, suffix = extractor_profile.partition("|")
-    if separator and suffix != "fallback=pymupdf":
-        raise ReleaseTransitionError("extractor profile has an unsupported policy")
+    try:
+        extractor_name, fallback_extractor_name = parse_extraction_profile(
+            extractor_profile,
+            allow_custom=allow_custom_extractor,
+        )
+    except NativeBuildError as exc:
+        raise ReleaseTransitionError(
+            f"extractor profile has an unsupported policy: {extractor_profile}"
+        ) from exc
     use_parent_child = child_policy.get("algorithm") != "identity-span-v1"
     if use_parent_child:
         if child_policy.get("algorithm") != "langchain-recursive-v1":
@@ -498,7 +511,8 @@ def _load_replay_contract(
     options = {
         "model": str(profile[0]),
         "extractor_name": extractor_name,
-        "allow_extraction_fallback": bool(separator) or extractor_name == "pymupdf",
+        "fallback_extractor_name": fallback_extractor_name,
+        "allow_extraction_fallback": fallback_extractor_name is not None,
         "parent_chunk_size": parent_chunk_size,
         "child_chunk_size": child_chunk_size,
         "use_parent_child": use_parent_child,

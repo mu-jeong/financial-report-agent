@@ -295,15 +295,16 @@ embeds only new or changed PDFs, reuses unchanged vectors, reflects deletions,
 and publishes nothing when no source changed. It does not produce the mandatory
 installed race evidence for release certification.
 
-PDF extraction retains the declared candidate policy. PyMuPDF fallback is
-allowed only when the pending extractor is the primary extractor; a distinct
+PDF extraction retains the declared candidate policy. The default primary is
+PyMuPDF and the shipping environment template explicitly selects OpenDataLoader
+as fallback; an absent or blank fallback setting disables it. A distinct
 `UNEMBEDDED_PDF_EXTRACTION_ENGINE` does not silently fall back. The successor
 still includes and chunks a successfully extracted report. V2 fingerprints the
-DB-visible policy as
-`<requested-engine>|fallback=pymupdf`, while an undeclared engine transition
-continues to fail closed. Parent/child split sizes, overlap, Markdown headers,
-and embedding prefixes remain the V1 values; deterministic identities and child
-spans are V2 storage metadata rather than text-processing changes.
+DB-visible policy as `<requested-engine>|fallback=<fallback-engine>`, while an
+undeclared engine transition continues to fail closed. Parent/child split sizes,
+overlap, Markdown headers, and embedding prefixes remain the V1 values;
+deterministic identities and child spans are V2 storage metadata rather than
+text-processing changes.
 
 ## 7. Post-successor launcher matrix
 

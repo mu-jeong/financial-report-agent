@@ -58,11 +58,15 @@ class NativeBuildError(RuntimeError):
     """Raised when a full-corpus candidate cannot be proved complete."""
 
 
+class NativeSourceExtractionError(NativeBuildError):
+    """Raised when a source PDF cannot be parsed by the declared engine policy."""
+
+
 _EXCLUSION_POLICY_VERSION = "native-full-corpus-v1"
 _SOURCE_DELETED = "source-deleted"
 _SOURCE_SUPERSEDED = "source-superseded"
 _SNAPSHOT_LINEAGE_TRAILER = b"FINANCE_LLM_V2_SNAPSHOT\0"
-_V1_FALLBACK_ENGINE = "pymupdf-fallback"
+_DEFAULT_FALLBACK_ENGINE = "pymupdf"
 
 
 class EmbeddingsPort(Protocol):
@@ -184,6 +188,7 @@ def prepare_full_corpus_build(
     extractor_name: str,
     parent_chunk_size: int,
     child_chunk_size: int,
+    fallback_extractor_name: str | None = None,
     use_parent_child: bool = True,
     single_chunk_size: int | None = None,
     data_root: str | Path | None = None,
@@ -259,11 +264,20 @@ def prepare_full_corpus_build(
         extractor_name,
         allow_custom=extractor is not None,
     )
+    canonical_fallback_name = _canonical_fallback_extractor_name(
+        fallback_extractor_name,
+        requested_engine=canonical_extractor_name,
+        allow_custom=extractor is not None,
+    )
+    effective_allow_fallback = (
+        allow_extraction_fallback and canonical_fallback_name is not None
+    )
     extractor_port = extractor or (
         lambda path, engine: _default_extractor(
             path,
             engine,
-            allow_fallback=allow_extraction_fallback,
+            allow_fallback=effective_allow_fallback,
+            fallback_engine=canonical_fallback_name,
         )
     )
 
@@ -343,7 +357,8 @@ def prepare_full_corpus_build(
             model=model,
             extractor_name=canonical_extractor_name,
             extractor=extractor_port,
-            allow_extraction_fallback=allow_extraction_fallback,
+            fallback_extractor_name=canonical_fallback_name,
+            allow_extraction_fallback=effective_allow_fallback,
             parent_chunk_size=parent_chunk_size,
             child_chunk_size=child_chunk_size,
             use_parent_child=use_parent_child,
@@ -370,7 +385,8 @@ def prepare_full_corpus_build(
                 record["path"],
                 canonical_extractor_name,
                 extractor_port,
-                allow_fallback=allow_extraction_fallback,
+                allow_fallback=effective_allow_fallback,
+                fallback_engine=canonical_fallback_name,
             ),
         )
         for record in source_records
@@ -434,9 +450,11 @@ def prepare_full_corpus_build(
         metric=metric,
         normalization=normalization,
         prefix_template=prefix_template,
-        extractor=_v1_extraction_profile(
+        extractor=format_extraction_profile(
             canonical_extractor_name,
-            allow_fallback=allow_extraction_fallback,
+            allow_fallback=effective_allow_fallback,
+            fallback_engine=canonical_fallback_name,
+            allow_custom=extractor is not None,
         ),
         parent_policy=parent_policy,
         child_policy=child_policy,
@@ -546,6 +564,7 @@ def _prepare_incremental_plan(
     model: str,
     extractor_name: str,
     extractor: ExtractorPort,
+    fallback_extractor_name: str | None,
     allow_extraction_fallback: bool,
     parent_chunk_size: int,
     child_chunk_size: int,
@@ -575,6 +594,7 @@ def _prepare_incremental_plan(
         reusable.profile,
         model=model,
         extractor_name=extractor_name,
+        fallback_extractor_name=fallback_extractor_name,
         allow_extraction_fallback=allow_extraction_fallback,
         parent_chunk_size=parent_chunk_size,
         child_chunk_size=child_chunk_size,
@@ -603,6 +623,7 @@ def _prepare_incremental_plan(
                 extractor_name,
                 extractor,
                 allow_fallback=allow_extraction_fallback,
+                fallback_engine=fallback_extractor_name,
             ),
         )
         for record in changed_records
@@ -1507,6 +1528,7 @@ def _validate_incremental_profile(
     *,
     model: str,
     extractor_name: str,
+    fallback_extractor_name: str | None,
     allow_extraction_fallback: bool,
     parent_chunk_size: int,
     child_chunk_size: int,
@@ -1525,16 +1547,26 @@ def _validate_incremental_profile(
         raise NativeBuildError(
             "incremental writer configuration differs from the active embedding profile"
         )
+    configured_profile = format_extraction_profile(
+        extractor_name,
+        allow_fallback=allow_extraction_fallback,
+        fallback_engine=fallback_extractor_name,
+        allow_custom=True,
+    )
     accepted_extractors = {
-        f"legacy-v1-import|configured={extractor_name}|unattested",
-        _v1_extraction_profile(
+        configured_profile,
+        format_legacy_import_extraction_profile(
             extractor_name,
             allow_fallback=allow_extraction_fallback,
+            fallback_engine=fallback_extractor_name,
+            allow_custom=True,
         ),
     }
     if profile.extractor not in accepted_extractors:
         raise NativeBuildError(
-            "incremental extractor differs from the active embedding profile"
+            "incremental extractor differs from the active embedding profile: "
+            f"active={profile.extractor}, requested={configured_profile}; "
+            "an extraction-policy change requires a full-corpus successor"
         )
 
     def policy_size(policy: Mapping[str, Any]) -> int | None:
@@ -1708,7 +1740,10 @@ def _default_extractor(
     engine: str,
     *,
     allow_fallback: bool = True,
+    fallback_engine: str | None = _DEFAULT_FALLBACK_ENGINE,
 ) -> Any:
+    """Extract with the explicit policy; ``None`` retains legacy PyMuPDF fallback."""
+
     from src.core.pdf_extraction import extract_pdf_text
 
     return extract_pdf_text(
@@ -1716,6 +1751,7 @@ def _default_extractor(
         engine,
         clean=True,
         allow_fallback=allow_fallback,
+        fallback_engine=fallback_engine,
     )
 
 
@@ -1730,17 +1766,85 @@ def _canonical_extractor_name(engine: str, *, allow_custom: bool) -> str:
         normalized = str(engine or "").strip().lower()
         if not normalized:
             raise NativeBuildError("custom extraction engine name cannot be empty") from exc
+        if "|" in normalized:
+            raise NativeBuildError(
+                "custom extraction engine name cannot contain policy delimiters"
+            ) from exc
         return normalized
 
 
-def _v1_extraction_profile(engine: str, *, allow_fallback: bool = True) -> str:
-    """Fingerprint the legacy extraction policy without changing its behavior."""
+def _canonical_fallback_extractor_name(
+    engine: str | None,
+    *,
+    requested_engine: str,
+    allow_custom: bool,
+) -> str | None:
+    raw = _DEFAULT_FALLBACK_ENGINE if engine is None else str(engine or "").strip()
+    if not raw:
+        return None
+    normalized = _canonical_extractor_name(raw, allow_custom=allow_custom)
+    return None if normalized == requested_engine else normalized
 
-    return (
-        f"{engine}|fallback=pymupdf"
-        if allow_fallback and engine != "pymupdf"
-        else engine
+
+def format_extraction_profile(
+    engine: str,
+    *,
+    allow_fallback: bool = True,
+    fallback_engine: str | None = _DEFAULT_FALLBACK_ENGINE,
+    allow_custom: bool = False,
+) -> str:
+    """Return the canonical fingerprint for a declared extraction policy."""
+
+    primary = _canonical_extractor_name(engine, allow_custom=allow_custom)
+    fallback_raw = str(fallback_engine or "").strip()
+    if not allow_fallback or not fallback_raw:
+        return primary
+    fallback = _canonical_extractor_name(fallback_raw, allow_custom=allow_custom)
+    if fallback == primary:
+        raise NativeBuildError("extraction fallback must differ from primary")
+    return f"{primary}|fallback={fallback}"
+
+
+def format_legacy_import_extraction_profile(
+    engine: str,
+    *,
+    allow_fallback: bool,
+    fallback_engine: str | None,
+    allow_custom: bool = False,
+) -> str:
+    """Fingerprint the exact policy permitted for post-migration writes."""
+
+    configured = format_extraction_profile(
+        engine,
+        allow_fallback=allow_fallback,
+        fallback_engine=fallback_engine,
+        allow_custom=allow_custom,
     )
+    return f"legacy-v1-import|configured={configured}|unattested"
+
+
+def parse_extraction_profile(
+    profile: str,
+    *,
+    allow_custom: bool,
+) -> tuple[str, str | None]:
+    """Parse and canonicalize one persisted non-migration extraction policy."""
+
+    raw = str(profile or "").strip().lower()
+    primary_raw, separator, fallback_raw = raw.partition("|fallback=")
+    if not primary_raw or "|" in primary_raw:
+        raise NativeBuildError("extractor profile has an unsupported policy")
+    if not separator and "|" in raw:
+        raise NativeBuildError("extractor profile has an unsupported policy")
+    primary = _canonical_extractor_name(primary_raw, allow_custom=allow_custom)
+    if not separator:
+        return primary, None
+    if not fallback_raw or "|" in fallback_raw:
+        raise NativeBuildError("extractor profile has an unsupported fallback policy")
+    fallback = _canonical_extractor_name(fallback_raw, allow_custom=allow_custom)
+    if fallback == primary:
+        raise NativeBuildError("extraction fallback must differ from primary")
+    return primary, fallback
 
 
 def _extract_source(
@@ -1749,11 +1853,14 @@ def _extract_source(
     extractor: ExtractorPort,
     *,
     allow_fallback: bool = True,
+    fallback_engine: str | None = _DEFAULT_FALLBACK_ENGINE,
 ) -> str:
     try:
         result = extractor(path, expected_engine)
     except Exception as exc:
-        raise NativeBuildError(f"source extraction failed for {path.name}: {exc}") from exc
+        raise NativeSourceExtractionError(
+            f"source extraction failed for {path.name}: {exc}"
+        ) from exc
     if isinstance(result, str):
         text = result
         used_engine = expected_engine
@@ -1765,14 +1872,16 @@ def _extract_source(
                 f"structured extractor result must report the engine used for {path.name}"
             )
     allowed_engines = {expected_engine}
-    if allow_fallback and expected_engine != "pymupdf":
-        allowed_engines.add(_V1_FALLBACK_ENGINE)
+    if allow_fallback and fallback_engine and expected_engine != fallback_engine:
+        allowed_engines.add(f"{fallback_engine}-fallback")
     if used_engine not in allowed_engines:
         raise NativeBuildError(
             f"extractor used an undeclared engine for {path.name}: {used_engine}"
         )
     if not isinstance(text, str) or not text.strip():
-        raise NativeBuildError(f"source extraction produced empty text: {path.name}")
+        raise NativeSourceExtractionError(
+            f"source extraction produced empty text: {path.name}"
+        )
     return text
 
 
@@ -2372,6 +2481,7 @@ def _sha256_file(path: Path) -> str:
 __all__ = [
     "CandidateResult",
     "NativeBuildError",
+    "NativeSourceExtractionError",
     "NativeBuildPlan",
     "SourceFileSnapshot",
     "execute_full_corpus_successor",

@@ -20,12 +20,13 @@ Finance LLM은 PDF에서 텍스트 또는 Markdown을 추출하기 위해 여러
 
 ```env
 PDF_EXTRACTION_ENGINE=pymupdf
+PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader
 
 # 미임베딩 문서에 사용할 엔진입니다. 빈 값이면 PDF_EXTRACTION_ENGINE을 그대로 씁니다.
 UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 ```
 
-기본값과 설명은 `src/configs/settings.py`에 정의되어 있고, 실제 실행값은 `src/configs/config.py`를 통해 로드됩니다. 기존 `.env`의 `EXTRACTION_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 계속 동작합니다. `marker`, `opendataloader`, `docling`, `pdf-to-markdown`는 선택형 엔진이므로 로컬 런타임 요구사항을 확인한 뒤 사용하세요.
+런타임 기본값과 배포 템플릿 값은 `src/configs/settings.py`에 정의되어 있고, 실제 실행값은 `src/configs/config.py`를 통해 로드됩니다. 배포 템플릿은 OpenDataLoader fallback을 명시하지만 새 키가 없는 기존 `.env`는 fallback을 사용하지 않습니다. 기존 `EXTRACTION_ENGINE`, `EXTRACTION_FALLBACK_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 계속 동작합니다. `marker`, `opendataloader`, `docling`, `pdf-to-markdown`는 선택형 엔진이므로 로컬 런타임 요구사항을 확인한 뒤 사용하세요.
 
 ## 표 제거 계약
 
@@ -51,7 +52,7 @@ UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 6. OpenRouter 임베딩 모델로 벡터 생성
 7. V1은 SQLite parent와 mutable `data/vector_db`를 갱신하고, V2는 신규·변경 문서만 처리해 unchanged vector를 재사용한 완전한 immutable snapshot/catalog successor를 게시
 
-현재 production embedding은 신규·미임베딩 문서를 `pymupdf`로 처리하며, PyMuPDF 실패 이력에 따라 OpenDataLoader로 자동 전환하지 않습니다. DB 기반 실패 이력과 재시도 정책은 별도 TODO로 관리합니다. 서로 다른 `UNEMBEDDED_PDF_EXTRACTION_ENGINE` override와 비교 CLI는 fallback하지 않으며, `pymupdf` 자체가 실패하거나 `allow_fallback=False`인 경우에는 오류로 기록됩니다.
+배포 템플릿의 production embedding은 신규·미임베딩 문서를 먼저 `pymupdf`로 처리하고, 실패하면 명시된 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`로 한 번 재시도합니다. fallback도 실패하면 두 엔진의 오류를 함께 보존해 해당 문서를 실패로 기록합니다. 서로 다른 `UNEMBEDDED_PDF_EXTRACTION_ENGINE` override와 비교 CLI는 fallback하지 않습니다. fallback 설정을 누락·비우거나 `allow_fallback=False`로 호출해도 primary 오류를 그대로 기록합니다. Native V2는 active profile에 기록된 fallback과 설정이 다르면 incremental publication 전에 중단합니다.
 
 ## 엔진 비교 실행
 

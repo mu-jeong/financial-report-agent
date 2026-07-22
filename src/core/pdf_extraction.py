@@ -83,6 +83,7 @@ def extract_pdf_text(
     *,
     clean: bool = True,
     allow_fallback: bool = True,
+    fallback_engine: str | None = None,
 ) -> ExtractionResult:
     """
     Extract a PDF into the text contract consumed by the embedding pipeline.
@@ -103,16 +104,32 @@ def extract_pdf_text(
         used_engine = requested_engine
     except Exception as exc:
         logger.warning("  %s extraction failed: %s", requested_engine, exc)
-        if not allow_fallback or requested_engine == "pymupdf":
+        configured_fallback = (
+            fallback_engine
+            if fallback_engine is not None
+            else "pymupdf"
+        )
+        configured_fallback = str(configured_fallback or "").strip()
+        if not allow_fallback or not configured_fallback:
             raise
 
-        logger.warning("  Falling back to pymupdf extraction.")
-        text = _extract_pymupdf_text(path)
-        text = drop_markdown_tables(text)
-        if clean:
-            text = clean_extracted_text(text)
-        _raise_if_empty(text, "pymupdf-fallback")
-        used_engine = "pymupdf-fallback"
+        normalized_fallback = normalize_engine(configured_fallback)
+        if normalized_fallback == requested_engine:
+            raise
+
+        logger.warning("  Falling back to %s extraction.", normalized_fallback)
+        try:
+            text = _extract_pdf_text(path, normalized_fallback)
+            text = drop_markdown_tables(text)
+            if clean:
+                text = clean_extracted_text(text)
+            used_engine = f"{normalized_fallback}-fallback"
+            _raise_if_empty(text, used_engine)
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                f"{requested_engine} extraction failed ({exc}); "
+                f"fallback {normalized_fallback} extraction failed ({fallback_exc})"
+            ) from fallback_exc
 
     return ExtractionResult(
         requested_engine=requested_engine,

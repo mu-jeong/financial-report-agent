@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
             embeddings=embeddings,
             model=config.EMBEDDING_MODEL,
             extractor_name=config.EXTRACTION_ENGINE,
+            fallback_extractor_name=config.EXTRACTION_FALLBACK_ENGINE,
             parent_chunk_size=config.PARENT_CHUNK_SIZE,
             child_chunk_size=config.CHILD_CHUNK_SIZE,
             metric="l2",

@@ -2,6 +2,8 @@ import json
 import sys
 import types
 
+import pytest
+
 from src.core import compare_pdf_extractors
 from src.core.compare_pdf_extractors import build_metrics, run_pdf_extraction_comparison, summarize
 from src.core.pdf_extraction import (
@@ -370,6 +372,130 @@ def test_extract_pdf_text_drops_tables_even_for_raw_comparison_path(tmp_path, mo
 
     assert result.text == "Before\n\nAfter"
     assert "table value" not in result.text
+
+
+def test_extract_pdf_text_falls_back_from_pymupdf_to_configured_engine(
+    tmp_path,
+    monkeypatch,
+):
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    calls = []
+
+    def fake_extract(path, engine):
+        calls.append((path, engine))
+        if engine == "pymupdf":
+            raise RuntimeError("primary failed")
+        return "유효한 fallback 본문입니다."
+
+    monkeypatch.setattr(pdf_extraction, "_extract_pdf_text", fake_extract)
+
+    result = pdf_extraction.extract_pdf_text(
+        pdf_path,
+        "pymupdf",
+        fallback_engine="opendataloader",
+    )
+
+    assert calls == [
+        (pdf_path, "pymupdf"),
+        (pdf_path, "opendataloader"),
+    ]
+    assert result.requested_engine == "pymupdf"
+    assert result.used_engine == "opendataloader-fallback"
+    assert result.text == "유효한 fallback 본문입니다."
+
+
+def test_extract_pdf_text_does_not_call_fallback_when_pymupdf_succeeds(
+    tmp_path,
+    monkeypatch,
+):
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    calls = []
+
+    def fake_extract(path, engine):
+        calls.append((path, engine))
+        return "유효한 PyMuPDF 본문입니다."
+
+    monkeypatch.setattr(pdf_extraction, "_extract_pdf_text", fake_extract)
+
+    result = pdf_extraction.extract_pdf_text(
+        pdf_path,
+        "pymupdf",
+        fallback_engine="opendataloader",
+    )
+
+    assert calls == [(pdf_path, "pymupdf")]
+    assert result.used_engine == "pymupdf"
+
+
+def test_extract_pdf_text_preserves_primary_failure_when_fallback_is_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    calls = []
+
+    def fake_extract(path, engine):
+        calls.append((path, engine))
+        raise RuntimeError("primary failed")
+
+    monkeypatch.setattr(pdf_extraction, "_extract_pdf_text", fake_extract)
+
+    with pytest.raises(RuntimeError, match="primary failed"):
+        pdf_extraction.extract_pdf_text(
+            pdf_path,
+            "pymupdf",
+            allow_fallback=False,
+            fallback_engine="opendataloader",
+        )
+
+    assert calls == [(pdf_path, "pymupdf")]
+
+
+def test_extract_pdf_text_without_fallback_keyword_preserves_legacy_pymupdf_policy(
+    tmp_path,
+    monkeypatch,
+):
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    calls = []
+
+    def fake_extract(path, engine):
+        calls.append((path, engine))
+        if engine == "marker":
+            raise RuntimeError("marker failed")
+        return "legacy fallback text"
+
+    monkeypatch.setattr(pdf_extraction.config, "EXTRACTION_FALLBACK_ENGINE", "opendataloader")
+    monkeypatch.setattr(pdf_extraction, "_extract_pdf_text", fake_extract)
+
+    result = pdf_extraction.extract_pdf_text(pdf_path, "marker")
+
+    assert calls == [(pdf_path, "marker"), (pdf_path, "pymupdf")]
+    assert result.used_engine == "pymupdf-fallback"
+
+
+def test_extract_pdf_text_dual_failure_reports_both_engines(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    def fail_extract(_path, engine):
+        raise RuntimeError(f"{engine} failed")
+
+    monkeypatch.setattr(pdf_extraction, "_extract_pdf_text", fail_extract)
+
+    with pytest.raises(RuntimeError) as raised:
+        pdf_extraction.extract_pdf_text(
+            pdf_path,
+            "pymupdf",
+            fallback_engine="opendataloader",
+        )
+
+    message = str(raised.value)
+    assert "pymupdf extraction failed (pymupdf failed)" in message
+    assert "fallback opendataloader extraction failed (opendataloader failed)" in message
 
 
 def test_run_pdf_extraction_comparison_persists_artifacts(tmp_path, monkeypatch):

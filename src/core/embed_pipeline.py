@@ -41,6 +41,10 @@ from src.retrieval.update_lock import RetrievalUpdateLock
 logger = config.get_logger(__name__)
 
 
+class PdfExtractionError(ValueError):
+    """Raised when the declared primary and fallback PDF extractors fail."""
+
+
 def extract_pdf_text(*args, **kwargs):
     """Load the extractor only after the central runtime guard has run."""
 
@@ -61,6 +65,27 @@ def unembedded_extraction_engine() -> str:
     """Return the PDF extractor for pending/unembedded embedding jobs."""
     override = str(getattr(config, "UNEMBEDDED_EXTRACTION_ENGINE", "") or "").strip()
     return override or config.EXTRACTION_ENGINE
+
+
+def extraction_fallback_engine() -> str:
+    """Return the fallback used only after the primary PDF extractor fails."""
+
+    return str(getattr(config, "EXTRACTION_FALLBACK_ENGINE", "") or "").strip()
+
+
+def _validate_extraction_policy(
+    primary_engine: str,
+    fallback_engine: str,
+    *,
+    allow_fallback: bool,
+) -> None:
+    """Reject invalid global extractor configuration before parsing a PDF."""
+
+    from src.core.pdf_extraction import normalize_engine
+
+    normalize_engine(primary_engine)
+    if allow_fallback and fallback_engine:
+        normalize_engine(fallback_engine)
 
 
 def sync_report_pdf_dir_env(pdf_dir: str | os.PathLike = config.SAVE_DIR) -> None:
@@ -94,18 +119,27 @@ def node_extract_pdf(state: dict) -> dict:
     file_name = state["file_name"]
     pdf_path = os.path.join(config.SAVE_DIR, file_name)
     extraction_engine = state.get("extraction_engine") or unembedded_extraction_engine()
+    fallback_engine = extraction_fallback_engine()
 
     allow_fallback = extraction_engine == config.EXTRACTION_ENGINE
+    _validate_extraction_policy(
+        extraction_engine,
+        fallback_engine,
+        allow_fallback=allow_fallback,
+    )
     try:
         result = extract_pdf_text(
             pdf_path,
             extraction_engine,
             clean=True,
             allow_fallback=allow_fallback,
+            fallback_engine=fallback_engine,
         )
     except Exception as exc:
         logger.error(f"  PDF extraction failed: {exc}")
-        raise ValueError(f"Could not extract text from PDF: {file_name}") from exc
+        raise PdfExtractionError(
+            f"Could not extract text from PDF {file_name}: {type(exc).__name__}: {exc}"
+        ) from exc
 
     raw_text = result.text
     if result.used_engine != result.requested_engine:
@@ -282,23 +316,38 @@ def build_embeddings_fn():
     return build_embeddings_model()
 
 
-def run_pipeline(test_limit: int = config.TEST_LIMIT) -> int:
+def run_pipeline(
+    test_limit: int = config.TEST_LIMIT,
+    *,
+    continue_on_extraction_error: bool = False,
+) -> int:
     """Run one supported update while holding the V1/V2 cutover fence."""
 
     with RetrievalUpdateLock(Path(config.DB_PATH).parent):
-        return _run_pipeline_locked(test_limit)
+        return _run_pipeline_locked(
+            test_limit,
+            continue_on_extraction_error=continue_on_extraction_error,
+        )
 
 
-def _run_pipeline_locked(test_limit: int = config.TEST_LIMIT) -> int:
+def _run_pipeline_locked(
+    test_limit: int = config.TEST_LIMIT,
+    *,
+    continue_on_extraction_error: bool = False,
+) -> int:
     """Run the embedding pipeline for pending reports. Return process-style exit code."""
     runtime = guard_before_retrieval_write(
         config.DB_PATH,
         allow_degraded_forward_recovery=True,
     )
     if runtime.is_native:
-        from src.retrieval.build_service import execute_incremental_update
+        from src.retrieval.build_service import (
+            NativeSourceExtractionError,
+            execute_incremental_update,
+        )
 
         extraction_engine = unembedded_extraction_engine()
+        fallback_engine = extraction_fallback_engine()
         allow_extraction_fallback = extraction_engine == config.EXTRACTION_ENGINE
         print("=" * 60)
         print("  Finance LLM Native V2 Incremental Update")
@@ -313,6 +362,7 @@ def _run_pipeline_locked(test_limit: int = config.TEST_LIMIT) -> int:
                 embeddings=build_embeddings_fn(),
                 model=config.EMBEDDING_MODEL,
                 extractor_name=extraction_engine,
+                fallback_extractor_name=fallback_engine,
                 allow_extraction_fallback=allow_extraction_fallback,
                 use_parent_child=config.USE_PARENT_CHILD,
                 single_chunk_size=config.CHUNK_SIZE,
@@ -321,6 +371,20 @@ def _run_pipeline_locked(test_limit: int = config.TEST_LIMIT) -> int:
                 metric="l2",
                 normalization="none",
             )
+        except NativeSourceExtractionError as exc:
+            if continue_on_extraction_error:
+                logger.warning(
+                    "Native V2 PDF parsing failed; keeping the current snapshot and "
+                    "continuing Quick Start: %s",
+                    exc,
+                )
+                return 0
+            logger.error(
+                "Native V2 incremental update failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return 1
         except Exception as exc:
             logger.error(f"Native V2 incremental update failed: {type(exc).__name__}: {exc}")
             return 1
@@ -354,7 +418,7 @@ def _run_pipeline_locked(test_limit: int = config.TEST_LIMIT) -> int:
 
     embeddings_fn = build_embeddings_fn()
 
-    success, failed = 0, 0
+    success, failed, extraction_failed = 0, 0, 0
 
     for idx, row in enumerate(targets, 1):
         file_name = row["file_name"]
@@ -398,6 +462,8 @@ def _run_pipeline_locked(test_limit: int = config.TEST_LIMIT) -> int:
                 extraction_engine=state.get("extraction_engine") or unembedded_extraction_engine(),
             )
             failed += 1
+            if isinstance(exc, PdfExtractionError):
+                extraction_failed += 1
 
         if idx < len(targets):
             print()
@@ -417,7 +483,15 @@ def _run_pipeline_locked(test_limit: int = config.TEST_LIMIT) -> int:
     print(f"  FAISS index size: {faiss_size / 1024:.1f} KB")
     print(f"  Saved at: {os.path.abspath(config.FAISS_DIR)}/")
     print("=" * 60)
-    return 1 if failed else 0
+    if continue_on_extraction_error and extraction_failed:
+        logger.warning(
+            "Quick Start is continuing after %s PDF parsing failure(s).",
+            extraction_failed,
+        )
+    fatal_failures = failed - extraction_failed
+    if fatal_failures or (extraction_failed and not continue_on_extraction_error):
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -436,8 +510,21 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Process every pending file. Equivalent to --limit 0.",
     )
+    parser.add_argument(
+        "--continue-on-extraction-error",
+        action="store_true",
+        help=(
+            "Keep the current searchable data and return success when individual "
+            "PDF parsing fails. Intended for Quick Start."
+        ),
+    )
     args = parser.parse_args(argv)
-    raise SystemExit(run_pipeline(test_limit=0 if args.all else args.limit))
+    raise SystemExit(
+        run_pipeline(
+            test_limit=0 if args.all else args.limit,
+            continue_on_extraction_error=args.continue_on_extraction_error,
+        )
+    )
 
 
 if __name__ == "__main__":

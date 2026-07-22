@@ -45,15 +45,14 @@ def _installation(tmp_path: Path) -> tuple[UserMigrationSettings, dict[str, str]
     for file_name in ("a.pdf", "b.pdf"):
         (source_dir / file_name).write_bytes(f"pdf:{file_name}".encode("utf-8"))
 
-    profile = _profile()
     settings = UserMigrationSettings(
         install_root=install_root,
         data_root=data_root,
         db_path=data_root / "reports.db",
         faiss_dir=data_root / "vector_db",
         source_dir=source_dir,
-        model=profile.model,
-        extractor=profile.extractor,
+        model=_profile().model,
+        extractor="pymupdf",
         parent_chunk_size=2000,
         child_chunk_size=500,
         single_chunk_size=1500,
@@ -131,6 +130,50 @@ def test_one_click_migration_preserves_v1_and_activates_converted_seed(
     ) as connection:
         assert connection.execute("SELECT COUNT(*) FROM vector_snapshots").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM retrieval_builds").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT extractor FROM embedding_profiles"
+        ).fetchone() == (
+            "legacy-v1-import|configured=pymupdf|unattested",
+        )
+
+
+def test_migration_profile_records_configured_fallback_policy(tmp_path: Path) -> None:
+    settings, _original_hashes = _installation(tmp_path)
+    settings = replace(
+        settings,
+        extractor="pymupdf",
+        fallback_extractor="opendataloader",
+    )
+
+    profile = migration_module._embedding_profile(settings, dimension=3, metric="l2")
+
+    assert profile.extractor == (
+        "legacy-v1-import|configured="
+        "pymupdf|fallback=opendataloader|unattested"
+    )
+
+
+def test_cli_settings_only_carry_fallback_for_the_primary_extractor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.configs import config
+
+    monkeypatch.setattr(config, "EXTRACTION_ENGINE", "pymupdf")
+    monkeypatch.setattr(config, "EXTRACTION_FALLBACK_ENGINE", "opendataloader")
+    monkeypatch.setattr(config, "UNEMBEDDED_EXTRACTION_ENGINE", "")
+
+    primary = migration_module._settings_from_cli(tmp_path / "primary")
+
+    assert primary.extractor == "pymupdf"
+    assert primary.fallback_extractor == "opendataloader"
+
+    monkeypatch.setattr(config, "UNEMBEDDED_EXTRACTION_ENGINE", "marker")
+
+    override = migration_module._settings_from_cli(tmp_path / "override")
+
+    assert override.extractor == "marker"
+    assert override.fallback_extractor is None
 
 
 def test_canary_failure_never_activates_staged_retrieval(tmp_path: Path) -> None:

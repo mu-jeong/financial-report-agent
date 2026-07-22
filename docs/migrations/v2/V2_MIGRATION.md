@@ -819,8 +819,11 @@ fail closed는 가용성을 조금 희생할 수 있지만, 재무 문서 검색
 - V1 provenance가 완전하지 않아 same-space canary가 필요합니다.
 - 배포 템플릿은 PyMuPDF를 사용하지만, 기존 OpenDataLoader 기반 active V2 profile을
   PyMuPDF profile로 바꾸는 작업은 검증된 full-corpus successor가 필요합니다.
-- PyMuPDF 추출 실패 이력을 DB SSOT에 영구 기록하고, 실패 이력이 있는 문서만 다른
-  extractor로 재시도하는 정책은 아직 후속 과제입니다.
+- 새 migration은 명시된 fallback을 `legacy-v1-import|configured=<primary>|fallback=<fallback>|unattested`
+  profile에 기록합니다. 기존 active profile과 설정 정책이 다르면 incremental update는 fail closed하며
+  정책 변경은 full-corpus successor로만 수행합니다.
+- PyMuPDF가 현재 run에서 실패하면 profile에 기록된 OpenDataLoader fallback을 즉시 한 번 시도하지만,
+  추출 실패 이력과 fallback 사용 이력을 DB SSOT에 영구 기록하는 관측 기능은 후속 과제입니다.
 - epoch-zero compatibility bundle은 fallback이 닫혀도 retention 승인이 끝날 때까지
   보존합니다.
 - V2의 복구·publication 구조는 로컬 단일 writer를 전제로 합니다. 여러 장비가 동시에

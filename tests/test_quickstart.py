@@ -66,7 +66,13 @@ def test_prepare_data_runs_write_guard_before_crawler(monkeypatch):
 
     assert calls[0][0] == ["python", "-m", "src.retrieval.launcher_guard", "--write"]
     assert calls[1][0] == ["python", "-m", "src.core.report_crawler"]
-    assert calls[2][0] == ["python", "-m", "src.core.embed_pipeline", "--all"]
+    assert calls[2][0] == [
+        "python",
+        "-m",
+        "src.core.embed_pipeline",
+        "--all",
+        "--continue-on-extraction-error",
+    ]
 
 
 def test_progress_tracker_prints_step_progress(capsys):

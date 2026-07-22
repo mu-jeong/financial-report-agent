@@ -218,7 +218,13 @@ def prepare_data(progress: ProgressTracker | None = None) -> None:
         progress=progress,
     )
     run_command(
-        [str(VENV_PYTHON), "-m", "src.core.embed_pipeline", "--all"],
+        [
+            str(VENV_PYTHON),
+            "-m",
+            "src.core.embed_pipeline",
+            "--all",
+            "--continue-on-extraction-error",
+        ],
         description="수집된 전체 리포트 임베딩/검색 인덱스 생성",
         progress=progress,
     )

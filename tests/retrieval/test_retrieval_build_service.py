@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import pickle
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -186,6 +187,27 @@ def _native_seed(
     (sources / "a.pdf").write_bytes(current_a)
     (sources / "b.pdf").write_bytes(b"new-b")
     return data_root, sources
+
+
+def _activate_seed_for_incremental(data_root: Path) -> str:
+    selection = inspect_runtime(
+        data_root / "reports.db",
+        data_root=data_root,
+        validate_snapshot=True,
+    )
+    snapshot_id = selection.active_snapshot_id or ""
+    activate_epoch_zero_seed(
+        data_root,
+        snapshot_id=snapshot_id,
+        canary={
+            "sample_count": 2,
+            "dimension": 3,
+            "minimum_cosine_similarity": 1.0,
+            "maximum_norm_relative_error": 0.0,
+            "self_rank_one_count": 2,
+        },
+    )
+    return snapshot_id
 
 
 def _metadata(file_name: str):
@@ -425,6 +447,235 @@ def test_incremental_update_is_a_noop_without_source_changes(tmp_path: Path) -> 
         normalization="none",
     ) is None
     assert embeddings.calls == []
+
+
+def test_incremental_existing_profile_accepts_only_its_exact_fallback_policy(
+    tmp_path: Path,
+) -> None:
+    profile = replace(_migration_profile(), extractor="pymupdf")
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=profile,
+    )
+    active_snapshot_id = _activate_seed_for_incremental(data_root)
+    extracted: list[str] = []
+
+    def tracking_extract(path: Path, engine: str):
+        extracted.append(engine)
+        return SimpleNamespace(
+            text=_extract(path, "deterministic-extractor"),
+            used_engine=engine,
+        )
+
+    plan = prepare_incremental_build(
+        data_root / "reports.db",
+        sources,
+        data_root=data_root,
+        embeddings=DeterministicEmbeddings(),
+        model="model-a",
+        extractor_name="pymupdf",
+        fallback_extractor_name="",
+        extractor=tracking_extract,
+        metadata_parser=_metadata,
+        parent_chunk_size=2000,
+        child_chunk_size=500,
+    )
+
+    assert plan is not None
+    assert plan.profile.extractor == "pymupdf"
+    assert extracted == ["pymupdf"]
+    assert inspect_runtime(
+        data_root / "reports.db",
+        data_root=data_root,
+        validate_snapshot=True,
+    ).active_snapshot_id == active_snapshot_id
+
+
+def test_incremental_existing_profile_rejects_new_fallback_before_extraction(
+    tmp_path: Path,
+) -> None:
+    profile = replace(_migration_profile(), extractor="pymupdf")
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=profile,
+    )
+    active_snapshot_id = _activate_seed_for_incremental(data_root)
+    extracted: list[str] = []
+
+    with pytest.raises(NativeBuildError, match="incremental extractor differs"):
+        prepare_incremental_build(
+            data_root / "reports.db",
+            sources,
+            data_root=data_root,
+            embeddings=DeterministicEmbeddings(),
+            model="model-a",
+            extractor_name="pymupdf",
+            fallback_extractor_name="opendataloader",
+            extractor=lambda path, engine: extracted.append(engine) or _extract(
+                path,
+                "deterministic-extractor",
+            ),
+            metadata_parser=_metadata,
+            parent_chunk_size=2000,
+            child_chunk_size=500,
+        )
+
+    assert extracted == []
+    assert inspect_runtime(
+        data_root / "reports.db",
+        data_root=data_root,
+        validate_snapshot=True,
+    ).active_snapshot_id == active_snapshot_id
+
+
+def test_incremental_legacy_profile_rejects_unrecorded_fallback_before_extraction(
+    tmp_path: Path,
+) -> None:
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=_migration_profile(),
+    )
+    _activate_seed_for_incremental(data_root)
+    extracted: list[str] = []
+
+    with pytest.raises(NativeBuildError, match="incremental extractor differs"):
+        prepare_incremental_build(
+            data_root / "reports.db",
+            sources,
+            data_root=data_root,
+            embeddings=DeterministicEmbeddings(),
+            model="model-a",
+            extractor_name="deterministic-extractor",
+            fallback_extractor_name="opendataloader",
+            extractor=lambda path, engine: extracted.append(engine) or _extract(path, engine),
+            metadata_parser=_metadata,
+            parent_chunk_size=2000,
+            child_chunk_size=500,
+        )
+
+    assert extracted == []
+
+
+def test_incremental_legacy_profile_accepts_its_recorded_fallback(
+    tmp_path: Path,
+) -> None:
+    profile = replace(
+        _migration_profile(),
+        extractor=(
+            "legacy-v1-import|configured="
+            "pymupdf|fallback=opendataloader|unattested"
+        ),
+    )
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=profile,
+    )
+    _activate_seed_for_incremental(data_root)
+
+    plan = prepare_incremental_build(
+        data_root / "reports.db",
+        sources,
+        data_root=data_root,
+        embeddings=DeterministicEmbeddings(),
+        model="model-a",
+        extractor_name="pymupdf",
+        fallback_extractor_name="opendataloader",
+        extractor=lambda path, _engine: SimpleNamespace(
+            text=_extract(path, "deterministic-extractor"),
+            used_engine="opendataloader-fallback",
+        ),
+        metadata_parser=_metadata,
+        parent_chunk_size=2000,
+        child_chunk_size=500,
+    )
+
+    assert plan is not None
+    assert plan.profile == profile
+
+
+def test_incremental_source_extraction_failure_leaves_active_catalog_unchanged(
+    tmp_path: Path,
+) -> None:
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=_migration_profile(),
+    )
+    _activate_seed_for_incremental(data_root)
+    catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
+
+    def catalog_state():
+        with sqlite3.connect(catalog) as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT active_snapshot_id, predecessor_snapshot_id,
+                           publication_generation, write_epoch
+                    FROM retrieval_runtime WHERE runtime_id = 1
+                    """
+                ).fetchone(),
+                connection.execute("SELECT COUNT(*) FROM retrieval_builds").fetchone()[0],
+                connection.execute("SELECT COUNT(*) FROM vector_snapshots").fetchone()[0],
+                connection.execute("SELECT COUNT(*) FROM active_reports").fetchone()[0],
+            )
+
+    before = catalog_state()
+
+    def fail_extract(_path: Path, _engine: str):
+        raise RuntimeError("both parsers failed")
+
+    with pytest.raises(build_service.NativeSourceExtractionError, match="b.pdf"):
+        execute_incremental_update(
+            data_root / "reports.db",
+            sources,
+            data_root=data_root,
+            embeddings=DeterministicEmbeddings(),
+            model="model-a",
+            extractor_name="deterministic-extractor",
+            fallback_extractor_name="",
+            allow_extraction_fallback=False,
+            extractor=fail_extract,
+            metadata_parser=_metadata,
+            parent_chunk_size=2000,
+            child_chunk_size=500,
+        )
+
+    assert catalog_state() == before
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        "",
+        "primary|fallback=",
+        "primary|fallback=primary",
+        "primary|fallback=secondary|extra",
+    ],
+)
+def test_extraction_profile_parser_rejects_ambiguous_policies(profile: str) -> None:
+    with pytest.raises(NativeBuildError):
+        build_service.parse_extraction_profile(profile, allow_custom=True)
+
+
+def test_extraction_profile_parser_round_trips_custom_policy() -> None:
+    profile = build_service.format_extraction_profile(
+        "custom-primary",
+        allow_fallback=True,
+        fallback_engine="custom-fallback",
+        allow_custom=True,
+    )
+
+    assert profile == "custom-primary|fallback=custom-fallback"
+    assert build_service.parse_extraction_profile(
+        profile,
+        allow_custom=True,
+    ) == ("custom-primary", "custom-fallback")
+    with pytest.raises(NativeBuildError, match="invalid extraction engine"):
+        build_service.parse_extraction_profile(profile, allow_custom=False)
 
 
 def test_build_mutation_boundaries_reject_duck_typed_writer_leases(
@@ -687,6 +938,25 @@ def test_structured_extractor_result_accepts_v1_fallback_engine(tmp_path: Path):
     assert plan.profile.extractor == "deterministic-extractor|fallback=pymupdf"
 
 
+def test_structured_extractor_result_accepts_configured_fallback_engine(tmp_path: Path):
+    data_root, sources = _native_seed(tmp_path)
+
+    plan = _prepare(
+        data_root,
+        sources,
+        DeterministicEmbeddings(),
+        extractor_name="pymupdf",
+        fallback_extractor_name="opendataloader",
+        extractor=lambda path, engine: SimpleNamespace(
+            text=_extract(path, "deterministic-extractor"),
+            used_engine="opendataloader-fallback",
+        ),
+    )
+
+    assert len(plan.reports) == 2
+    assert plan.profile.extractor == "pymupdf|fallback=opendataloader"
+
+
 def test_structured_extractor_result_rejects_undeclared_engine(tmp_path: Path):
     data_root, sources = _native_seed(tmp_path)
 
@@ -710,12 +980,20 @@ def test_default_extractor_reuses_v1_fallback_policy(
     source.write_bytes(b"%PDF")
     captured = {}
 
-    def fake_extract_pdf_text(path, engine, *, clean, allow_fallback):
+    def fake_extract_pdf_text(
+        path,
+        engine,
+        *,
+        clean,
+        allow_fallback,
+        fallback_engine,
+    ):
         captured.update(
             path=path,
             engine=engine,
             clean=clean,
             allow_fallback=allow_fallback,
+            fallback_engine=fallback_engine,
         )
         return ExtractionResult(
             requested_engine=engine,
@@ -732,6 +1010,7 @@ def test_default_extractor_reuses_v1_fallback_policy(
         "engine": "opendataloader",
         "clean": True,
         "allow_fallback": True,
+        "fallback_engine": "pymupdf",
     }
     assert result.used_engine == "pymupdf-fallback"
 
@@ -784,8 +1063,16 @@ def test_default_extractor_can_disable_v1_fallback(
     source.write_bytes(b"%PDF")
     captured = {}
 
-    def fake_extract_pdf_text(path, engine, *, clean, allow_fallback):
+    def fake_extract_pdf_text(
+        path,
+        engine,
+        *,
+        clean,
+        allow_fallback,
+        fallback_engine,
+    ):
         captured["allow_fallback"] = allow_fallback
+        captured["fallback_engine"] = fallback_engine
         return ExtractionResult(
             requested_engine=engine,
             used_engine=engine,
@@ -801,6 +1088,7 @@ def test_default_extractor_can_disable_v1_fallback(
     )
 
     assert captured["allow_fallback"] is False
+    assert captured["fallback_engine"] == "pymupdf"
 
 
 def test_prepare_preserves_v1_single_level_chunking_policy(tmp_path: Path):

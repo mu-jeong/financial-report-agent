@@ -67,9 +67,10 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | `CHUNK_SIZE` | parent-child 미사용 시 fallback/general chunk 크기 |
 | `CHUNK_OVERLAP` | fallback/general chunk overlap |
 | `PDF_EXTRACTION_ENGINE` | 일반 임베딩 run의 PDF 파싱/추출 엔진. `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 선택. 기존 `EXTRACTION_ENGINE`도 alias로 동작 |
+| `PDF_EXTRACTION_FALLBACK_ENGINE` | primary 엔진이 실패했을 때 한 번 재시도할 엔진. 배포 템플릿은 `opendataloader`를 명시하며, 키가 없거나 빈 값이면 비활성화. 기존 `EXTRACTION_FALLBACK_ENGINE`도 alias로 동작 |
 | `UNEMBEDDED_PDF_EXTRACTION_ENGINE` | 미임베딩 문서에 사용할 PDF 파싱 엔진. 배포 템플릿은 `pymupdf`를 사용하며, 빈 값이면 `PDF_EXTRACTION_ENGINE`을 사용. 기존 `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 동작 |
 
-배포 템플릿은 일반 문서와 미임베딩 문서를 모두 `pymupdf`로 추출하므로 Java 런타임이 필요하지 않습니다. `opendataloader`를 명시적으로 선택할 때는 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 서로 다른 `UNEMBEDDED_PDF_EXTRACTION_ENGINE` override는 자동 fallback 없이 해당 엔진을 사용합니다.
+배포 템플릿은 일반 문서와 미임베딩 문서를 먼저 `pymupdf`로 추출하고 `opendataloader` fallback을 명시합니다. 이를 실행하려면 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 새 fallback 키가 없는 기존 `.env`는 자동으로 정책을 바꾸지 않으며, 서로 다른 `UNEMBEDDED_PDF_EXTRACTION_ENGINE` override도 fallback 없이 해당 엔진만 사용합니다.
 
 ## 크롤러 설정
 

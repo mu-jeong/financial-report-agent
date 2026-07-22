@@ -62,6 +62,7 @@ class ConfigSpec:
     env_example: str | None = None
     include_in_env_example: bool = True
     env_aliases: tuple[str, ...] = ()
+    use_default_when_blank: bool = True
 
     def default_value(self) -> Any:
         return self.default() if callable(self.default) else self.default
@@ -310,6 +311,23 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
             ),
         ),
         (
+            "PDF_EXTRACTION_FALLBACK_ENGINE",
+            ConfigSpec(
+                name="PDF_EXTRACTION_FALLBACK_ENGINE",
+                default="",
+                parser=as_lower_str,
+                description=(
+                    "Fallback PDF parsing/extraction engine used only when "
+                    "PDF_EXTRACTION_ENGINE fails. Set empty to disable fallback. "
+                    "Legacy env alias: EXTRACTION_FALLBACK_ENGINE."
+                ),
+                section="Embedding",
+                env_example="opendataloader",
+                env_aliases=("EXTRACTION_FALLBACK_ENGINE",),
+                use_default_when_blank=False,
+            ),
+        ),
+        (
             "UNEMBEDDED_PDF_EXTRACTION_ENGINE",
             ConfigSpec(
                 name="UNEMBEDDED_PDF_EXTRACTION_ENGINE",
@@ -488,7 +506,7 @@ def get_config_value(name: str, environ: dict[str, str] | None = None) -> Any:
             raw = env.get(alias)
             if raw is not None:
                 break
-    if raw is None or raw.strip() == "":
+    if raw is None or (raw.strip() == "" and spec.use_default_when_blank):
         return spec.default_value()
     return spec.parser(raw)
 

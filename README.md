@@ -15,6 +15,8 @@ Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면
 
 Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법과 `RUN_APP.bat` 사용 구분은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
 
+일부 PDF가 PyMuPDF와 OpenDataLoader에서 모두 파싱되지 않아도 Quick Start는 실패 파일을 기록하고 기존 검색 데이터를 유지한 채 앱 실행까지 계속합니다.
+
 기존 V1 검색 데이터가 있다면 `MIGRATE_V2.bat`을 더블클릭해 백업·임베딩 공간 확인·GUI 실행 테스트를 거친 뒤, 기존 청크와 벡터를 그대로 사용하는 쓰기 가능한 V2로 안전하게 전환할 수 있습니다. 전체 PDF를 다시 파싱하거나 재임베딩하지 않으며, 전환 후에는 새 문서와 변경된 문서만 처리합니다. 설계 배경은 [V2 마이그레이션과 검색 아키텍처](docs/migrations/v2/V2_MIGRATION.md), 실행 절차는 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
 ---
@@ -75,10 +77,11 @@ RERANK_MODEL=cohere/rerank-v3.5
 SEARCH_TOP_K=20
 RECENCY_WEIGHT=0.15
 PDF_EXTRACTION_ENGINE=pymupdf
+PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader
 UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 ```
 
-배포 템플릿은 일반 문서와 미임베딩 문서를 모두 `pymupdf`로 추출합니다. 다른 추출기를 명시적으로 비교하거나 선택할 때만 해당 엔진의 추가 런타임 요구사항을 확인하세요.
+배포 템플릿은 일반 문서와 미임베딩 문서를 먼저 `pymupdf`로 추출하고, PyMuPDF가 실패한 문서만 `opendataloader`로 한 번 재시도합니다. fallback 실행에는 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 이 새 키가 없는 기존 `.env`와 빈 값은 fallback을 비활성화하므로, 사용하려면 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하세요.
 
 과거 로컬 측정에서는 약 2,000건의 리포트를 임베딩하는 데 약 **$0.05**가 들었습니다. 이 수치는 재현 가능한 비용 보장이 아니며 문서 길이, 청크 수, 호출량, 모델 가격에 따라 달라집니다.
 
@@ -208,7 +211,7 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## PDF 추출 엔진 비교
 
-`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있습니다. `pymupdf`가 기본값이고, `docling`과 `pdf-to-markdown`은 각각 별도 설치/CLI가 필요한 선택형 엔진입니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`은 미임베딩 문서에 적용할 엔진이며 배포 템플릿에서는 `pymupdf`를 사용합니다. 빈 값이면 `PDF_EXTRACTION_ENGINE`을 그대로 사용합니다. 기존 `EXTRACTION_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE` 환경변수도 alias로 동작합니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다.
+`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있으며 기본값은 `pymupdf`입니다. 배포용 `.env.example`은 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하지만, 이 키가 없거나 빈 값이면 fallback을 사용하지 않습니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`은 미임베딩 문서에 적용할 primary 엔진이며 배포 템플릿에서는 `pymupdf`를 사용합니다. 이 값이 primary와 다르면 명시적 override로 간주해 자동 fallback하지 않습니다. 기존 `EXTRACTION_ENGINE`, `EXTRACTION_FALLBACK_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE` 환경변수도 alias로 동작합니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다. Native V2 incremental update는 active profile에 기록된 primary/fallback 정책과 현재 설정이 정확히 같을 때만 실행되며, 정책 변경에는 검증된 full-corpus successor가 필요합니다.
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10
@@ -296,7 +299,8 @@ python -m pytest -q
 - [x] 데이터 준비 상태와 검색 가능 여부를 한눈에 파악할 수 있는 대시보드 방향을 잡습니다.
 - [x] 질문 처리 흐름을 추적해 검색 실패, 라우팅 오류, 답변 품질 저하 원인을 확인할 수 있게 합니다.
 - [ ] 기존 OpenDataLoader 기반 활성 V2 profile을 검증된 PyMuPDF full-corpus successor로 전환하고 snapshot 전환 증거를 남깁니다.
-- [ ] PyMuPDF 추출 실패 이력을 DB SSOT에 영구 기록하고, 한 번 이상 실패한 문서만 OpenDataLoader로 재시도하는 fallback 정책을 설계·구현합니다.
+- [x] PyMuPDF가 실패한 문서를 OpenDataLoader로 즉시 한 번 재시도하고 V2 profile에 fallback 정책을 기록합니다.
+- [ ] 추출 실패 이력을 DB SSOT에 영구 기록해 반복 실패 원인과 fallback 사용 추이를 관측할 수 있게 합니다.
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
 - [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.

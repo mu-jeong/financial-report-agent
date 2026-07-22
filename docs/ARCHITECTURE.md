@@ -54,7 +54,7 @@ Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 �
 1. `extract_pdf_text()`로 PDF 텍스트 또는 Markdown을 추출합니다.
    - 지원 엔진은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown`입니다.
    - 모든 엔진 출력은 색인 전에 표 제거 계약을 통과합니다. PyMuPDF는 `find_tables()` bbox를 제외하고, Marker는 table processor를 빼며, OpenDataLoader JSON table node와 Docling table structure는 비활성/제거합니다. 별도 off 옵션이 없는 CLI 출력은 공통 Markdown/HTML/plain-text table 제거 후처리를 거칩니다.
-   - `extract_pdf_text()` API 자체의 기본 fallback은 켜져 있지만 production embedding은 pending extractor가 primary extractor와 같을 때만 PyMuPDF fallback을 허용합니다.
+   - 배포 템플릿의 production embedding은 기본 `pymupdf`가 실패하면 명시된 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 한 번 시도합니다. 새 키가 없는 기존 설정, 빈 값, 또는 primary와 다른 pending extractor override는 자동 fallback하지 않습니다. Native V2 incremental build는 active embedding profile과 동일한 추출 정책만 재사용합니다.
 2. `MarkdownHeaderTextSplitter`와 `RecursiveCharacterTextSplitter`로 문서를 chunk로 나눕니다.
 3. V1은 parent를 `parent_chunks`, 검색 chunk를 mutable `data/vector_db`에 추가하고 `reports.is_embedded=1`을 기록합니다.
 4. V2는 신규·변경 문서만 처리하고 기존 불변 parent/chunk/vector를 재사용한 뒤 완전한 candidate catalog와 새 immutable FAISS snapshot을 검증·게시합니다. 삭제된 source는 provider 호출 없이 다음 complete snapshot에서 제외하고 변화가 없으면 publication을 만들지 않습니다.

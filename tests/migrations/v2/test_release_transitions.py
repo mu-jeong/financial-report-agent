@@ -106,7 +106,12 @@ def _write_query_spec(data_root: Path, target: Path) -> None:
 
 def test_release_transition_run_proves_recovery_lease_gc_and_gate_d(tmp_path: Path):
     data_root, sources = _native_seed(tmp_path)
-    plan = _prepare(data_root, sources, DeterministicEmbeddings())
+    plan = _prepare(
+        data_root,
+        sources,
+        DeterministicEmbeddings(),
+        fallback_extractor_name="deterministic-fallback",
+    )
     first = materialize_candidate(plan, data_root)
     published = publish_candidate(first, data_root)
     protected_root = tmp_path / "protected-copy"
@@ -170,6 +175,40 @@ def test_release_transition_run_proves_recovery_lease_gc_and_gate_d(tmp_path: Pa
         "gate_d_search_validated",
         "protected_root_revalidated",
     ]
+
+
+def test_custom_replay_profile_requires_extractor_before_snapshot_mutation(
+    tmp_path: Path,
+):
+    data_root, sources = _native_seed(tmp_path)
+    plan = _prepare(
+        data_root,
+        sources,
+        DeterministicEmbeddings(),
+        fallback_extractor_name="deterministic-fallback",
+    )
+    publish_candidate(materialize_candidate(plan, data_root), data_root)
+    protected_root = tmp_path / "protected-copy"
+    shutil.copytree(data_root, protected_root)
+    query_spec = tmp_path / "query.json"
+    _write_query_spec(data_root, query_spec)
+    selection = release_transitions._inspect(data_root)
+    snapshot_path = release_transitions._snapshot_path(
+        data_root,
+        selection.active_snapshot_id or "",
+    )
+    snapshot_sha256 = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+
+    with pytest.raises(ReleaseTransitionError, match="extractor profile"):
+        execute_release_transitions(
+            data_root,
+            protected_root,
+            sources,
+            query_spec,
+            metadata_parser=_metadata,
+        )
+
+    assert hashlib.sha256(snapshot_path.read_bytes()).hexdigest() == snapshot_sha256
 
 
 def test_transition_rejects_a_hardlinked_protected_snapshot_before_mutation(
