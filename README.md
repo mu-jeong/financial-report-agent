@@ -298,7 +298,7 @@ python -m pytest -q
 - [x] 일반 사용자 UX와 분리된 Monitoring Mode의 진입 방식과 노출 범위를 정합니다.
 - [x] 데이터 준비 상태와 검색 가능 여부를 한눈에 파악할 수 있는 대시보드 방향을 잡습니다.
 - [x] 질문 처리 흐름을 추적해 검색 실패, 라우팅 오류, 답변 품질 저하 원인을 확인할 수 있게 합니다.
-- [ ] 기존 OpenDataLoader 기반 활성 V2 profile을 검증된 PyMuPDF full-corpus successor로 전환하고 snapshot 전환 증거를 남깁니다.
+- [x] 기존 active V2 profile에 다른 추출 정책을 자동으로 섞지 않고, 정책 변경을 검증된 full-corpus successor 경계로 제한합니다.
 - [x] PyMuPDF가 실패한 문서를 OpenDataLoader로 즉시 한 번 재시도하고 V2 profile에 fallback 정책을 기록합니다.
 - [ ] 추출 실패 이력을 DB SSOT에 영구 기록해 반복 실패 원인과 fallback 사용 추이를 관측할 수 있게 합니다.
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.

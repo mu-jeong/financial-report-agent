@@ -817,11 +817,11 @@ fail closed는 가용성을 조금 희생할 수 있지만, 재무 문서 검색
 
 - 원클릭 마이그레이션은 표준 폴더 구조와 `USE_PARENT_CHILD=true`인 V1을 대상으로 합니다.
 - V1 provenance가 완전하지 않아 same-space canary가 필요합니다.
-- 배포 템플릿은 PyMuPDF를 사용하지만, 기존 OpenDataLoader 기반 active V2 profile을
-  PyMuPDF profile로 바꾸는 작업은 검증된 full-corpus successor가 필요합니다.
+- 기존 active V2 profile에는 다른 추출 정책을 자동으로 섞지 않습니다. 설정 정책이
+  active profile과 다르면 incremental update는 fail closed하며, 정책 변경은 검증된
+  full-corpus successor로만 수행합니다.
 - 새 migration은 명시된 fallback을 `legacy-v1-import|configured=<primary>|fallback=<fallback>|unattested`
-  profile에 기록합니다. 기존 active profile과 설정 정책이 다르면 incremental update는 fail closed하며
-  정책 변경은 full-corpus successor로만 수행합니다.
+  profile에 기록합니다.
 - PyMuPDF가 현재 run에서 실패하면 profile에 기록된 OpenDataLoader fallback을 즉시 한 번 시도하지만,
   추출 실패 이력과 fallback 사용 이력을 DB SSOT에 영구 기록하는 관측 기능은 후속 과제입니다.
 - epoch-zero compatibility bundle은 fallback이 닫혀도 retention 승인이 끝날 때까지
