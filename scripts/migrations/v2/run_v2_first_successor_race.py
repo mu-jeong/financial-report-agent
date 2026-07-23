@@ -17,16 +17,30 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 
 from src.retrieval.build_service import (
+    CandidateResult,
+    NativeBuildPlan,
     materialize_candidate,
     prepare_full_corpus_build,
+    publish_candidate,
 )
 from src.retrieval.identity import canonical_json
 from src.migrations.v2.validation.launcher_race import (
     capture_epoch_zero_installed_baseline,
     publish_candidate_with_launcher_race,
 )
+from src.retrieval.publication import PublicationOutcome
 from src.retrieval.recovery import RecoveryDisposition, StartupReconciler
-from src.retrieval.writer_lock import WriterLease
+from src.retrieval.writer_lock import NativeWriterLock, WriterLease
+
+
+class _EmbeddingCallCounter:
+    def __init__(self, delegate: Any):
+        self._delegate = delegate
+        self.calls = 0
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.calls += 1
+        return self._delegate.embed_documents(texts)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,9 +74,11 @@ def main(argv: list[str] | None = None) -> int:
         install_roots,
         process_timeout_seconds=args.timeout_seconds,
     )
-    embeddings = build_embeddings_fn()
+    embeddings = _EmbeddingCallCounter(build_embeddings_fn())
+    replay_plan: NativeBuildPlan | None = None
 
     def build_candidate(writer_lease: WriterLease):
+        nonlocal replay_plan
         recovery = StartupReconciler(data_root).reconcile(
             writer_lease=writer_lease,
         )
@@ -83,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
             allow_degraded_forward_recovery=True,
             writer_lease=writer_lease,
         )
+        if plan is None:
+            raise RuntimeError("first-successor planning produced no candidate")
+        replay_plan = plan
         return materialize_candidate(
             plan,
             data_root,
@@ -99,10 +118,19 @@ def main(argv: list[str] | None = None) -> int:
         process_timeout_seconds=args.timeout_seconds,
     )
     candidate = raced.candidate
+    if replay_plan is None:
+        raise RuntimeError("first-successor race did not retain its candidate plan")
+    replay = _replay_candidate(
+        replay_plan,
+        candidate,
+        raced.publication,
+        data_root,
+        embeddings,
+    )
 
     payload = {
         "schema_version": 1,
-        "kind": "v2_first_successor_execution",
+        "kind": "v2_first_successor_execution_replay",
         "candidate": {
             "build_id": candidate.build_id,
             "snapshot_id": candidate.snapshot_id,
@@ -121,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             "checkpoint_sha256": raced.publication.checkpoint_sha256,
         },
         "launcher_race": raced.evidence,
+        "replay": replay,
         "passed": bool(raced.evidence.get("passed"))
         and bool(raced.evidence.get("release_eligible")),
     }
@@ -136,6 +165,48 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     return 0 if payload["passed"] else 1
+
+
+def _replay_candidate(
+    plan: NativeBuildPlan,
+    candidate: CandidateResult,
+    publication: PublicationOutcome,
+    data_root: Path,
+    embeddings: _EmbeddingCallCounter,
+) -> dict[str, Any]:
+    calls_before = embeddings.calls
+    with NativeWriterLock(data_root) as writer_lease:
+        replayed = materialize_candidate(
+            plan,
+            data_root,
+            writer_lease=writer_lease,
+        )
+        if replayed != candidate:
+            raise RuntimeError(
+                "first-successor replay did not reuse the published candidate"
+            )
+        if embeddings.calls != calls_before:
+            raise RuntimeError("first-successor replay called the embedding provider")
+        replayed_publication = publish_candidate(
+            replayed,
+            data_root,
+            writer_lease=writer_lease,
+        )
+    replay_calls = embeddings.calls - calls_before
+    if replay_calls != 0:
+        raise RuntimeError("first-successor publication replay called the embedding provider")
+    if replayed_publication != publication:
+        raise RuntimeError("first-successor replay did not reuse the completed publication")
+    return {
+        "candidate_manifest_sha256": replayed.evidence_manifest_sha256,
+        "candidate_reused": True,
+        "embedding_api_calls": replay_calls,
+        "reason": (
+            "completed deterministic candidate and publication reused "
+            "without embedding provider calls"
+        ),
+        "source_publication_id": replayed_publication.publication_id,
+    }
 
 
 def _write_immutable_json(path: Path, payload: dict[str, Any]) -> None:

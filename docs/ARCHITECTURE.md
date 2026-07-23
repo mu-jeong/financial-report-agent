@@ -178,4 +178,5 @@ python -m compileall -q apps src scripts
 python -m pytest -q
 ```
 
-V1/V2 차이, SSOT 원칙, migration/publication 구조는 [V2 마이그레이션과 검색 아키텍처](migrations/v2/V2_MIGRATION.md)를 참고합니다. 실제 릴리스 검증 절차와 release blocker는 [V2 native retrieval release certification runbook](migrations/v2/V2_RELEASE_CERTIFICATION.md)을 참고합니다.
+V1/V2 차이, SSOT 원칙, migration/publication 구조는 [V2 마이그레이션과 검색 아키텍처](migrations/v2/V2_MIGRATION.md)를 참고합니다.
+개인 설치의 전환 결과는 [V2 전환 자체 검증 확인서](migrations/v2/V2_RELEASE_CERTIFICATION.md)로 확인할 수 있습니다.

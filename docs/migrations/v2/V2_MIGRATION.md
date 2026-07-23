@@ -6,10 +6,9 @@
 덧붙였습니다.
 
 실제로 마이그레이션을 실행하려는 사용자는
-[일반 사용자용 V2 마이그레이션](V2_MIGRATION_USER.md)을 먼저 읽으세요. 릴리스
-검증 담당자는 [V2 릴리스 인증 실행서](V2_RELEASE_CERTIFICATION.md)를 사용합니다.
-이 문서는 두 절차를 대신하는 명령어 모음이 아니라, 설계 의도와 동작 원리를 설명하는
-기술 문서입니다.
+[일반 사용자용 V2 마이그레이션](V2_MIGRATION_USER.md)을 먼저 읽으세요. 이 문서는
+실행 절차를 대신하는 명령어 모음이 아니라, 설계 의도와 동작 원리를 설명하는 기술
+문서입니다.
 
 ## 1. 먼저 알아둘 핵심
 
@@ -521,9 +520,9 @@ V1의 알려진 기본 child 정책은 500자 크기, 50자 overlap,
 경계 때문에 마지막 후보인 1016이 canonical 위치로 선택될 가능성이 높습니다. 이 값은
 실제 failure fixture 회귀 테스트에서 확정해야 합니다.
 
-#### 6.12.3 반드시 모두 통과해야 하는 승인 조건
+#### 6.12.3 모두 충족해야 하는 허용 조건
 
-replay가 다음 조건을 모두 증명할 때만 모호한 span을 허용합니다.
+replay가 다음 조건을 모두 충족할 때만 모호한 span을 허용합니다.
 
 1. Prefix fidelity: legacy embedding text가 기대한 prefix로 시작하고, 제거 후 다시 붙이면
    원문과 byte-for-byte 동일해야 합니다.
@@ -552,12 +551,12 @@ version을 사용해 replay하는 것이 가장 강한 증거입니다. 확인�
 추측해서 신뢰하지 않고 `unattested`로 기록해야 합니다.
 
 다만 library version이 미확인이어도 현재 resolver가 만든 **전체 출력 sequence가 보관된
-V1 sequence와 완전히 동일**하고 나머지 승인 조건을 만족한다면, 역사적 구현을 복원한
+V1 sequence와 완전히 동일**하고 나머지 허용 조건을 만족한다면, 역사적 구현을 복원한
 것이 아니라 V2 import를 위한 canonicalization으로 제한해 허용할 수 있습니다. 이후
 resolver나 package를 업그레이드해도 이전 migration identity가 바뀌지 않도록 resolver
 version과 package version을 evidence에 함께 고정해야 합니다.
 
-#### 6.12.5 감사와 장애 분석을 위해 남길 evidence
+#### 6.12.5 재현과 장애 분석을 위해 남길 evidence
 
 모호성이 자동 해소되었다는 사실을 숨기면 안 됩니다. migration receipt 또는 별도
 reconstruction evidence에 최소한 다음 내용을 기록합니다.
@@ -578,9 +577,9 @@ reconstruction evidence에 최소한 다음 내용을 기록합니다.
 }
 ```
 
-일반적인 unique proof와 canonical replay의 수, 대상 parent, 후보 수를 요약하면 릴리스
-검증 담당자가 예외의 범위를 확인할 수 있습니다. 선택된 span만 남기고 모호성 정보를
-버리면 나중에 같은 데이터가 다른 결과를 만든 이유를 설명하기 어렵습니다.
+일반적인 unique proof와 canonical replay의 수, 대상 parent, 후보 수를 요약하면 나중에
+같은 입력으로 결과를 재현하고 예외의 범위를 확인할 수 있습니다. 선택된 span만 남기고
+모호성 정보를 버리면 같은 데이터가 다른 결과를 만든 이유를 설명하기 어렵습니다.
 
 #### 6.12.6 구현 경계와 권장 함수 구조
 
@@ -612,7 +611,7 @@ embedding profile에서 전달하고, `legacy_import.py`가 legacy child metadat
 - 두 번의 plan 결과가 같은 reconstruction digest, `chunk_uid`, physical ID를 만듭니다.
 - import 중 PDF extractor와 embedding provider가 호출되지 않습니다.
 - 변환 전후 FAISS vector가 전수 또는 허용 오차 0 기준으로 동일합니다.
-- replay evidence가 receipt에 포함되고 release validation이 이를 다시 검증합니다.
+- replay evidence가 conversion evidence manifest에 포함되고 변환 검증 단계에서 이를 다시 검증합니다.
 
 #### 6.12.8 단계적 적용과 중단 조건
 
@@ -675,7 +674,8 @@ child 본문을 다시 catalog의 권위 데이터로 저장하는 방식은 권
    검증합니다.
 3. Legacy migration은 splitter replay로 canonical span을 만들고, 선택 방법·후보 수·hash를
    runtime row가 아닌 migration evidence에 남깁니다.
-4. V1 복사 bundle은 전환 승인과 retention 기간이 끝날 때까지 감사 원본으로 보존합니다.
+4. V1 복사 bundle은 전환 후 V2가 안정적으로 동작하는 것을 확인하고 개인 백업 정책을
+   정할 때까지 복구 원본으로 보존합니다.
 5. 성능상 child 본문 materialization이 필요해지면 권위 데이터가 아닌 재생성 가능한 cache나
    generated column 성격으로만 추가합니다.
 
@@ -824,8 +824,8 @@ fail closed는 가용성을 조금 희생할 수 있지만, 재무 문서 검색
   profile에 기록합니다.
 - PyMuPDF가 현재 run에서 실패하면 profile에 기록된 OpenDataLoader fallback을 즉시 한 번 시도하지만,
   추출 실패 이력과 fallback 사용 이력을 DB SSOT에 영구 기록하는 관측 기능은 후속 과제입니다.
-- epoch-zero compatibility bundle은 fallback이 닫혀도 retention 승인이 끝날 때까지
-  보존합니다.
+- epoch-zero compatibility bundle은 fallback이 닫혀도 자동 삭제하지 않으며, 개인
+  백업 정책에 따라 보관합니다.
 - V2의 복구·publication 구조는 로컬 단일 writer를 전제로 합니다. 여러 장비가 동시에
   같은 원격 filesystem을 쓰는 분산 시스템용 합의 프로토콜은 아닙니다.
 

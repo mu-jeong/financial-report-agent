@@ -4,6 +4,8 @@
 
 V1과 V2의 차이, SSOT 원칙, snapshot과 복구 구조를 먼저 이해하고 싶다면
 [V2 마이그레이션과 검색 아키텍처](V2_MIGRATION.md)를 참고하세요.
+전환 후 상태를 한국어로 기록하려면
+[V2 전환 자체 검증 확인서](V2_RELEASE_CERTIFICATION.md)를 사용하세요.
 
 ## 실행 전 확인
 
@@ -68,7 +70,7 @@ Native 신원, V1/PDF 기준 상태 또는 보존 경로가 달라졌다면 자�
 
 - `RUN_APP.bat` 질문/검색: 사용 가능
 - V2 네이티브 snapshot: 사용 중 (`write_epoch > 0`)
-- V1 fallback 선택: 영구 폐쇄. Sealed compatibility bundle은 별도 retention 승인 전까지 보존
+- V1 fallback 선택: 영구 폐쇄. 봉인된 V1 호환성 bundle은 자동 삭제하지 않고 개인 백업 정책에 따라 보관
 - 크롤링·임베딩 등 데이터 갱신: 사용 가능
 
 따라서 완료 후에는 평소처럼 `RUN_APP.bat`으로 앱을 열고, 앱의 데이터 업데이트 기능이나 `RUN_QUICKSTART.bat`을 사용할 수 있습니다. epoch 0만 라이브로 남기는 성공 경로는 없습니다.
