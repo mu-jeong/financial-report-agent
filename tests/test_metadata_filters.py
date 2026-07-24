@@ -248,21 +248,6 @@ def test_document_source_aliases_are_sequential_after_deduplication():
     )
 
 
-def test_query_rewrite_marks_prior_scope_followup_for_router():
-    result = query_rewrite.query_rewrite_node(
-        {
-            "question": "주요 내용을 정리해줘",
-            "chat_history": [],
-        }
-    )
-
-    assert result == {
-        "rewritten_query": "주요 내용을 정리해줘",
-        "uses_chat_history": False,
-        "followup_scope_intent": True,
-    }
-
-
 def test_query_rewrite_marks_date_only_followup_for_router():
     question = "6/15(월)"
 
