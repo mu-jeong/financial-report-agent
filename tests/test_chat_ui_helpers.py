@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from src.core.chat_ui_helpers import (
     build_clipboard_copy_html,
     build_no_result_suggestions,
@@ -6,9 +8,12 @@ from src.core.chat_ui_helpers import (
 
 
 def test_chat_window_no_result_actions_do_not_show_retry_caption():
-    app_source = open("apps/gui/app.py", encoding="utf-8").read()
+    gui_source = "\n".join(
+        path.read_text(encoding="utf-8-sig")
+        for path in sorted(Path("apps/gui").glob("*.py"))
+    )
 
-    assert "검색 조건을 바꿔 다시 시도할 수 있습니다." not in app_source
+    assert "검색 조건을 바꿔 다시 시도할 수 있습니다." not in gui_source
 
 
 def test_build_scope_notice_explains_prior_scope_reuse():
