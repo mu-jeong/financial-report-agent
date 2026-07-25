@@ -22,11 +22,17 @@ from src.retrieval.schema import (
     SchemaError,
     configure_catalog_storage,
 )
-from src.retrieval.vector_index import SnapshotDescriptor, VectorIndexError, load_index
 
 
 class RetrievalBootstrapError(RuntimeError):
     """Raised when retrieval state cannot be selected without guessing."""
+
+
+def load_index(*args, **kwargs):
+    """Preserve the validation seam without importing FAISS during status load."""
+    from src.retrieval.vector_index import load_index as _load_index
+
+    return _load_index(*args, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -153,6 +159,14 @@ def inspect_runtime(
             raise RetrievalBootstrapError("active snapshot/build is not fully complete")
 
         if validate_snapshot:
+            try:
+                from src.retrieval.vector_index import (
+                    SnapshotDescriptor,
+                    VectorIndexError,
+                )
+            except (ImportError, OSError) as exc:
+                return _epoch_zero_fallback_or_raise(connection, selection, exc)
+
             try:
                 snapshot_path = _anchored_path(paths.data_root, descriptor_row[0])
                 if snapshot_path.is_symlink():

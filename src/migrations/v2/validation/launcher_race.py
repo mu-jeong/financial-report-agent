@@ -37,7 +37,9 @@ _LAUNCHER_LAYOUT = (
     "RUN_APP.bat",
     "RUN_QUICKSTART.bat",
     "MIGRATE_V2.bat",
+    "REBUILD_V2.bat",
     "scripts/migrations/v2/migrate_v2_user.py",
+    "scripts/migrations/v2/rebuild_v2_successor.py",
     "src/retrieval/launcher_guard.py",
     "src/retrieval/update_lock.py",
 )
@@ -473,7 +475,9 @@ def _launcher_layout_sha256(root: Path) -> str:
         root / "RUN_APP.bat",
         root / "RUN_QUICKSTART.bat",
         root / "MIGRATE_V2.bat",
+        root / "REBUILD_V2.bat",
         root / "scripts" / "migrations" / "v2" / "migrate_v2_user.py",
+        root / "scripts" / "migrations" / "v2" / "rebuild_v2_successor.py",
         *sorted((root / "apps").rglob("*.py")),
         *sorted((root / "src").rglob("*.py")),
     ]

@@ -2,17 +2,21 @@
 
 이 파일은 프로젝트의 주요 변경 사항을 간단히 기록합니다.
 
-## Unreleased
+## v0.5.1 - 2026-07-25
 
 ### Added
 
 - V1 원본을 유지한 채 기존 청크와 벡터를 재사용해 쓰기 가능한 native V2로 전환하는 `MIGRATE_V2.bat` 사용자 마이그레이션을 추가했습니다.
+- 과거 OpenDataLoader-first V2를 PyMuPDF primary·OpenDataLoader fallback 정책으로 전체 재생성하는 `REBUILD_V2.bat` 안전 복구 경로를 추가했습니다.
+- 두 PDF 추출기가 모두 실패한 V2 문서를 active manifest에 기록하고 Monitoring Mode에서 명시적으로 재시도하는 관리 경로를 추가했습니다.
 - SQLite native catalog, immutable FAISS snapshot, crash-safe publication과 startup recovery, writer/update lock, launcher runtime guard를 추가했습니다.
 - 마이그레이션 canary, GUI/runtime smoke, 자동 rollback과 재시작 journal 검증을 추가했습니다.
 
 ### Changed
 
 - V2 데이터 업데이트는 전체 source inventory를 확인하되 새 문서와 변경된 문서만 파싱·임베딩하고, 변경되지 않은 청크와 벡터를 재사용합니다.
+- 개별 PDF 추출 실패가 전체 V2 build를 중단하지 않도록 실패 문서만 제외하고 나머지 문서의 파싱·임베딩·successor 게시를 계속합니다.
+- OpenDataLoader가 한 PDF에서 5분 넘게 반환하지 않으면 해당 변환을 종료하고 추출 실패로 기록해 V2 복구 작업이 무기한 멈추지 않도록 했습니다.
 - `RUN_APP.bat`, Quick Start, CLI/GUI 진입점은 retrieval runtime을 검증한 뒤 실행하도록 변경했습니다.
 - Monitoring과 평가 문서를 native V2 backend, 고정 snapshot 기준선, 현재 화면 구조에 맞게 갱신했습니다.
 

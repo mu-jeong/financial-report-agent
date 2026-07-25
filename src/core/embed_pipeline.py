@@ -320,6 +320,7 @@ def run_pipeline(
     test_limit: int = config.TEST_LIMIT,
     *,
     continue_on_extraction_error: bool = False,
+    retry_extraction_failures: bool = False,
 ) -> int:
     """Run one supported update while holding the V1/V2 cutover fence."""
 
@@ -327,6 +328,7 @@ def run_pipeline(
         return _run_pipeline_locked(
             test_limit,
             continue_on_extraction_error=continue_on_extraction_error,
+            retry_extraction_failures=retry_extraction_failures,
         )
 
 
@@ -334,6 +336,7 @@ def _run_pipeline_locked(
     test_limit: int = config.TEST_LIMIT,
     *,
     continue_on_extraction_error: bool = False,
+    retry_extraction_failures: bool = False,
 ) -> int:
     """Run the embedding pipeline for pending reports. Return process-style exit code."""
     runtime = guard_before_retrieval_write(
@@ -370,17 +373,11 @@ def _run_pipeline_locked(
                 child_chunk_size=config.CHILD_CHUNK_SIZE,
                 metric="l2",
                 normalization="none",
+                retry_extraction_failures=retry_extraction_failures,
             )
         except NativeSourceExtractionError as exc:
-            if continue_on_extraction_error:
-                logger.warning(
-                    "Native V2 PDF parsing failed; keeping the current snapshot and "
-                    "continuing Quick Start: %s",
-                    exc,
-                )
-                return 0
             logger.error(
-                "Native V2 incremental update failed: %s: %s",
+                "Native V2 extraction failure escaped per-document recording: %s: %s",
                 type(exc).__name__,
                 exc,
             )
@@ -514,8 +511,16 @@ def main(argv: list[str] | None = None) -> None:
         "--continue-on-extraction-error",
         action="store_true",
         help=(
-            "Keep the current searchable data and return success when individual "
-            "PDF parsing fails. Intended for Quick Start."
+            "Continue legacy V1 processing when individual PDF parsing fails. "
+            "Native V2 records these failures in its source manifest."
+        ),
+    )
+    parser.add_argument(
+        "--retry-extraction-failures",
+        action="store_true",
+        help=(
+            "Retry PDFs recorded as source-extraction-failed in the active "
+            "native V2 manifest."
         ),
     )
     args = parser.parse_args(argv)
@@ -523,6 +528,7 @@ def main(argv: list[str] | None = None) -> None:
         run_pipeline(
             test_limit=0 if args.all else args.limit,
             continue_on_extraction_error=args.continue_on_extraction_error,
+            retry_extraction_failures=args.retry_extraction_failures,
         )
     )
 

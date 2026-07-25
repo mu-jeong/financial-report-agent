@@ -46,16 +46,18 @@ def test_launcher_guard_write_mode_fails_closed_at_epoch_zero(
 def test_supported_launchers_guard_before_update_or_graph_import():
     root = Path(__file__).resolve().parents[2]
     gui = (root / "apps" / "gui" / "app.py").read_text(encoding="utf-8")
+    search_engine = (root / "apps" / "gui" / "search_engine.py").read_text(
+        encoding="utf-8"
+    )
     run_app = (root / "RUN_APP.bat").read_text(encoding="utf-8")
     quickstart = (root / "quickstart.py").read_text(encoding="utf-8")
     run_quickstart = (root / "RUN_QUICKSTART.bat").read_text(encoding="utf-8")
 
-    assert gui.index("st.stop()") < gui.index("from src.core import data_update_jobs")
     assert gui.index("import streamlit as st") < gui.index(
         "_finish_runtime_smoke(_retrieval_runtime)"
     )
-    assert gui.index("from src.graphs import main_graph") < gui.index(
-        "_finish_runtime_smoke(_retrieval_runtime)"
+    assert search_engine.index("reconcile_and_inspect_runtime") < search_engine.index(
+        'importlib.import_module("src.graphs.main_graph")'
     )
     assert run_app.index("src.retrieval.launcher_guard") < run_app.index(
         "streamlit run apps/gui/app.py"

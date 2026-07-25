@@ -238,9 +238,13 @@ Keep final paragraph.
 def test_opendataloader_extraction_drops_tables_before_return(tmp_path, monkeypatch):
     pdf_path = tmp_path / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
+    captured = {}
 
-    class FakeDocument:
-        page_content = json.dumps(
+    def fake_run(input_path, output_dir, *, timeout_seconds):
+        captured["input_path"] = input_path
+        captured["timeout_seconds"] = timeout_seconds
+        (output_dir / "sample.json").write_text(
+            json.dumps(
             {
                 "kids": [
                     {"type": "heading", "content": "Title"},
@@ -268,27 +272,49 @@ def test_opendataloader_extraction_drops_tables_before_return(tmp_path, monkeypa
                 ]
             },
             ensure_ascii=False,
+            ),
+            encoding="utf-8",
         )
 
-    class FakeLoader:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            assert kwargs["format"] == "json"
-
-        def load(self):
-            return [FakeDocument()]
-
-    fake_module = types.ModuleType("langchain_opendataloader_pdf")
-    fake_module.OpenDataLoaderPDFLoader = FakeLoader
-    monkeypatch.setitem(sys.modules, "langchain_opendataloader_pdf", fake_module)
+    monkeypatch.setattr(pdf_extraction, "_run_opendataloader_cli", fake_run)
     monkeypatch.setattr(pdf_extraction, "_ensure_java_on_path", lambda: None)
 
     text = pdf_extraction._extract_opendataloader_markdown(pdf_path)
 
+    assert captured == {
+        "input_path": pdf_path,
+        "timeout_seconds": 300,
+    }
     assert "Narrative text" in text
     assert "Title" in text
     assert "table value" not in text
     assert "table caption" not in text
+
+
+def test_opendataloader_process_timeout_is_reported_as_extraction_failure(
+    tmp_path,
+    monkeypatch,
+):
+    pdf_path = tmp_path / "stuck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        raise pdf_extraction.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(pdf_extraction.subprocess, "run", fake_run)
+
+    with pytest.raises(TimeoutError, match="timed out after 300 seconds"):
+        pdf_extraction._run_opendataloader_process(
+            ["java", "-jar", "opendataloader-pdf-cli.jar"],
+            pdf_path=pdf_path,
+            timeout_seconds=300,
+        )
+
+    assert captured["kwargs"]["timeout"] == 300
+    assert captured["kwargs"]["capture_output"] is True
 
 
 def test_opendataloader_json_text_extractor_skips_table_nodes():

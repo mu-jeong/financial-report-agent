@@ -1,6 +1,6 @@
 # Finance LLM
 
-> Version: `0.5.0`
+> Version: `0.5.1`
 
 ## Quick Start: 간편하게 실행하기
 
@@ -15,9 +15,23 @@ Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면
 
 Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법과 `RUN_APP.bat` 사용 구분은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
 
-일부 PDF가 PyMuPDF와 OpenDataLoader에서 모두 파싱되지 않아도 Quick Start는 실패 파일을 기록하고 기존 검색 데이터를 유지한 채 앱 실행까지 계속합니다.
+일부 PDF가 PyMuPDF와 OpenDataLoader에서 모두 파싱되지 않아도 실패 파일만 V2 manifest에 제외 상태로 기록하고, 나머지 문서의 파싱·임베딩·snapshot 게시와 앱 실행은 계속합니다. OpenDataLoader가 한 PDF에서 5분 안에 반환하지 않는 경우도 추출 실패로 기록해 전체 작업이 무기한 멈추지 않게 합니다. 기록된 문서는 Monitoring Mode의 `임베딩 누락 문서`에서 명시적으로 다시 시도할 수 있습니다.
 
 기존 V1 검색 데이터가 있다면 `MIGRATE_V2.bat`을 더블클릭해 백업·임베딩 공간 확인·GUI 실행 테스트를 거친 뒤, 기존 청크와 벡터를 그대로 사용하는 쓰기 가능한 V2로 안전하게 전환할 수 있습니다. 전체 PDF를 다시 파싱하거나 재임베딩하지 않으며, 전환 후에는 새 문서와 변경된 문서만 처리합니다. 설계 배경은 [V2 마이그레이션과 검색 아키텍처](docs/migrations/v2/V2_MIGRATION.md), 실행 절차는 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
+
+### `REBUILD_V2.bat`은 언제 필요한가
+
+> **대부분의 사용자는 `REBUILD_V2.bat`을 실행할 필요가 없습니다.** 과거 버전에서 만든 V2의 PDF 추출 설정을 현재 기본값인 `PyMuPDF 우선 → OpenDataLoader fallback`으로 바로잡을 때만 사용하세요.
+
+| 하려는 작업 | 실행할 항목 |
+| --- | --- |
+| 처음 설치 | `RUN_QUICKSTART.bat` |
+| 기존 V1을 V2로 전환 | `MIGRATE_V2.bat` — 재구축 불필요 |
+| 리포트 추가·변경 | 앱의 일반 데이터 업데이트 — 재구축 불필요 |
+| 파싱 실패 문서만 재시도 | Monitoring Mode의 `임베딩 누락 문서 → 파싱 실패 문서 재시도` |
+| 과거 V2의 추출 설정을 바로잡기 | 먼저 `REBUILD_V2.bat --check` |
+
+`--check` 결과가 `[확인]`이면 아무 작업도 하지 마세요. `[조치 필요]`이고 표시된 현재·목표 설정이 실제로 다를 때만 `REBUILD_V2.bat`을 실행하세요. 전체 PDF를 다시 처리하므로 시간과 API 비용이 발생합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md#활성-v2-전체-재구축)을 참고하세요.
 
 ---
 
@@ -150,9 +164,9 @@ python -m src.core.embed_pipeline --all        # V1: pending 전체, V2: 같은 
 python -m src.core.embed_pipeline --limit 100  # V1에서만 처리량 제한
 ```
 
-V1에서는 `TEST_LIMIT`, `--limit`, `--all`이 pending 처리량을 결정합니다. V2에서는 limit 옵션을 무시하고 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩하고 변경되지 않은 청크와 벡터를 재사용합니다. 변화가 없으면 새 publication을 만들지 않습니다.
+V1에서는 `TEST_LIMIT`, `--limit`, `--all`이 pending 처리량을 결정합니다. V2에서는 limit 옵션을 무시하고 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩하고 변경되지 않은 청크와 벡터를 재사용합니다. primary와 fallback이 모두 실패한 문서는 active manifest에 제외 상태로 남기고 나머지를 계속 처리합니다. 같은 바이트의 기존 실패는 일반 업데이트에서 반복 파싱하지 않으며, Monitoring Mode의 `임베딩 누락 문서`에서 재시도할 때만 다시 처리합니다. 변화가 없으면 새 publication을 만들지 않습니다.
 
-V2 활성 상태에서는 `data/retrieval/v2`, `data/reports.db`, `data/vector_db`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. Profile 전체를 바꾸는 작업은 별도로 검증된 full-corpus 전환 절차가 필요합니다.
+V2 활성 상태에서는 `data/retrieval/v2`, `data/reports.db`, `data/vector_db`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. 위 표의 추출 정책 변경에 해당할 때만 `REBUILD_V2.bat --check`로 점검한 뒤 `REBUILD_V2.bat`으로 검증된 full-corpus successor를 만드세요.
 
 PDF 추출 엔진 비교는 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.
 
@@ -300,7 +314,8 @@ python -m pytest -q
 - [x] 질문 처리 흐름을 추적해 검색 실패, 라우팅 오류, 답변 품질 저하 원인을 확인할 수 있게 합니다.
 - [x] 기존 active V2 profile에 다른 추출 정책을 자동으로 섞지 않고, 정책 변경을 검증된 full-corpus successor 경계로 제한합니다.
 - [x] PyMuPDF가 실패한 문서를 OpenDataLoader로 즉시 한 번 재시도하고 V2 profile에 fallback 정책을 기록합니다.
-- [ ] 추출 실패 이력을 DB SSOT에 영구 기록해 반복 실패 원인과 fallback 사용 추이를 관측할 수 있게 합니다.
+- [x] 두 추출기가 모두 실패한 V2 문서를 manifest 제외 상태로 기록하고 나머지 문서의 snapshot 게시를 계속합니다.
+- [ ] 상세 parser 오류·시도 횟수와 fallback 사용 추이를 별도 진단 이력으로 관측할 수 있게 합니다.
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
 - [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.

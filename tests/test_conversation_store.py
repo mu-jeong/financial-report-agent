@@ -1,3 +1,7 @@
+import sqlite3
+
+import pytest
+
 from src.core import conversation_store
 
 
@@ -51,6 +55,34 @@ def test_conversation_store_updates_message_and_excludes_running_history(tmp_pat
     assert messages[1]["content"] == "첫 답변"
     assert messages[1]["metadata"]["status"] == "succeeded"
     assert conversation_store.get_chat_history(thread_id) == [("사용자", "첫 질문"), ("AI", "첫 답변")]
+
+
+def test_pending_exchange_is_atomic_if_assistant_insert_fails(tmp_path, monkeypatch):
+    db_path = tmp_path / "conversations.db"
+    monkeypatch.setattr(conversation_store, "CONVERSATION_DB_PATH", str(db_path))
+    thread_id = conversation_store.create_thread("테스트")
+    with conversation_store.get_connection() as conn:
+        conn.execute(
+            """
+            CREATE TRIGGER reject_assistant_message
+            BEFORE INSERT ON conversation_messages
+            WHEN NEW.role = 'assistant'
+            BEGIN
+                SELECT RAISE(ABORT, 'assistant insert rejected');
+            END
+            """
+        )
+        conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="assistant insert rejected"):
+        conversation_store.append_pending_exchange(
+            thread_id,
+            "질문",
+            "처리 중",
+            {"status": "running"},
+        )
+
+    assert conversation_store.list_messages(thread_id) == []
 
 
 def test_conversation_store_marks_interrupted_running_messages_failed(tmp_path, monkeypatch):

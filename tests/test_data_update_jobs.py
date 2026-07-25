@@ -73,9 +73,93 @@ def test_embedding_file_progress_from_line_ignores_non_file_progress_lines():
     assert embedding_file_progress_from_line("  [3/3] Embedding 42 chunks...") is None
 
 
+def test_embedding_failure_message_points_profile_mismatches_to_rebuild_v2():
+    output = (
+        "NativeBuildError: incremental extractor differs from the active "
+        "embedding profile: active=opendataloader|fallback=pymupdf, "
+        "requested=pymupdf|fallback=opendataloader"
+    )
+
+    message = data_update_jobs.embedding_failure_message(1, output)
+
+    assert "활성 V2 추출 프로필" in message
+    assert "REBUILD_V2.bat" in message
+    assert "exit code 1" not in message
+
+
+def test_embedding_failure_message_keeps_a_concise_error_detail():
+    output = "setup\n2026-07-25 [ERROR] embed_pipeline.py: provider unavailable\n"
+
+    message = data_update_jobs.embedding_failure_message(7, output)
+
+    assert "exit code 7" in message
+    assert "provider unavailable" in message
+
+
+def test_embedding_failure_message_redacts_credentials_from_subprocess_output():
+    output = (
+        "2026-07-25 [ERROR] request failed: "
+        "{'api_key': 'top-secret'} OPENROUTER_API_KEY=another-secret "
+        "Authorization: Bearer sk-or-v1-secret-token"
+    )
+
+    message = data_update_jobs.embedding_failure_message(1, output)
+
+    assert message == "embedding failed with exit code 1"
+    assert "top-secret" not in message
+    assert "another-secret" not in message
+    assert "secret-token" not in message
+
+
+def test_embedding_extraction_failure_count_reads_safe_v1_and_v2_summaries():
+    assert data_update_jobs.embedding_extraction_failure_count(
+        "Quick Start is continuing after 3 PDF parsing failure(s)."
+    ) == 3
+    assert data_update_jobs.embedding_extraction_failure_count(
+        "Excluding PDF after primary and fallback extraction failed: a.pdf\n"
+        "Excluding PDF after primary and fallback extraction failed: b.pdf\n"
+    ) == 2
+
+
+def test_embedding_job_surfaces_partial_extraction_completion(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (
+            0,
+            "Quick Start is continuing after 2 PDF parsing failure(s).",
+        ),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_write_status",
+        lambda status: statuses.append(status),
+    )
+
+    assert data_update_jobs.run_embedding_job(label="재처리") == 0
+    assert statuses[-1]["state"] == "succeeded"
+    assert statuses[-1]["embedding_failure_count"] == 2
+    assert "관리 목록에 남았습니다" in str(statuses[-1]["message"])
+
+
 def test_build_embedding_command_uses_all_or_limit():
     assert build_embedding_command(limit=None)[-1] == "--all"
     assert build_embedding_command(limit=3)[-2:] == ["--limit", "3"]
+    assert build_embedding_command(
+        limit=None,
+        continue_on_extraction_error=True,
+        retry_extraction_failures=True,
+    )[-3:] == [
+        "--all",
+        "--continue-on-extraction-error",
+        "--retry-extraction-failures",
+    ]
 
 
 def test_process_is_alive_handles_current_and_missing_pids():
@@ -151,3 +235,33 @@ def test_start_embedding_job_records_limit_and_parent_pid(monkeypatch, tmp_path)
     assert status["embedding_limit"] == 3
     assert status["pid"] == 9876
     assert data_update_jobs.read_status()["parent_pid"] == 1234
+
+
+def test_start_embedding_job_forwards_explicit_native_failure_retry(
+    monkeypatch,
+    tmp_path,
+):
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 9876
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path)
+    monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "latest.log")
+    monkeypatch.setattr(data_update_jobs.os, "getpid", lambda: 1234)
+    monkeypatch.setattr(data_update_jobs.subprocess, "Popen", fake_popen)
+
+    status = data_update_jobs.start_embedding_job(
+        label="파싱 실패 문서 재시도",
+        retry_extraction_failures=True,
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert "--retry-extraction-failures" in command
+    assert status["retry_extraction_failures"] is True

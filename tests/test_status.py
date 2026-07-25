@@ -1,8 +1,10 @@
 from datetime import date
+import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
-from src.core import issue_report_store
+from src.core import issue_report_store, status as status_module
 from src.core.data_update_jobs import build_crawler_env, missing_update_dates_by_category
 from src.core.status import (
     assess_readiness,
@@ -207,6 +209,122 @@ def test_list_unembedded_reports_returns_recent_pending_rows_and_safe_previews(t
     assert table_rows[1]["embedding_extraction_engine"] == "opendataloader"
     assert table_rows[1]["embedding_last_error"] == "FileNotFoundError: PDF missing"
     assert table_rows[1]["embedding_last_attempt_at"] == "2026-06-27T10:00:00"
+
+
+def test_list_unembedded_reports_maps_native_manifest_failure_to_management_row(
+    tmp_path,
+    monkeypatch,
+):
+    catalog = tmp_path / "retrieval" / "v2" / "catalog.sqlite3"
+    catalog.parent.mkdir(parents=True)
+    failed_uid = "ab" * 32
+    manifest = {
+        "schema_version": 1,
+        "counts": {"discovered": 1, "included": 0, "excluded": 1},
+        "exclusion_policy": {
+            "version": "native-full-corpus-v2",
+            "reason_codes": ["source-extraction-failed"],
+        },
+        "reports": [
+            {
+                "report_uid": failed_uid,
+                "status": "excluded",
+                "reason_code": "source-extraction-failed",
+            }
+        ],
+    }
+    with sqlite3.connect(catalog) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE reports (
+                report_id INTEGER PRIMARY KEY,
+                report_uid TEXT NOT NULL,
+                canonical_relative_path TEXT NOT NULL,
+                report_date TEXT NOT NULL,
+                report_type TEXT NOT NULL,
+                target_name TEXT,
+                title TEXT NOT NULL,
+                broker TEXT NOT NULL
+            );
+            CREATE TABLE active_reports (
+                report_uid TEXT PRIMARY KEY
+            );
+            CREATE TABLE embedding_profiles (
+                profile_id TEXT PRIMARY KEY,
+                extractor TEXT NOT NULL
+            );
+            CREATE TABLE retrieval_builds (
+                build_id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                source_manifest_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE retrieval_runtime (
+                runtime_id INTEGER PRIMARY KEY,
+                active_build_id TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                failed_uid,
+                "downloaded/failed.pdf",
+                "2026-07-23",
+                "company",
+                "큐리오시스",
+                "FDA 현대화법 3.0",
+                "미래에셋증권",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO embedding_profiles VALUES (?, ?)",
+            ("profile-1", "pymupdf|fallback=opendataloader"),
+        )
+        connection.execute(
+            "INSERT INTO retrieval_builds VALUES (?, ?, ?, ?)",
+            (
+                "build-1",
+                "profile-1",
+                json.dumps(manifest),
+                "2026-07-25T08:30:00.000Z",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO retrieval_runtime VALUES (1, 'build-1')"
+        )
+
+    monkeypatch.setattr(
+        status_module,
+        "retrieval_paths",
+        lambda _db_path: SimpleNamespace(catalog=catalog),
+    )
+    monkeypatch.setattr(
+        status_module,
+        "inspect_runtime",
+        lambda _db_path, **_kwargs: SimpleNamespace(mode="native"),
+    )
+
+    rows = status_module.list_unembedded_reports("unused.db")
+
+    assert rows == [
+        {
+            "id": 1,
+            "report_date": "2026-07-23",
+            "report_type": "company",
+            "target_name": "큐리오시스",
+            "title": "FDA 현대화법 3.0",
+            "broker": "미래에셋증권",
+            "canonical_relative_path": "downloaded/failed.pdf",
+            "file_name": "failed.pdf",
+            "embedding_extraction_engine": "pymupdf|fallback=opendataloader",
+            "embedding_last_error": (
+                "NativeSourceExtractionError: primary and fallback extraction failed"
+            ),
+            "embedding_last_attempt_at": "2026-07-25T08:30:00.000Z",
+        }
+    ]
 
 
 def test_assess_readiness_blocks_when_index_is_missing():

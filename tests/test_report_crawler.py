@@ -134,9 +134,12 @@ def test_crawl_start_date_prefers_explicit_lookback_window():
 
 
 def test_download_guard_blocks_before_crawler_dependencies_or_source_writes(
+    tmp_path,
     monkeypatch,
 ):
     events = []
+    data_root = tmp_path / "data"
+    data_root.mkdir()
 
     def blocked_guard():
         events.append("guard")
@@ -145,6 +148,10 @@ def test_download_guard_blocks_before_crawler_dependencies_or_source_writes(
     monkeypatch.setattr(
         "src.core.report_crawler.guard_before_report_download",
         blocked_guard,
+    )
+    monkeypatch.setattr(
+        "src.configs.config.DB_PATH",
+        str(data_root / "reports.db"),
     )
     monkeypatch.setattr(
         "os.makedirs",

@@ -20,6 +20,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
         "scripts/migrations/v2/analyze_v2_retrieval_benchmark.py",
         "scripts/migrations/v2/run_v2_launcher_matrix.py",
         "scripts/migrations/v2/run_v2_first_successor_race.py",
+        "scripts/migrations/v2/rebuild_v2_successor.py",
         "scripts/migrations/v2/run_v2_reader_parity.py",
         "scripts/migrations/v2/run_v2_installed_validation.py",
         "scripts/migrations/v2/create_v2_release_query.py",

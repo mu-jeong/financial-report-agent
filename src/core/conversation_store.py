@@ -175,6 +175,47 @@ def append_message(
         return int(cursor.lastrowid)
 
 
+def append_pending_exchange(
+    thread_id: str,
+    user_content: str,
+    assistant_content: str,
+    assistant_metadata: dict[str, Any] | None = None,
+) -> tuple[int, int]:
+    """Persist a user question and its running assistant placeholder atomically."""
+    init_conversation_db()
+    now = _utc_now()
+    assistant_metadata_json = json.dumps(
+        assistant_metadata or {},
+        ensure_ascii=False,
+    )
+    with get_connection() as conn:
+        user_cursor = conn.execute(
+            """
+            INSERT INTO conversation_messages (thread_id, role, content, metadata, created_at)
+            VALUES (?, 'user', ?, '{}', ?)
+            """,
+            (thread_id, user_content, now),
+        )
+        assistant_cursor = conn.execute(
+            """
+            INSERT INTO conversation_messages (thread_id, role, content, metadata, created_at)
+            VALUES (?, 'assistant', ?, ?, ?)
+            """,
+            (
+                thread_id,
+                assistant_content,
+                assistant_metadata_json,
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE conversation_threads SET updated_at = ? WHERE id = ?",
+            (now, thread_id),
+        )
+        conn.commit()
+        return int(user_cursor.lastrowid), int(assistant_cursor.lastrowid)
+
+
 def update_message(
     message_id: int,
     content: str,

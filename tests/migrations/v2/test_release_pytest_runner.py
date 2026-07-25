@@ -23,6 +23,7 @@ def _repository(root: Path) -> Path:
         "RUN_APP.bat": "@echo off\n",
         "RUN_QUICKSTART.bat": "@echo off\n",
         "MIGRATE_V2.bat": "@echo off\n",
+        "REBUILD_V2.bat": "@echo off\n",
     }.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,7 +146,7 @@ def test_runner_seals_full_suite_collection_junit_and_layouts(
     assert payload["junit"]["testcase_count"] == 2
     assert payload["junit"]["sha256"] == hashlib.sha256(junit.read_bytes()).hexdigest()
     assert payload["layouts"]["test_file_count"] == 2
-    assert payload["layouts"]["source_file_count"] == 7
+    assert payload["layouts"]["source_file_count"] == 8
     assert payload["commands"]["working_directory"] == str(root)
     assert payload["interpreter"]["executable_sha256"] == run_release_pytest._sha256_file(
         Path(payload["interpreter"]["executable"])

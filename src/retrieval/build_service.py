@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import stat
@@ -62,11 +63,14 @@ class NativeSourceExtractionError(NativeBuildError):
     """Raised when a source PDF cannot be parsed by the declared engine policy."""
 
 
-_EXCLUSION_POLICY_VERSION = "native-full-corpus-v1"
+_EXCLUSION_POLICY_VERSION = "native-full-corpus-v2"
 _SOURCE_DELETED = "source-deleted"
+_SOURCE_EXTRACTION_FAILED = "source-extraction-failed"
 _SOURCE_SUPERSEDED = "source-superseded"
 _SNAPSHOT_LINEAGE_TRAILER = b"FINANCE_LLM_V2_SNAPSHOT\0"
 _DEFAULT_FALLBACK_ENGINE = "pymupdf"
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingsPort(Protocol):
@@ -163,6 +167,8 @@ class CandidateResult:
     evidence_manifest_sha256: str
     descriptor: SnapshotDescriptor
     report_count: int
+    indexed_report_count: int
+    extraction_failure_count: int
     parent_count: int
     chunk_count: int
     source_root: Path
@@ -200,6 +206,7 @@ def prepare_full_corpus_build(
     canonical_source_prefix: str = "downloaded",
     deleted_relative_paths: Iterable[str] = (),
     allow_extraction_fallback: bool = True,
+    retry_extraction_failures: bool = False,
     allow_degraded_forward_recovery: bool = False,
     writer_lease: WriterLease | None = None,
     _reuse_unchanged_vectors: bool = False,
@@ -232,11 +239,17 @@ def prepare_full_corpus_build(
         _positive_size(single_chunk_size, "single_chunk_size")
     if not isinstance(allow_extraction_fallback, bool):
         raise NativeBuildError("allow_extraction_fallback must be a boolean")
+    if not isinstance(retry_extraction_failures, bool):
+        raise NativeBuildError("retry_extraction_failures must be a boolean")
 
     deleted = tuple(
         sorted({normalize_relative_path(value) for value in deleted_relative_paths})
     )
-    active_reports_by_path, existing_reports = _read_catalog_sources(selection)
+    (
+        active_reports_by_path,
+        existing_reports,
+        prior_extraction_failure_uids,
+    ) = _read_catalog_sources(selection)
     active_paths = set(active_reports_by_path)
     normalized_source_prefix = normalize_relative_path(canonical_source_prefix)
     discovered = _discover_current_sources(
@@ -337,18 +350,13 @@ def prepare_full_corpus_build(
         )
         for record in sorted(source_records, key=lambda item: bytes.fromhex(item["report_uid"]))
     )
-    manifest = _build_candidate_manifest(
-        reports,
-        active_reports_by_path=active_reports_by_path,
-        deleted_paths=set(deleted),
-    )
     if _reuse_unchanged_vectors:
         return _prepare_incremental_plan(
             selection=selection,
             reports=reports,
             source_records=source_records,
-            manifest=manifest,
             active_reports_by_path=active_reports_by_path,
+            prior_extraction_failure_uids=prior_extraction_failure_uids,
             source_root=source_root,
             source_inventory=source_inventory,
             canonical_source_prefix=normalized_source_prefix,
@@ -366,6 +374,7 @@ def prepare_full_corpus_build(
             metric=metric,
             normalization=normalization,
             prefix_template=prefix_template,
+            retry_extraction_failures=retry_extraction_failures,
         )
 
     canary = (
@@ -378,19 +387,29 @@ def prepare_full_corpus_build(
         if selection.write_epoch == 0
         else None
     )
-    extracted = [
-        (
-            record,
-            _extract_source(
-                record["path"],
-                canonical_extractor_name,
-                extractor_port,
-                allow_fallback=effective_allow_fallback,
-                fallback_engine=canonical_fallback_name,
-            ),
+    extracted, extraction_failed_uids = _extract_source_records(
+        source_records,
+        extractor_name=canonical_extractor_name,
+        extractor=extractor_port,
+        allow_extraction_fallback=effective_allow_fallback,
+        fallback_extractor_name=canonical_fallback_name,
+    )
+    manifest = _build_candidate_manifest(
+        reports,
+        active_reports_by_path=active_reports_by_path,
+        deleted_paths=set(deleted),
+        extraction_failed_uids=extraction_failed_uids,
+    )
+    included_report_uids = {
+        str(record["report_uid"]) for record, _text in extracted
+    }
+    if (
+        selection.write_epoch == 0
+        and not included_report_uids.difference(active_reports_by_path.values())
+    ):
+        raise NativeBuildError(
+            "first native successor must include at least one new logical corpus member"
         )
-        for record in source_records
-    ]
 
     provisional_parents, provisional_chunks, embedding_texts = _split_full_corpus(
         extracted,
@@ -554,8 +573,8 @@ def _prepare_incremental_plan(
     selection: RuntimeSelection,
     reports: tuple[CandidateReport, ...],
     source_records: list[dict[str, Any]],
-    manifest: CorpusManifest,
     active_reports_by_path: Mapping[str, str],
+    prior_extraction_failure_uids: frozenset[str],
     source_root: Path,
     source_inventory: tuple[SourceFileSnapshot, ...],
     canonical_source_prefix: str,
@@ -573,21 +592,32 @@ def _prepare_incremental_plan(
     metric: str,
     normalization: str,
     prefix_template: str,
+    retry_extraction_failures: bool,
 ) -> NativeBuildPlan | None:
     if selection.write_epoch <= 0 or not selection.write_enabled:
         raise NativeBuildError("incremental updates require a writable native runtime")
+    current_report_uids = {str(record["report_uid"]) for record in source_records}
+    carried_failure_uids = prior_extraction_failure_uids.intersection(
+        current_report_uids
+    )
     changed_records = [
         record
         for record in source_records
         if active_reports_by_path.get(record["canonical_relative_path"])
         != record["report_uid"]
+        and (
+            retry_extraction_failures
+            or str(record["report_uid"]) not in carried_failure_uids
+        )
     ]
     if not changed_records and not deleted_relative_paths:
         return None
 
-    changed_uids = {str(record["report_uid"]) for record in changed_records}
     unchanged_uids = {
-        report.report_uid for report in reports if report.report_uid not in changed_uids
+        report.report_uid
+        for report in reports
+        if active_reports_by_path.get(report.canonical_relative_path)
+        == report.report_uid
     }
     reusable = _read_reusable_snapshot(selection, unchanged_uids)
     _validate_incremental_profile(
@@ -615,19 +645,23 @@ def _prepare_incremental_plan(
         if changed_records
         else None
     )
-    extracted = [
-        (
-            record,
-            _extract_source(
-                record["path"],
-                extractor_name,
-                extractor,
-                allow_fallback=allow_extraction_fallback,
-                fallback_engine=fallback_extractor_name,
-            ),
-        )
-        for record in changed_records
-    ]
+    extracted, new_failure_uids = _extract_source_records(
+        changed_records,
+        extractor_name=extractor_name,
+        extractor=extractor,
+        allow_extraction_fallback=allow_extraction_fallback,
+        fallback_extractor_name=fallback_extractor_name,
+    )
+    attempted_uids = {str(record["report_uid"]) for record in changed_records}
+    extraction_failed_uids = (
+        carried_failure_uids.difference(attempted_uids).union(new_failure_uids)
+    )
+    manifest = _build_candidate_manifest(
+        reports,
+        active_reports_by_path=active_reports_by_path,
+        deleted_paths=set(deleted_relative_paths),
+        extraction_failed_uids=extraction_failed_uids,
+    )
     if extracted:
         provisional_parents, provisional_chunks, embedding_texts = _split_full_corpus(
             extracted,
@@ -992,6 +1026,11 @@ def materialize_candidate(
         evidence_manifest_sha256=evidence_sha256,
         descriptor=descriptor,
         report_count=len(plan.reports),
+        indexed_report_count=plan.manifest.included_count,
+        extraction_failure_count=sum(
+            entry.reason_code == _SOURCE_EXTRACTION_FAILED
+            for entry in plan.manifest.entries
+        ),
         parent_count=len(plan.parents),
         chunk_count=len(plan.chunks),
         source_root=plan.source_root,
@@ -1374,7 +1413,7 @@ def _validate_snapshot_vector_payload(
 
 def _read_catalog_sources(
     selection: RuntimeSelection,
-) -> tuple[dict[str, str], dict[str, int]]:
+) -> tuple[dict[str, str], dict[str, int], frozenset[str]]:
     connection = _open_read_only_catalog(selection.paths.catalog)
     try:
         active_reports: dict[str, str] = {}
@@ -1392,7 +1431,42 @@ def _read_catalog_sources(
             str(row[0]): int(row[1])
             for row in connection.execute("SELECT report_uid, report_id FROM reports")
         }
-        return active_reports, existing
+        manifest_row = connection.execute(
+            """
+            SELECT source_manifest_json
+            FROM retrieval_builds
+            WHERE build_id = ?
+            """,
+            (selection.active_build_id,),
+        ).fetchone()
+        if manifest_row is None:
+            raise NativeBuildError("active source manifest is unavailable")
+        try:
+            manifest_payload = json.loads(str(manifest_row[0]))
+            manifest_entries = manifest_payload["reports"]
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise NativeBuildError("active source manifest is invalid") from exc
+        if not isinstance(manifest_entries, list):
+            raise NativeBuildError("active source manifest reports must be a list")
+        prior_extraction_failures: set[str] = set()
+        for entry in manifest_entries:
+            if not isinstance(entry, Mapping):
+                raise NativeBuildError("active source manifest entry is invalid")
+            if (
+                entry.get("status") == "excluded"
+                and entry.get("reason_code") == _SOURCE_EXTRACTION_FAILED
+            ):
+                report_uid = entry.get("report_uid")
+                if not isinstance(report_uid, str):
+                    raise NativeBuildError(
+                        "active source extraction failure identity is invalid"
+                    )
+                prior_extraction_failures.add(report_uid)
+        return (
+            active_reports,
+            existing,
+            frozenset(prior_extraction_failures),
+        )
     finally:
         connection.close()
 
@@ -1599,20 +1673,36 @@ def _build_candidate_manifest(
     *,
     active_reports_by_path: Mapping[str, str],
     deleted_paths: set[str],
+    extraction_failed_uids: set[str] | frozenset[str] = frozenset(),
 ) -> CorpusManifest:
     """Partition current and retired active report objects with stable reasons."""
 
-    included_by_path = {
+    current_by_path = {
         report.canonical_relative_path: report.report_uid for report in reports
     }
-    included_uids = set(included_by_path.values())
-    decisions = [ManifestDecision.included(report.report_uid) for report in reports]
+    current_uids = set(current_by_path.values())
+    unknown_failures = set(extraction_failed_uids).difference(current_uids)
+    if unknown_failures:
+        raise NativeBuildError(
+            "extraction failure references a report outside the current source corpus"
+        )
+    decisions = [
+        (
+            ManifestDecision.excluded(
+                report.report_uid,
+                _SOURCE_EXTRACTION_FAILED,
+            )
+            if report.report_uid in extraction_failed_uids
+            else ManifestDecision.included(report.report_uid)
+        )
+        for report in reports
+    ]
     for path, report_uid in sorted(active_reports_by_path.items()):
-        if report_uid in included_uids:
+        if report_uid in current_uids:
             continue
         if path in deleted_paths:
             reason = _SOURCE_DELETED
-        elif path in included_by_path:
+        elif path in current_by_path:
             reason = _SOURCE_SUPERSEDED
         else:
             raise NativeBuildError(
@@ -1625,7 +1715,13 @@ def _build_candidate_manifest(
         decisions,
         ExclusionPolicy(
             version=_EXCLUSION_POLICY_VERSION,
-            excluded_reason_codes=frozenset({_SOURCE_DELETED, _SOURCE_SUPERSEDED}),
+            excluded_reason_codes=frozenset(
+                {
+                    _SOURCE_DELETED,
+                    _SOURCE_EXTRACTION_FAILED,
+                    _SOURCE_SUPERSEDED,
+                }
+            ),
         ),
     )
 
@@ -1883,6 +1979,40 @@ def _extract_source(
             f"source extraction produced empty text: {path.name}"
         )
     return text
+
+
+def _extract_source_records(
+    source_records: Iterable[dict[str, Any]],
+    *,
+    extractor_name: str,
+    extractor: ExtractorPort,
+    allow_extraction_fallback: bool,
+    fallback_extractor_name: str | None,
+) -> tuple[list[tuple[dict[str, Any], str]], frozenset[str]]:
+    """Extract every source while isolating exhausted per-document failures."""
+
+    extracted: list[tuple[dict[str, Any], str]] = []
+    failed_report_uids: set[str] = set()
+    for record in source_records:
+        try:
+            text = _extract_source(
+                record["path"],
+                extractor_name,
+                extractor,
+                allow_fallback=allow_extraction_fallback,
+                fallback_engine=fallback_extractor_name,
+            )
+        except NativeSourceExtractionError as exc:
+            report_uid = str(record["report_uid"])
+            failed_report_uids.add(report_uid)
+            logger.warning(
+                "Excluding PDF after primary and fallback extraction failed: %s (%s)",
+                record["file_name"],
+                exc,
+            )
+            continue
+        extracted.append((record, text))
+    return extracted, frozenset(failed_report_uids)
 
 
 def _normalize_metadata(metadata: Mapping[str, Any], file_name: str) -> dict[str, Any]:
@@ -2418,6 +2548,11 @@ def _completed_candidate_result(
         evidence_manifest_sha256=evidence_sha256,
         descriptor=descriptor,
         report_count=len(plan.reports),
+        indexed_report_count=plan.manifest.included_count,
+        extraction_failure_count=sum(
+            entry.reason_code == _SOURCE_EXTRACTION_FAILED
+            for entry in plan.manifest.entries
+        ),
         parent_count=len(plan.parents),
         chunk_count=len(plan.chunks),
         source_root=plan.source_root,

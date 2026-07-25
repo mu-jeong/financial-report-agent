@@ -75,9 +75,112 @@ Native 신원, V1/PDF 기준 상태 또는 보존 경로가 달라졌다면 자�
 
 따라서 완료 후에는 평소처럼 `RUN_APP.bat`으로 앱을 열고, 앱의 데이터 업데이트 기능이나 `RUN_QUICKSTART.bat`을 사용할 수 있습니다. epoch 0만 라이브로 남기는 성공 경로는 없습니다.
 
+## 활성 V2 전체 재구축
+
+`MIGRATE_V2.bat`은 V1을 V2로 처음 전환하는 도구입니다. 이미 활성화된 V2에서 primary와 fallback이 반대로 기록된 추출 profile을 배포 기본값으로 바로잡을 때는 `REBUILD_V2.bat`을 사용합니다. 이 파일은 내부적으로 `scripts/migrations/v2/rebuild_v2_successor.py`를 실행해 전체 corpus를 새 embedding profile로 재구축합니다.
+
+배포 기본 추출 정책은 다음과 같습니다.
+
+```env
+PDF_EXTRACTION_ENGINE=pymupdf
+PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader
+UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
+```
+
+PyMuPDF가 primary이며, 해당 PDF의 추출이 실패할 때만 OpenDataLoader를 fallback으로 한 번 시도합니다. active V2에 `opendataloader` primary와 `pymupdf` fallback이 기록되어 있다면 역방향 profile입니다. `--check`에서 현재 profile과 목표 profile을 확인한 뒤 전체 재구축으로 바로잡을 수 있습니다.
+
+### 1. 실행 전 점검
+
+Finance LLM, Streamlit, Quick Start, 데이터 업데이트 창을 모두 닫으세요. 먼저 프로젝트 폴더에서 다음 읽기 전용 점검을 실행합니다.
+
+```bat
+REBUILD_V2.bat --check
+```
+
+점검은 데이터를 수정하거나 successor를 만들지 않습니다. 현재 snapshot·추출 profile·인덱싱 문서 수, 교정 후 재생성할 추출 profile·원본 PDF 수를 출력합니다. legacy `EXTRACTION_ENGINE`과 `PDF_EXTRACTION_ENGINE`이 다르면 두 primary 값도 함께 알립니다.
+
+`[확인] 활성 프로필과 현재 설정이 일치합니다.`가 표시되고 알려진 역방향 설정 충돌도 없다면 일반 실행은 새 successor를 만들지 않고 종료합니다.
+
+새 환경변수와 기존 alias는 다음과 같이 대응합니다.
+
+| 새 키 | 기존 alias |
+| --- | --- |
+| `PDF_EXTRACTION_ENGINE` | `EXTRACTION_ENGINE` |
+| `PDF_EXTRACTION_FALLBACK_ENGINE` | `EXTRACTION_FALLBACK_ENGINE` |
+| `UNEMBEDDED_PDF_EXTRACTION_ENGINE` | `UNEMBEDDED_EXTRACTION_ENGINE` |
+
+과거 공식 설정 중 다음 두 조합이면 원클릭 복구 경로가 작동합니다.
+
+1. `EXTRACTION_ENGINE=pymupdf`, `PDF_EXTRACTION_ENGINE=opendataloader`,
+   유효한 fallback이 비어 있거나 `pymupdf`
+2. 유효한 PDF primary가 `pymupdf`,
+   `UNEMBEDDED_PDF_EXTRACTION_ENGINE=opendataloader` 또는
+   `UNEMBEDDED_EXTRACTION_ENGINE=opendataloader`, 유효한 fallback이 비어 있거나
+   `pymupdf`
+
+여기서 유효한 값은 새 `PDF_*` 키가 있으면 그 값을, 없으면 표의 기존 alias 값을 뜻합니다.
+
+`--check`는 `.env`를 수정하지 않고 교정 후 목표 profile을
+`pymupdf|fallback=opendataloader`로 미리 보여줍니다. 전체 재구축을
+실행하면 도구가 화면에 안내를 표시하고 다음 세 개의 사용자용 키만 저장소 기본값으로
+정리한 뒤 설정을 불러옵니다.
+
+```env
+PDF_EXTRACTION_ENGINE=pymupdf
+PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader
+UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
+```
+
+다른 사용자 지정 정책은 자동으로 덮어쓰지 않습니다. 새 primary 키와 기존 primary alias의 그 밖의 충돌은 알림으로 표시되므로, 값을 검토하고 의도한 정책으로 맞춘 뒤 다시 점검하세요.
+
+active profile이 이미 `pymupdf|fallback=opendataloader`이고 알려진 과거 설정 충돌만 남았다면, 전체 실행은 세 키만 교정하고 successor 재생성이나 API 호출 없이 끝납니다.
+
+### 2. 전체 재구축
+
+점검을 통과하면 다음 명령을 실행하고 화면의 확인 질문에 답합니다.
+
+```bat
+REBUILD_V2.bat
+```
+
+전체 corpus의 PDF 추출, chunk 생성, 임베딩과 검증을 다시 수행하므로 OpenRouter API 비용이 발생하고 오래 걸릴 수 있습니다. 비용과 시간은 PDF 수·길이, 청크 수, 선택한 모델과 API 가격에 따라 달라집니다. OpenDataLoader fallback을 사용하려면 Java 11 이상과 `java` 명령의 `PATH` 등록이 필요합니다. 시작 전에 Java와 OpenRouter 크레딧을 확인하고, 완료될 때까지 앱이나 데이터 업데이트를 실행하지 마세요.
+
+실행 창에는 `[PDF 현재/전체] 파일명` 형식으로 추출 진행률이 표시됩니다. PyMuPDF가 빈 텍스트를 반환해 OpenDataLoader fallback으로 넘어간 PDF는 한 파일에도 여러 분이 걸릴 수 있습니다. 다만 한 PDF에서 5분 안에 반환하지 않으면 해당 Java 변환을 종료하고 `source-extraction-failed`로 기록한 뒤 다음 문서를 계속 처리하므로, 진행 번호가 잠시 멈춰 있어도 창을 강제로 닫지 마세요.
+
+두 추출기가 모두 실패한 PDF는 원본을 삭제하지 않고 새 build manifest에
+`excluded / source-extraction-failed`로 기록합니다. 해당 문서에는 chunk와 vector를
+만들지 않지만 다음 PDF의 파싱과 전체 embedding은 계속합니다. 완료 화면의
+`원본 PDF`, `인덱싱 성공`, `추출 실패/제외` 수로 부분 제외 결과를 확인할 수
+있습니다.
+
+### 3. 전환과 데이터 보존
+
+- 재구축과 검증 중에는 기존 active V2가 계속 질문과 검색을 처리합니다.
+- 성공 문서와 명시적 제외 결정을 합친 successor가 manifest·catalog·FAISS 검증을 통과한 경우에만 active 선택을 원자적으로 전환합니다.
+- 개별 PDF의 이중 파싱 실패는 문서 단위 제외로 처리합니다. embedding API, profile, source inventory 또는 snapshot 무결성 검증이 실패하거나 실행을 중단하면 기존 active 선택은 바뀌지 않으며 계속 검색할 수 있습니다.
+- 사용자 확인 뒤 설정 교정까지 끝난 상태에서 build가 실패했다면 교정된 `PDF_*` 값은 유지됩니다. 오류 원인을 해결한 뒤 `REBUILD_V2.bat`을 다시 실행하세요. 새 successor가 성공하기 전까지 incremental update는 profile 불일치로 계속 차단될 수 있습니다.
+- 원본 `data/reports.db`와 `data/downloaded`의 PDF는 삭제하지 않습니다.
+- 전환 직전 active snapshot은 검증된 predecessor로 잠시 보존합니다. 전환 후 검색에는 새 snapshot만 사용하며 predecessor는 제공하지 않습니다.
+- `data/retrieval/v2`를 직접 삭제하거나 파일을 옮기지 마세요. 수동 변경은 active 선택, 검증 기록과 복구 경계를 손상할 수 있습니다.
+
+### 4. 파싱 실패 문서 재처리
+
+일반 데이터 업데이트는 active manifest에 같은 SHA-256으로 이미 기록된
+`source-extraction-failed` 문서를 자동으로 반복 파싱하지 않습니다. OpenDataLoader
+fallback이 오래 걸리는 문서 때문에 매 업데이트가 지연되거나 동일한 partial
+snapshot이 반복 게시되는 것을 막기 위한 동작입니다.
+
+나중에 Java 설정이나 PDF 상태를 정비한 뒤 앱의 Monitoring Mode에서
+`운영 상태 → 임베딩 누락 문서 → 파싱 실패 문서 재시도`를 누르세요. 이 명시적
+재시도에서 성공하면 문서는 다음 successor에 `included`로 다시 들어갑니다.
+다시 실패하면 검색 가능한 corpus는 그대로 유지하되, 명시적 재시도 시각을 새
+감사 build에 남기고 실패 상태를 계속 표시합니다. 다른 대상 처리는 중단하지
+않습니다.
+
 ## 실패 메시지별 확인 사항
 
 - `source PDF is missing`: DB에 기록된 PDF가 `data/downloaded`에 없습니다.
+- `source-extraction-failed`: PyMuPDF와 OpenDataLoader가 모두 텍스트를 만들지 못한 문서입니다. 원본은 보존되며 관리 화면에서 나중에 다시 시도할 수 있습니다.
 - `same-space canary failed`: `.env`의 임베딩 모델이 V1 생성 당시 모델과 다르거나 API 호출에 실패했습니다.
 - `USE_PARENT_CHILD=true`: 현재 V1이 단일 레벨 chunk 설정입니다. 원클릭 마이그레이션 지원 범위가 아니며 아무 데이터도 활성화하지 않았습니다.
 - `standard layout`: `DB_PATH`, `FAISS_DIR`, `SAVE_DIR`가 기본 한 폴더 구조가 아닙니다.

@@ -21,11 +21,32 @@ from typing import Any, Callable
 
 from src.configs import config
 from src.configs.settings import BASE_DIR
-from src.retrieval.runtime_guard import guard_before_retrieval_write
 
 JOB_DIR = BASE_DIR / "logs" / "data_update_jobs"
 STATUS_PATH = JOB_DIR / "status.json"
 LOG_PATH = JOB_DIR / "latest.log"
+
+_SAFE_EMBEDDING_FAILURE_HINTS = (
+    ("provider unavailable", "provider unavailable"),
+    ("insufficient credit", "insufficient provider credits"),
+    ("rate limit", "provider rate limit reached"),
+    ("status code 429", "provider rate limit reached"),
+    ("timed out", "provider request timed out"),
+    ("timeout", "provider request timed out"),
+    ("connection", "provider connection failed"),
+    ("status code 401", "provider authentication failed"),
+    ("status code 403", "provider authentication failed"),
+    ("authentication", "provider authentication failed"),
+)
+
+
+def guard_before_retrieval_write(*args, **kwargs):
+    """Load native write validation only when a write is actually requested."""
+    from src.retrieval.runtime_guard import (
+        guard_before_retrieval_write as _guard_before_retrieval_write,
+    )
+
+    return _guard_before_retrieval_write(*args, **kwargs)
 
 
 class ParentProcessExited(RuntimeError):
@@ -268,17 +289,31 @@ def _popen_creation_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
-def build_embedding_command(limit: int | None = None) -> list[str]:
+def build_embedding_command(
+    limit: int | None = None,
+    *,
+    continue_on_extraction_error: bool = False,
+    retry_extraction_failures: bool = False,
+) -> list[str]:
     """Build the embed_pipeline command for pending reports."""
     command = [sys.executable, "-m", "src.core.embed_pipeline"]
     if limit is None:
         command.append("--all")
     else:
         command.extend(["--limit", str(max(0, int(limit)))])
+    if continue_on_extraction_error:
+        command.append("--continue-on-extraction-error")
+    if retry_extraction_failures:
+        command.append("--retry-extraction-failures")
     return command
 
 
-def start_embedding_job(*, label: str, limit: int | None = None) -> dict[str, Any]:
+def start_embedding_job(
+    *,
+    label: str,
+    limit: int | None = None,
+    retry_extraction_failures: bool = False,
+) -> dict[str, Any]:
     """Start a detached embedding-only job and return the initial status."""
     guard_before_retrieval_write(
         config.DB_PATH,
@@ -290,6 +325,8 @@ def start_embedding_job(*, label: str, limit: int | None = None) -> dict[str, An
     command = [sys.executable, "-m", "src.core.data_update_jobs", "embed", "--label", label]
     if limit is not None:
         command.extend(["--limit", str(max(0, int(limit)))])
+    if retry_extraction_failures:
+        command.append("--retry-extraction-failures")
     command.extend(["--parent-pid", str(parent_pid)])
     process = subprocess.Popen(
         command,
@@ -306,6 +343,7 @@ def start_embedding_job(*, label: str, limit: int | None = None) -> dict[str, An
         "pid": process.pid,
         "label": label,
         "embedding_limit": limit,
+        "retry_extraction_failures": retry_extraction_failures,
         "log_path": str(LOG_PATH),
         "parent_pid": parent_pid,
     }
@@ -430,6 +468,7 @@ def run_embedding_job(
     *,
     label: str,
     limit: int | None = None,
+    retry_extraction_failures: bool = False,
     parent_pid: int | None = None,
 ) -> int:
     """Run an embedding-only job and persist progress status for the GUI."""
@@ -446,6 +485,7 @@ def run_embedding_job(
                 "message": f"{label}: 미임베딩 문서 임베딩 중...",
                 "label": label,
                 "embedding_limit": limit,
+                "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -475,22 +515,35 @@ def run_embedding_job(
                 }
             )
 
-        code, _ = _run_subprocess_stream(
-            build_embedding_command(limit),
+        code, output = _run_subprocess_stream(
+            build_embedding_command(
+                limit,
+                continue_on_extraction_error=True,
+                retry_extraction_failures=retry_extraction_failures,
+            ),
             on_line=on_embed_line,
             parent_pid=parent_pid,
         )
         if code != 0:
-            raise RuntimeError(f"embedding failed with exit code {code}")
+            raise RuntimeError(embedding_failure_message(code, output))
+        extraction_failure_count = embedding_extraction_failure_count(output)
+        completion_message = (
+            f"{label}: 처리는 완료했지만 파싱 실패 문서 "
+            f"{extraction_failure_count}건이 관리 목록에 남았습니다."
+            if extraction_failure_count
+            else f"{label}: 임베딩 작업이 완료되었습니다."
+        )
 
         _write_status(
             {
                 "state": "succeeded",
                 "phase": "done",
                 "percent": 100,
-                "message": f"{label}: 임베딩 작업이 완료되었습니다.",
+                "message": completion_message,
                 "label": label,
                 "embedding_limit": limit,
+                "embedding_failure_count": extraction_failure_count,
+                "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -506,6 +559,7 @@ def run_embedding_job(
                 "message": f"{label}: 임베딩 작업 실패 - {exc}",
                 "label": label,
                 "embedding_limit": limit,
+                "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -530,6 +584,43 @@ def embedding_file_progress_from_line(line: str) -> tuple[int, int, str] | None:
     total = int(match.group(2))
     label = match.group(3).strip()
     return current, total, label
+
+
+def embedding_failure_message(exit_code: int, output: str) -> str:
+    """Return an actionable, concise error for a failed embedding subprocess."""
+
+    if "incremental extractor differs from the active embedding profile" in output:
+        return (
+            "활성 V2 추출 프로필이 현재 설정과 다릅니다. "
+            "REBUILD_V2.bat --check로 확인한 뒤 REBUILD_V2.bat을 실행하세요."
+        )
+    lowered = output.lower()
+    detail = next(
+        (
+            safe_detail
+            for marker, safe_detail in _SAFE_EMBEDDING_FAILURE_HINTS
+            if marker in lowered
+        ),
+        "",
+    )
+    message = f"embedding failed with exit code {exit_code}"
+    return f"{message}: {detail}" if detail else message
+
+
+def embedding_extraction_failure_count(output: str) -> int:
+    """Return the safe aggregate count emitted by V1 or V2 extraction handling."""
+
+    v1_matches = re.findall(
+        r"Quick Start is continuing after\s+(\d+)\s+PDF parsing failure",
+        output,
+        flags=re.IGNORECASE,
+    )
+    if v1_matches:
+        return int(v1_matches[-1])
+    return sum(
+        "Excluding PDF after primary and fallback extraction failed:" in line
+        for line in output.splitlines()
+    )
 
 
 def run_update_job(
@@ -652,25 +743,33 @@ def run_update_job(
                 }
             )
 
-        code, _ = _run_subprocess_stream(
-            [sys.executable, "-m", "src.core.embed_pipeline", "--all"],
+        code, output = _run_subprocess_stream(
+            build_embedding_command(None, continue_on_extraction_error=True),
             on_line=on_embed_line,
             parent_pid=parent_pid,
         )
         if code != 0:
-            raise RuntimeError(f"embedding failed with exit code {code}")
+            raise RuntimeError(embedding_failure_message(code, output))
+        extraction_failure_count = embedding_extraction_failure_count(output)
+        completion_message = (
+            f"{label}: 업데이트는 완료했지만 파싱 실패 문서 "
+            f"{extraction_failure_count}건이 관리 목록에 남았습니다."
+            if extraction_failure_count
+            else f"{label}: 데이터 업데이트가 완료되었습니다."
+        )
 
         _write_status(
             {
                 "state": "succeeded",
                 "phase": "done",
                 "percent": 100,
-                "message": f"{label}: 데이터 업데이트가 완료되었습니다.",
+                "message": completion_message,
                 "label": label,
                 "start_date": start_date,
                 "end_date": end_date,
                 "selected_dates": normalized_dates,
                 "categories": selected_categories,
+                "embedding_failure_count": extraction_failure_count,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -711,6 +810,7 @@ def main(argv: list[str] | None = None) -> int:
     embed_parser = subparsers.add_parser("embed")
     embed_parser.add_argument("--label", required=True)
     embed_parser.add_argument("--limit", type=int)
+    embed_parser.add_argument("--retry-extraction-failures", action="store_true")
     embed_parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)
 
@@ -727,6 +827,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_embedding_job(
             label=args.label,
             limit=args.limit,
+            retry_extraction_failures=args.retry_extraction_failures,
             parent_pid=args.parent_pid,
         )
     return 1

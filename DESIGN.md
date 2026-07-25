@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Draft
-- Last refreshed: 2026-07-24
+- Last refreshed: 2026-07-25
 - Primary product surfaces: Streamlit chat, conversation/data controls in the sidebar, and developer-only Monitoring Mode.
 - Evidence reviewed: `README.md`, `docs/QUICK_START.md`, `docs/MONITORING.md`, `apps/gui/app.py`, `src/core/chat_ui_helpers.py`, and `apps/gui/examples/example1.png` / `example2.png`.
 
@@ -62,6 +62,7 @@
 - Touch/hover differences: Do not make hover the only way to discover or understand an action.
 
 ## Interaction states
+- Loading: Render the chat shell before initializing the search graph. Show engine preparation near the input, accept at most one pending first question, and process it automatically when preparation completes.
 - Loading: Show the running message or job phase without blocking navigation to another conversation.
 - Empty: Explain missing data or no-result state and expose only actionable retries.
 - Error: Use a safe user message and preserve diagnostic evidence for maintainers.
@@ -77,8 +78,9 @@
 ## Implementation constraints
 - Framework/styling system: Python 3.10+, Streamlit 1.54, and inline CSS/HTML only where native Streamlit components are insufficient.
 - Design-token constraints: No separate design-system dependency; reuse Streamlit semantics and centralize repeated custom values before expanding them.
-- Performance constraints: Reruns should avoid repeated database scans, duplicate file loads, and unnecessary forced scroll attempts.
+- Performance constraints: Reruns should avoid repeated database scans, duplicate file loads, unnecessary forced scroll attempts, and string-valued fragment intervals that trigger pandas solely for duration parsing.
 - Compatibility constraints: Preserve widget keys, session-state names, runtime-smoke behavior, Windows-first launchers, and current local data formats.
+- Deployment constraint: The background chat-job registry is process-local. Activate code that moves its cached owner only when no answer job is in flight; routine Streamlit reruns keep the stable module-qualified cache key.
 - Test/screenshot expectations: Pure view-model/HTML helpers require unit tests; renderer changes require targeted Streamlit/runtime checks, and visible layout changes require before/after screenshots.
 
 ## Open questions

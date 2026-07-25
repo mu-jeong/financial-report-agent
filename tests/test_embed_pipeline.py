@@ -27,9 +27,15 @@ def test_run_pipeline_holds_cutover_fence_for_the_whole_update(
         def __exit__(self, *_args):
             events.append("unlocked")
 
-    def run_locked(limit, *, continue_on_extraction_error=False):
+    def run_locked(
+        limit,
+        *,
+        continue_on_extraction_error=False,
+        retry_extraction_failures=False,
+    ):
         assert events == ["locked"]
         assert continue_on_extraction_error is False
+        assert retry_extraction_failures is False
         events.append(f"pipeline:{limit}")
         return 0
 
@@ -253,6 +259,7 @@ def test_run_pipeline_records_extraction_engine_on_failed_pending_document(tmp_p
     }
 
     monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(pdf_dir))
+    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(tmp_path / "reports.db"))
     monkeypatch.setattr(embed_pipeline.config, "FAISS_DIR", str(tmp_path / "vector_db"))
     monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setattr(embed_pipeline.config, "UNEMBEDDED_EXTRACTION_ENGINE", "opendataloader", raising=False)
@@ -307,6 +314,7 @@ def test_quickstart_mode_continues_after_legacy_pdf_extraction_failure(
     }
 
     monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(pdf_dir))
+    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(tmp_path / "reports.db"))
     monkeypatch.setattr(embed_pipeline.config, "FAISS_DIR", str(tmp_path / "vector_db"))
     monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setattr(
@@ -351,7 +359,7 @@ def test_quickstart_mode_continues_after_legacy_pdf_extraction_failure(
     ]
 
 
-def test_quickstart_mode_keeps_native_snapshot_after_source_extraction_failure(
+def test_native_source_extraction_error_cannot_be_hidden_as_quickstart_success(
     tmp_path,
     monkeypatch,
 ):
@@ -383,10 +391,7 @@ def test_quickstart_mode_keeps_native_snapshot_after_source_extraction_failure(
     monkeypatch.setattr(build_service, "execute_incremental_update", fail_update)
 
     assert embed_pipeline.run_pipeline() == 1
-    assert (
-        embed_pipeline.run_pipeline(continue_on_extraction_error=True)
-        == 0
-    )
+    assert embed_pipeline.run_pipeline(continue_on_extraction_error=True) == 1
 
 
 def test_quickstart_mode_does_not_hide_native_profile_mismatch(
@@ -469,7 +474,10 @@ def test_run_pipeline_routes_native_runtime_to_incremental_update(
 
     monkeypatch.setattr(build_service, "execute_incremental_update", fake_execute)
 
-    assert embed_pipeline.run_pipeline(test_limit=1) == 0
+    assert embed_pipeline.run_pipeline(
+        test_limit=1,
+        retry_extraction_failures=True,
+    ) == 0
     assert len(calls) == 1
     assert calls[0][0] == str(data_root / "reports.db")
     assert calls[0][1] == str(source_root)
@@ -477,6 +485,7 @@ def test_run_pipeline_routes_native_runtime_to_incremental_update(
     assert calls[0][2]["embeddings"] is embeddings
     assert calls[0][2]["extractor_name"] == "opendataloader"
     assert calls[0][2]["allow_extraction_fallback"] is False
+    assert calls[0][2]["retry_extraction_failures"] is True
     assert calls[0][2]["use_parent_child"] is False
     assert calls[0][2]["single_chunk_size"] == 777
 

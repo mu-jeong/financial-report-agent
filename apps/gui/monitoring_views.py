@@ -10,13 +10,13 @@ from pathlib import Path
 import streamlit as st
 
 from apps.gui import data_views
+from apps.gui import search_engine
 from src.configs import config as config_module
 from src.core import compare_pdf_extractors
 from src.core import conversation_store
 from src.core import issue_report_store
 from src.core import monitoring
 from src.core import status as status_module
-from src.graphs import main_graph as main_graph_module
 
 
 MONITORING_EVAL_RUN_DIR = Path("debug") / "evaluation_runs"
@@ -322,7 +322,7 @@ def _render_experiment_monitoring() -> None:
                 else:
                     run = monitoring.run_evaluation_dataset(
                         dataset,
-                        main_graph_module.graph_app.invoke,
+                        search_engine.invoke_graph,
                         output_dir=MONITORING_EVAL_RUN_DIR,
                         selected_case_ids=selected_case_ids,
                         latency_threshold_seconds=float(latency_threshold),
@@ -391,7 +391,7 @@ def _render_experiment_monitoring() -> None:
                     else:
                         rerun = monitoring.run_evaluation_dataset(
                             dataset,
-                            main_graph_module.graph_app.invoke,
+                            search_engine.invoke_graph,
                             output_dir=MONITORING_EVAL_RUN_DIR,
                             selected_case_ids=failed_case_ids,
                             latency_threshold_seconds=float(latency_threshold),
@@ -553,7 +553,7 @@ def _render_issue_report_monitoring() -> None:
             try:
                 run = monitoring.run_evaluation_dataset(
                     selected_dataset,
-                    main_graph_module.graph_app.invoke,
+                    search_engine.invoke_graph,
                     output_dir=MONITORING_EVAL_RUN_DIR,
                     selected_case_ids=[case.get("id") for case in selected_dataset["cases"]],
                     execution_mode="regression_candidate_current_data",

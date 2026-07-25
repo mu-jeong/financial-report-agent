@@ -9,6 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from apps.gui import chat_jobs
+from apps.gui import search_engine
 from src.configs import config as config_module
 from src.core import conversation_store
 from src.core import issue_report_store
@@ -17,6 +18,42 @@ from src.core.chat_ui_helpers import (
     build_no_result_suggestions,
 )
 from src.utils import citations
+
+
+def _search_engine_status_content(status: dict) -> tuple[str, str]:
+    state = status.get("state")
+    if state == "ready":
+        return "caption", "검색 엔진 준비 완료"
+    if state == "failed":
+        return (
+            "error",
+            "검색 엔진을 준비하지 못했습니다. 다시 준비한 뒤 질문을 처리할 수 있습니다.",
+        )
+    return (
+        "info",
+        "검색 엔진을 준비하고 있습니다. 첫 질문은 한 건까지 바로 입력할 수 있으며, "
+        "준비가 끝나면 자동으로 처리됩니다.",
+    )
+
+
+@st.fragment(run_every=1.0)
+def render_search_engine_status() -> None:
+    status = search_engine.start_search_engine_warmup()
+    queue_was_pending = bool(
+        st.session_state.get("search_engine_queue_was_pending", False)
+    )
+    if queue_was_pending and not chat_jobs.has_pending_search_engine_job():
+        st.session_state["search_engine_queue_was_pending"] = False
+        st.rerun(scope="app")
+    message_kind, message = _search_engine_status_content(status)
+    getattr(st, message_kind)(message)
+    if status["state"] == "failed" and st.button(
+        "검색 엔진 다시 준비",
+        key="retry_search_engine_warmup",
+        use_container_width=True,
+    ):
+        search_engine.retry_search_engine_warmup()
+        st.rerun(scope="fragment")
 
 
 def _render_issue_report_control(
@@ -327,13 +364,35 @@ def render_chat(current_id: str, current_thread: dict) -> None:
         _scroll_to_anchor(pending_scroll_anchor)
 
     has_running_job = chat_jobs.thread_has_running_job(messages)
+    has_pending_engine_job = chat_jobs.has_pending_search_engine_job()
+    st.session_state["search_engine_queue_was_pending"] = has_pending_engine_job
+    chat_input_locked = has_running_job or has_pending_engine_job
     if has_running_job:
-        st.caption("이 대화의 답변을 백그라운드에서 생성 중입니다. 다른 대화로 이동해도 작업은 계속됩니다.")
+        waiting_for_engine = any(
+            message.get("role") == "assistant"
+            and (message.get("metadata") or {}).get("status") == "running"
+            and (message.get("metadata") or {}).get("phase") == "waiting_for_engine"
+            for message in messages
+        )
+        if waiting_for_engine:
+            st.caption(
+                "첫 질문이 대기 중입니다. 검색 엔진 준비가 끝나면 자동으로 처리되며, "
+                "그동안 추가 질문 입력은 잠시 잠깁니다."
+            )
+        else:
+            st.caption("이 대화의 답변을 백그라운드에서 생성 중입니다. 다른 대화로 이동해도 작업은 계속됩니다.")
+    elif has_pending_engine_job:
+        st.caption(
+            "다른 대화의 첫 질문이 검색 엔진 준비를 기다리고 있습니다. "
+            "준비가 끝나면 여기에서도 질문할 수 있습니다."
+        )
+
+    render_search_engine_status()
 
     with st.container(key="chat_entry_area"):
         user_query = st.chat_input(
             "질문을 입력해 주세요... (ex: 최근 발행된 현대차 리포트 요약해줘)",
-            disabled=has_running_job,
+            disabled=chat_input_locked,
         )
 
         _render_issue_report_control(
@@ -342,27 +401,36 @@ def render_chat(current_id: str, current_thread: dict) -> None:
         )
 
     suggested_query = st.session_state.pop("pending_suggested_query", None)
-    if suggested_query and not has_running_job:
+    if suggested_query and not chat_input_locked:
         user_query = suggested_query
 
     if user_query:
-        if not messages and (
+        should_rename_thread = not messages and (
             current_thread["name"] == "새로운 대화"
             or current_thread["name"].startswith("대화 ")
-        ):
+        )
+        if should_rename_thread:
             thread_name = user_query[:15] + "..."
-            conversation_store.rename_thread(current_id, thread_name)
         else:
             thread_name = current_thread["name"]
 
         prior_search_scope = chat_jobs.latest_search_scope(messages)
-        conversation_store.append_message(current_id, "user", user_query)
-        assistant_message_id = chat_jobs.start_chat_response_job(
-            thread_id=current_id,
-            thread_name=thread_name,
-            user_query=user_query,
-            prior_search_scope=prior_search_scope,
-        )
+        try:
+            assistant_message_id = chat_jobs.start_chat_response_job(
+                thread_id=current_id,
+                thread_name=thread_name,
+                user_query=user_query,
+                prior_search_scope=prior_search_scope,
+            )
+        except chat_jobs.PendingSearchEngineQuestionError:
+            st.warning(
+                "검색 엔진 준비를 기다리는 첫 질문이 이미 있습니다. "
+                "준비가 끝난 뒤 다시 입력해 주세요."
+            )
+            st.rerun(scope="app")
+            return
+        if should_rename_thread:
+            conversation_store.rename_thread(current_id, thread_name)
 
         with st.chat_message("user"):
             st.markdown(user_query)
@@ -379,7 +447,7 @@ def render_chat(current_id: str, current_thread: dict) -> None:
             unsafe_allow_html=True,
         )
         with st.chat_message("assistant"):
-            st.info("AI가 리포트 내용을 검색하고 분석 중입니다...")
+            st.info("질문을 접수했습니다. 검색 엔진 준비 후 자동으로 분석합니다...")
         st.session_state.pending_scroll_anchor = live_anchor_id
         _scroll_to_anchor(live_anchor_id)
         st.rerun(scope="app")

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import resources
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 
 import fitz
 
@@ -29,6 +31,8 @@ ENGINE_ALIASES = {
     "nutrient": "pdf-to-markdown",
     "nutrient-pdf-to-markdown": "pdf-to-markdown",
 }
+_OPENDATALOADER_JAR_NAME = "opendataloader-pdf-cli.jar"
+_OPENDATALOADER_TIMEOUT_SECONDS = 300
 
 _MARKER_MODELS = None
 _MARKER_TABLE_PROCESSORS = {
@@ -507,22 +511,88 @@ def _extract_pspdfkit_pdf_to_markdown(pdf_path: Path) -> str:
 def _extract_opendataloader_markdown(pdf_path: Path) -> str:
     _ensure_java_on_path()
 
-    from langchain_opendataloader_pdf import OpenDataLoaderPDFLoader
+    with tempfile.TemporaryDirectory(prefix="finance-llm-opendataloader-") as temporary:
+        output_dir = Path(temporary)
+        _run_opendataloader_cli(
+            pdf_path,
+            output_dir,
+            timeout_seconds=_OPENDATALOADER_TIMEOUT_SECONDS,
+        )
+        output_files = sorted(output_dir.glob("*.json"))
+        if not output_files:
+            raise RuntimeError("opendataloader produced no JSON output")
+        return "\n\n".join(
+            text_from_opendataloader_json_without_tables(
+                output_file.read_text(encoding="utf-8")
+            )
+            for output_file in output_files
+        )
 
-    loader = OpenDataLoaderPDFLoader(
-        file_path=str(pdf_path),
-        format="json",
-        split_pages=False,
-        quiet=True,
-        table_method="default",
-        reading_order="xycut",
-        image_output="off",
+
+def _run_opendataloader_cli(
+    pdf_path: Path,
+    output_dir: Path,
+    *,
+    timeout_seconds: int,
+) -> None:
+    jar_ref = resources.files("opendataloader_pdf").joinpath(
+        "jar",
+        _OPENDATALOADER_JAR_NAME,
     )
-    documents = loader.load()
-    return "\n\n".join(
-        text_from_opendataloader_json_without_tables(doc.page_content)
-        for doc in documents
-    )
+    with resources.as_file(jar_ref) as jar_path:
+        command = [
+            "java",
+            "-Djava.awt.headless=true",
+            "-Dapple.awt.UIElement=true",
+            "-jar",
+            str(jar_path),
+            str(pdf_path),
+            "--output-dir",
+            str(output_dir),
+            "--format",
+            "json",
+            "--quiet",
+            "--table-method",
+            "default",
+            "--reading-order",
+            "xycut",
+            "--image-output",
+            "off",
+        ]
+        _run_opendataloader_process(
+            command,
+            pdf_path=pdf_path,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+def _run_opendataloader_process(
+    command: list[str],
+    *,
+    pdf_path: Path,
+    timeout_seconds: int,
+) -> None:
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(
+            "opendataloader extraction timed out after "
+            f"{timeout_seconds} seconds for {pdf_path.name}"
+        ) from exc
+
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        stdout = (completed.stdout or "").strip()
+        message = stderr or stdout or f"exit code {completed.returncode}"
+        raise RuntimeError(f"opendataloader failed: {message}")
 
 
 def _ensure_java_on_path() -> None:

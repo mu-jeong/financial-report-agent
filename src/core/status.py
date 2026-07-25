@@ -165,7 +165,9 @@ def _safe_native_info(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     paths = retrieval_paths(db_path)
     try:
-        selection = inspect_runtime(db_path)
+        # The background search-engine warmup owns full FAISS validation.
+        # Sidebar status needs catalog metadata only and must remain cheap.
+        selection = inspect_runtime(db_path, validate_snapshot=False)
     except Exception as exc:
         return _unavailable_native_info(paths, exc)
     if selection.mode == "legacy_v1":
@@ -446,17 +448,44 @@ def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list
         try:
             rows = connection.execute(
                 """
-                WITH latest AS (
-                    SELECT canonical_relative_path, MAX(report_id) AS report_id
-                    FROM reports GROUP BY canonical_relative_path
-                )
                 SELECT report.report_id AS id, report.report_date, report.report_type,
                        report.target_name, report.title, report.broker,
-                       report.canonical_relative_path
-                FROM latest
-                JOIN reports AS report ON report.report_id = latest.report_id
+                       report.canonical_relative_path,
+                       CASE
+                           WHEN json_extract(decision.value, '$.reason_code')
+                                = 'source-extraction-failed'
+                           THEN profile.extractor
+                           ELSE NULL
+                       END AS embedding_extraction_engine,
+                       CASE
+                           WHEN json_extract(decision.value, '$.reason_code')
+                                = 'source-extraction-failed'
+                           THEN 'NativeSourceExtractionError: primary and fallback extraction failed'
+                           ELSE NULL
+                       END AS embedding_last_error,
+                       CASE
+                           WHEN json_extract(decision.value, '$.reason_code')
+                                = 'source-extraction-failed'
+                           THEN build.created_at
+                           ELSE NULL
+                       END AS embedding_last_attempt_at
+                FROM retrieval_runtime AS runtime
+                JOIN retrieval_builds AS build
+                  ON build.build_id = runtime.active_build_id
+                JOIN embedding_profiles AS profile
+                  ON profile.profile_id = build.profile_id
+                JOIN json_each(build.source_manifest_json, '$.reports') AS decision
+                JOIN reports AS report
+                  ON report.report_uid
+                     = json_extract(decision.value, '$.report_uid')
                 LEFT JOIN active_reports AS active ON active.report_uid = report.report_uid
-                WHERE active.report_uid IS NULL
+                WHERE runtime.runtime_id = 1
+                  AND active.report_uid IS NULL
+                  AND json_extract(decision.value, '$.status') = 'excluded'
+                  AND json_extract(decision.value, '$.reason_code') IN (
+                      'legacy_not_vectorized',
+                      'source-extraction-failed'
+                  )
                 ORDER BY report.report_date DESC, report.report_id DESC
                 LIMIT ?
                 """,
@@ -468,9 +497,6 @@ def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list
             {
                 **dict(row),
                 "file_name": str(row["canonical_relative_path"]).split("/")[-1],
-                "embedding_extraction_engine": None,
-                "embedding_last_error": None,
-                "embedding_last_attempt_at": None,
             }
             for row in rows
         ]

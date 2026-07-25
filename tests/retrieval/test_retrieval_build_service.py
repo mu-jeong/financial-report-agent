@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import pickle
 import sqlite3
 from dataclasses import replace
@@ -345,6 +346,58 @@ def test_full_corpus_successor_closes_fallback_and_adds_new_member(tmp_path: Pat
     assert (data_root / result.evidence_manifest_relative_path).is_file()
 
 
+def test_full_corpus_successor_records_extraction_failure_and_embeds_remaining_reports(
+    tmp_path: Path,
+) -> None:
+    data_root, sources = _native_seed(tmp_path)
+    embeddings = DeterministicEmbeddings()
+
+    def extract_with_one_failure(path: Path, engine: str) -> str:
+        if path.name == "a.pdf":
+            raise RuntimeError("primary and fallback failed")
+        return _extract(path, engine)
+
+    plan = _prepare(
+        data_root,
+        sources,
+        embeddings,
+        extractor=extract_with_one_failure,
+    )
+
+    decisions = {entry.report_uid: entry for entry in plan.manifest.entries}
+    current_by_name = {report.file_name: report for report in plan.reports}
+    assert decisions[current_by_name["a.pdf"].report_uid].status == "excluded"
+    assert decisions[current_by_name["b.pdf"].report_uid].status == "included"
+    assert (
+        decisions[current_by_name["a.pdf"].report_uid].reason_code
+        == "source-extraction-failed"
+    )
+    assert plan.manifest.included_count == 1
+    assert plan.manifest.excluded_count == 2
+    assert {parent.report_uid for parent in plan.parents} == {
+        current_by_name["b.pdf"].report_uid
+    }
+
+    result = materialize_candidate(plan, data_root)
+    outcome = publish_candidate(result, data_root)
+
+    catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
+    with sqlite3.connect(catalog) as connection:
+        active_files = {
+            row[0]
+            for row in connection.execute(
+                "SELECT canonical_relative_path FROM active_reports"
+            )
+        }
+        failed_row = connection.execute(
+            "SELECT COUNT(*) FROM reports WHERE report_uid = ?",
+            (current_by_name["a.pdf"].report_uid,),
+        ).fetchone()[0]
+    assert outcome.active_snapshot_id == plan.snapshot_id
+    assert active_files == {"downloaded/b.pdf"}
+    assert failed_row == 1
+
+
 def test_incremental_update_reuses_unchanged_vectors_and_processes_only_pending_pdf(
     tmp_path: Path,
 ) -> None:
@@ -597,7 +650,7 @@ def test_incremental_legacy_profile_accepts_its_recorded_fallback(
     assert plan.profile == profile
 
 
-def test_incremental_source_extraction_failure_leaves_active_catalog_unchanged(
+def test_incremental_source_extraction_failure_is_recorded_and_later_retried_explicitly(
     tmp_path: Path,
 ) -> None:
     data_root, sources = _native_seed(
@@ -608,43 +661,134 @@ def test_incremental_source_extraction_failure_leaves_active_catalog_unchanged(
     _activate_seed_for_incremental(data_root)
     catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
 
-    def catalog_state():
-        with sqlite3.connect(catalog) as connection:
-            return (
-                connection.execute(
-                    """
-                    SELECT active_snapshot_id, predecessor_snapshot_id,
-                           publication_generation, write_epoch
-                    FROM retrieval_runtime WHERE runtime_id = 1
-                    """
-                ).fetchone(),
-                connection.execute("SELECT COUNT(*) FROM retrieval_builds").fetchone()[0],
-                connection.execute("SELECT COUNT(*) FROM vector_snapshots").fetchone()[0],
-                connection.execute("SELECT COUNT(*) FROM active_reports").fetchone()[0],
-            )
-
-    before = catalog_state()
-
+    extraction_calls: list[str] = []
     def fail_extract(_path: Path, _engine: str):
+        extraction_calls.append(_path.name)
         raise RuntimeError("both parsers failed")
 
-    with pytest.raises(build_service.NativeSourceExtractionError, match="b.pdf"):
-        execute_incremental_update(
-            data_root / "reports.db",
-            sources,
-            data_root=data_root,
-            embeddings=DeterministicEmbeddings(),
-            model="model-a",
-            extractor_name="deterministic-extractor",
-            fallback_extractor_name="",
-            allow_extraction_fallback=False,
-            extractor=fail_extract,
-            metadata_parser=_metadata,
-            parent_chunk_size=2000,
-            child_chunk_size=500,
-        )
+    failed_result, failed_outcome = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        data_root=data_root,
+        embeddings=DeterministicEmbeddings(),
+        model="model-a",
+        extractor_name="deterministic-extractor",
+        fallback_extractor_name="",
+        allow_extraction_fallback=False,
+        extractor=fail_extract,
+        metadata_parser=_metadata,
+        parent_chunk_size=2000,
+        child_chunk_size=500,
+    )
 
-    assert catalog_state() == before
+    assert extraction_calls == ["b.pdf"]
+    with sqlite3.connect(catalog) as connection:
+        manifest = json.loads(
+            connection.execute(
+                "SELECT source_manifest_json FROM retrieval_builds WHERE build_id = ?",
+                (failed_result.build_id,),
+            ).fetchone()[0]
+        )
+        active_files = {
+            row[0]
+            for row in connection.execute(
+                "SELECT canonical_relative_path FROM active_reports"
+            )
+        }
+    failed_entries = [
+        row
+        for row in manifest["reports"]
+        if row["reason_code"] == "source-extraction-failed"
+    ]
+    assert failed_outcome.active_snapshot_id == failed_result.snapshot_id
+    assert len(failed_entries) == 1
+    assert active_files == {"downloaded/a.pdf"}
+
+    with sqlite3.connect(catalog) as connection:
+        before_retry = connection.execute(
+            """
+            SELECT active_snapshot_id, publication_generation, write_epoch
+            FROM retrieval_runtime WHERE runtime_id = 1
+            """
+        ).fetchone()
+    extraction_calls.clear()
+    repeated_result, repeated_outcome = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        data_root=data_root,
+        embeddings=DeterministicEmbeddings(),
+        model="model-a",
+        extractor_name="deterministic-extractor",
+        fallback_extractor_name="",
+        allow_extraction_fallback=False,
+        extractor=fail_extract,
+        metadata_parser=_metadata,
+        parent_chunk_size=2000,
+        child_chunk_size=500,
+        retry_extraction_failures=True,
+    )
+    with sqlite3.connect(catalog) as connection:
+        after_retry = connection.execute(
+            """
+            SELECT active_snapshot_id, publication_generation, write_epoch
+            FROM retrieval_runtime WHERE runtime_id = 1
+            """
+        ).fetchone()
+    assert extraction_calls == ["b.pdf"]
+    assert repeated_outcome.active_snapshot_id == repeated_result.snapshot_id
+    assert after_retry[0] == repeated_result.snapshot_id
+    assert after_retry[0] != before_retry[0]
+    assert after_retry[1] == before_retry[1] + 1
+    assert after_retry[2] == before_retry[2] + 1
+
+    extraction_calls.clear()
+
+    def successful_extract(path: Path, engine: str) -> str:
+        extraction_calls.append(path.name)
+        return _extract(path, engine)
+
+    skipped = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        data_root=data_root,
+        embeddings=DeterministicEmbeddings(),
+        model="model-a",
+        extractor_name="deterministic-extractor",
+        fallback_extractor_name="",
+        allow_extraction_fallback=False,
+        extractor=successful_extract,
+        metadata_parser=_metadata,
+        parent_chunk_size=2000,
+        child_chunk_size=500,
+    )
+    assert skipped is None
+    assert extraction_calls == []
+
+    retried_result, retried_outcome = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        data_root=data_root,
+        embeddings=DeterministicEmbeddings(),
+        model="model-a",
+        extractor_name="deterministic-extractor",
+        fallback_extractor_name="",
+        allow_extraction_fallback=False,
+        extractor=successful_extract,
+        metadata_parser=_metadata,
+        parent_chunk_size=2000,
+        child_chunk_size=500,
+        retry_extraction_failures=True,
+    )
+    assert extraction_calls == ["b.pdf"]
+    with sqlite3.connect(catalog) as connection:
+        active_files = {
+            row[0]
+            for row in connection.execute(
+                "SELECT canonical_relative_path FROM active_reports"
+            )
+        }
+    assert retried_outcome.active_snapshot_id == retried_result.snapshot_id
+    assert active_files == {"downloaded/a.pdf", "downloaded/b.pdf"}
 
 
 @pytest.mark.parametrize(
@@ -1249,8 +1393,12 @@ def test_explicit_deletion_is_a_versioned_manifest_exclusion(tmp_path: Path):
     assert plan.manifest.excluded_count == 1
     assert decisions["included"].reason_code == "included"
     assert decisions["excluded"].reason_code == "source-deleted"
-    assert plan.manifest.exclusion_policy.version == "native-full-corpus-v1"
+    assert plan.manifest.exclusion_policy.version == "native-full-corpus-v2"
     assert "source-deleted" in plan.manifest.exclusion_policy.excluded_reason_codes
+    assert (
+        "source-extraction-failed"
+        in plan.manifest.exclusion_policy.excluded_reason_codes
+    )
 
     result = materialize_candidate(plan, data_root)
     publish_candidate(result, data_root)

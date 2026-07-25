@@ -56,6 +56,7 @@ _ROOT_SOURCE_FILES = (
     "RUN_APP.bat",
     "RUN_QUICKSTART.bat",
     "MIGRATE_V2.bat",
+    "REBUILD_V2.bat",
 )
 _COLLECTED_SUMMARY = re.compile(r"(?m)^(\d+) tests? collected(?: in .*)?$")
 
