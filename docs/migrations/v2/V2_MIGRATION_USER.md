@@ -77,7 +77,7 @@ Native 신원, V1/PDF 기준 상태 또는 보존 경로가 달라졌다면 자�
 
 ## 활성 V2 전체 재구축
 
-`MIGRATE_V2.bat`은 V1을 V2로 처음 전환하는 도구입니다. 이미 활성화된 V2에서 primary와 fallback이 반대로 기록된 추출 profile을 배포 기본값으로 바로잡을 때는 `REBUILD_V2.bat`을 사용합니다. 이 파일은 내부적으로 `scripts/migrations/v2/rebuild_v2_successor.py`를 실행해 전체 corpus를 새 embedding profile로 재구축합니다.
+`MIGRATE_V2.bat`은 V1을 V2로 처음 전환하는 도구입니다. 이미 활성화된 V2에서 primary와 fallback이 반대로 기록된 추출 profile을 배포 기본값으로 바로잡을 때는 `tools\recovery\REBUILD_V2.bat`을 사용합니다. 이 파일은 내부적으로 `scripts/migrations/v2/rebuild_v2_successor.py`를 실행해 전체 corpus를 새 embedding profile로 재구축합니다.
 
 배포 기본 추출 정책은 다음과 같습니다.
 
@@ -94,7 +94,7 @@ PyMuPDF가 primary이며, 해당 PDF의 추출이 실패할 때만 OpenDataLoade
 Finance LLM, Streamlit, Quick Start, 데이터 업데이트 창을 모두 닫으세요. 먼저 프로젝트 폴더에서 다음 읽기 전용 점검을 실행합니다.
 
 ```bat
-REBUILD_V2.bat --check
+tools\recovery\REBUILD_V2.bat --check
 ```
 
 점검은 데이터를 수정하거나 successor를 만들지 않습니다. 현재 snapshot·추출 profile·인덱싱 문서 수, 교정 후 재생성할 추출 profile·원본 PDF 수를 출력합니다. legacy `EXTRACTION_ENGINE`과 `PDF_EXTRACTION_ENGINE`이 다르면 두 primary 값도 함께 알립니다.
@@ -140,7 +140,7 @@ active profile이 이미 `pymupdf|fallback=opendataloader`이고 알려진 과�
 점검을 통과하면 다음 명령을 실행하고 화면의 확인 질문에 답합니다.
 
 ```bat
-REBUILD_V2.bat
+tools\recovery\REBUILD_V2.bat
 ```
 
 전체 corpus의 PDF 추출, chunk 생성, 임베딩과 검증을 다시 수행하므로 OpenRouter API 비용이 발생하고 오래 걸릴 수 있습니다. 비용과 시간은 PDF 수·길이, 청크 수, 선택한 모델과 API 가격에 따라 달라집니다. OpenDataLoader fallback을 사용하려면 Java 11 이상과 `java` 명령의 `PATH` 등록이 필요합니다. 시작 전에 Java와 OpenRouter 크레딧을 확인하고, 완료될 때까지 앱이나 데이터 업데이트를 실행하지 마세요.
@@ -158,7 +158,7 @@ REBUILD_V2.bat
 - 재구축과 검증 중에는 기존 active V2가 계속 질문과 검색을 처리합니다.
 - 성공 문서와 명시적 제외 결정을 합친 successor가 manifest·catalog·FAISS 검증을 통과한 경우에만 active 선택을 원자적으로 전환합니다.
 - 개별 PDF의 이중 파싱 실패는 문서 단위 제외로 처리합니다. embedding API, profile, source inventory 또는 snapshot 무결성 검증이 실패하거나 실행을 중단하면 기존 active 선택은 바뀌지 않으며 계속 검색할 수 있습니다.
-- 사용자 확인 뒤 설정 교정까지 끝난 상태에서 build가 실패했다면 교정된 `PDF_*` 값은 유지됩니다. 오류 원인을 해결한 뒤 `REBUILD_V2.bat`을 다시 실행하세요. 새 successor가 성공하기 전까지 incremental update는 profile 불일치로 계속 차단될 수 있습니다.
+- 사용자 확인 뒤 설정 교정까지 끝난 상태에서 build가 실패했다면 교정된 `PDF_*` 값은 유지됩니다. 오류 원인을 해결한 뒤 `tools\recovery\REBUILD_V2.bat`을 다시 실행하세요. 새 successor가 성공하기 전까지 incremental update는 profile 불일치로 계속 차단될 수 있습니다.
 - 원본 `data/reports.db`와 `data/downloaded`의 PDF는 삭제하지 않습니다.
 - 전환 직전 active snapshot은 검증된 predecessor로 잠시 보존합니다. 전환 후 검색에는 새 snapshot만 사용하며 predecessor는 제공하지 않습니다.
 - `data/retrieval/v2`를 직접 삭제하거나 파일을 옮기지 마세요. 수동 변경은 active 선택, 검증 기록과 복구 경계를 손상할 수 있습니다.

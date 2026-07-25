@@ -33,11 +33,11 @@ _INSTALL_LABELS = ("source-default", "packaged-default")
 _LAUNCHER_LAYOUT = (
     "apps/cli/app.py",
     "apps/gui/app.py",
-    "quickstart.py",
+    "scripts/quickstart.py",
     "RUN_APP.bat",
     "RUN_QUICKSTART.bat",
     "MIGRATE_V2.bat",
-    "REBUILD_V2.bat",
+    "tools/recovery/REBUILD_V2.bat",
     "scripts/migrations/v2/migrate_v2_user.py",
     "scripts/migrations/v2/rebuild_v2_successor.py",
     "src/retrieval/launcher_guard.py",
@@ -471,11 +471,11 @@ def _install_layout_hashes(install_roots: Mapping[str, Path]) -> dict[str, str]:
 
 def _launcher_layout_sha256(root: Path) -> str:
     files = [
-        root / "quickstart.py",
+        root / "scripts" / "quickstart.py",
         root / "RUN_APP.bat",
         root / "RUN_QUICKSTART.bat",
         root / "MIGRATE_V2.bat",
-        root / "REBUILD_V2.bat",
+        root / "tools" / "recovery" / "REBUILD_V2.bat",
         root / "scripts" / "migrations" / "v2" / "migrate_v2_user.py",
         root / "scripts" / "migrations" / "v2" / "rebuild_v2_successor.py",
         *sorted((root / "apps").rglob("*.py")),
@@ -522,7 +522,10 @@ def _surface_commands(root: Path) -> tuple[tuple[str, list[str]], ...]:
         ),
         ("gui", [str(python), "apps/gui/app.py", "--runtime-smoke"]),
         ("cli", [str(python), "-m", "apps.cli.app", "--runtime-smoke"]),
-        ("quick_start", [str(python), "quickstart.py", "--runtime-smoke"]),
+        (
+            "quick_start",
+            [str(python), "scripts/quickstart.py", "--runtime-smoke"],
+        ),
         (
             "run_app_bat",
             ["cmd", "/d", "/c", "RUN_APP.bat", "--runtime-smoke"],

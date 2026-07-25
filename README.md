@@ -19,9 +19,9 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 
 기존 V1 검색 데이터가 있다면 `MIGRATE_V2.bat`을 더블클릭해 백업·임베딩 공간 확인·GUI 실행 테스트를 거친 뒤, 기존 청크와 벡터를 그대로 사용하는 쓰기 가능한 V2로 안전하게 전환할 수 있습니다. 전체 PDF를 다시 파싱하거나 재임베딩하지 않으며, 전환 후에는 새 문서와 변경된 문서만 처리합니다. 설계 배경은 [V2 마이그레이션과 검색 아키텍처](docs/migrations/v2/V2_MIGRATION.md), 실행 절차는 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
-### `REBUILD_V2.bat`은 언제 필요한가
+### `tools\recovery\REBUILD_V2.bat`은 언제 필요한가
 
-> **대부분의 사용자는 `REBUILD_V2.bat`을 실행할 필요가 없습니다.** 과거 버전에서 만든 V2의 PDF 추출 설정을 현재 기본값인 `PyMuPDF 우선 → OpenDataLoader fallback`으로 바로잡을 때만 사용하세요.
+> **대부분의 사용자는 `tools\recovery\REBUILD_V2.bat`을 실행할 필요가 없습니다.** 과거 버전에서 만든 V2의 PDF 추출 설정을 현재 기본값인 `PyMuPDF 우선 → OpenDataLoader fallback`으로 바로잡을 때만 사용하세요.
 
 | 하려는 작업 | 실행할 항목 |
 | --- | --- |
@@ -29,9 +29,9 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 | 기존 V1을 V2로 전환 | `MIGRATE_V2.bat` — 재구축 불필요 |
 | 리포트 추가·변경 | 앱의 일반 데이터 업데이트 — 재구축 불필요 |
 | 파싱 실패 문서만 재시도 | Monitoring Mode의 `임베딩 누락 문서 → 파싱 실패 문서 재시도` |
-| 과거 V2의 추출 설정을 바로잡기 | 먼저 `REBUILD_V2.bat --check` |
+| 과거 V2의 추출 설정을 바로잡기 | 먼저 `tools\recovery\REBUILD_V2.bat --check` |
 
-`--check` 결과가 `[확인]`이면 아무 작업도 하지 마세요. `[조치 필요]`이고 표시된 현재·목표 설정이 실제로 다를 때만 `REBUILD_V2.bat`을 실행하세요. 전체 PDF를 다시 처리하므로 시간과 API 비용이 발생합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md#활성-v2-전체-재구축)을 참고하세요.
+`--check` 결과가 `[확인]`이면 아무 작업도 하지 마세요. `[조치 필요]`이고 표시된 현재·목표 설정이 실제로 다를 때만 `tools\recovery\REBUILD_V2.bat`을 실행하세요. 전체 PDF를 다시 처리하므로 시간과 API 비용이 발생합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md#활성-v2-전체-재구축)을 참고하세요.
 
 ---
 
@@ -166,7 +166,7 @@ python -m src.core.embed_pipeline --limit 100  # V1에서만 처리량 제한
 
 V1에서는 `TEST_LIMIT`, `--limit`, `--all`이 pending 처리량을 결정합니다. V2에서는 limit 옵션을 무시하고 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩하고 변경되지 않은 청크와 벡터를 재사용합니다. primary와 fallback이 모두 실패한 문서는 active manifest에 제외 상태로 남기고 나머지를 계속 처리합니다. 같은 바이트의 기존 실패는 일반 업데이트에서 반복 파싱하지 않으며, Monitoring Mode의 `임베딩 누락 문서`에서 재시도할 때만 다시 처리합니다. 변화가 없으면 새 publication을 만들지 않습니다.
 
-V2 활성 상태에서는 `data/retrieval/v2`, `data/reports.db`, `data/vector_db`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. 위 표의 추출 정책 변경에 해당할 때만 `REBUILD_V2.bat --check`로 점검한 뒤 `REBUILD_V2.bat`으로 검증된 full-corpus successor를 만드세요.
+V2 활성 상태에서는 `data/retrieval/v2`, `data/reports.db`, `data/vector_db`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. 위 표의 추출 정책 변경에 해당할 때만 `tools\recovery\REBUILD_V2.bat --check`로 점검한 뒤 `tools\recovery\REBUILD_V2.bat`으로 검증된 full-corpus successor를 만드세요.
 
 PDF 추출 엔진 비교는 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.
 

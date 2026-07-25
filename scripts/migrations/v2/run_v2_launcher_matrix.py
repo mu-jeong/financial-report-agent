@@ -212,11 +212,11 @@ def _parse_install_root(value: str) -> tuple[str, Path]:
     required = (
         "apps/cli/app.py",
         "apps/gui/app.py",
-        "quickstart.py",
+        "scripts/quickstart.py",
         "RUN_APP.bat",
         "RUN_QUICKSTART.bat",
         "MIGRATE_V2.bat",
-        "REBUILD_V2.bat",
+        "tools/recovery/REBUILD_V2.bat",
         "scripts/migrations/v2/migrate_v2_user.py",
         "scripts/migrations/v2/rebuild_v2_successor.py",
         "src/retrieval/launcher_guard.py",
@@ -265,7 +265,7 @@ def _run_case(
         ),
         (
             "quick_start",
-            [str(python), "quickstart.py", "--runtime-smoke"],
+            [str(python), "scripts/quickstart.py", "--runtime-smoke"],
         ),
         (
             "run_app_bat",
@@ -445,11 +445,11 @@ def _write_immutable_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _launcher_layout_sha256(root: Path) -> str:
     files = [
-        root / "quickstart.py",
+        root / "scripts" / "quickstart.py",
         root / "RUN_APP.bat",
         root / "RUN_QUICKSTART.bat",
         root / "MIGRATE_V2.bat",
-        root / "REBUILD_V2.bat",
+        root / "tools" / "recovery" / "REBUILD_V2.bat",
         root / "scripts" / "migrations" / "v2" / "migrate_v2_user.py",
         root / "scripts" / "migrations" / "v2" / "rebuild_v2_successor.py",
         *sorted((root / "apps").rglob("*.py")),

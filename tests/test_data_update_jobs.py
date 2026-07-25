@@ -83,7 +83,7 @@ def test_embedding_failure_message_points_profile_mismatches_to_rebuild_v2():
     message = data_update_jobs.embedding_failure_message(1, output)
 
     assert "활성 V2 추출 프로필" in message
-    assert "REBUILD_V2.bat" in message
+    assert "tools\\recovery\\REBUILD_V2.bat" in message
     assert "exit code 1" not in message
 
 

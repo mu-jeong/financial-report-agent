@@ -1,4 +1,4 @@
-import quickstart
+from scripts import quickstart
 from types import SimpleNamespace
 
 

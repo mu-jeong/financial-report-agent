@@ -1,6 +1,6 @@
 ﻿@echo off
 chcp 65001 > nul
-cd /d "%~dp0"
+cd /d "%~dp0..\.."
 
 set "VENV_PYTHON=.venv\Scripts\python.exe"
 set "REBUILD_SCRIPT=scripts\migrations\v2\rebuild_v2_successor.py"

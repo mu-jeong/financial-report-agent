@@ -592,7 +592,7 @@ def embedding_failure_message(exit_code: int, output: str) -> str:
     if "incremental extractor differs from the active embedding profile" in output:
         return (
             "활성 V2 추출 프로필이 현재 설정과 다릅니다. "
-            "REBUILD_V2.bat --check로 확인한 뒤 REBUILD_V2.bat을 실행하세요."
+            "tools\\recovery\\REBUILD_V2.bat --check로 확인한 뒤 tools\\recovery\\REBUILD_V2.bat을 실행하세요."
         )
     lowered = output.lower()
     detail = next(

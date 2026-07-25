@@ -446,7 +446,7 @@ def test_check_mode_is_read_only_and_reports_profile_mismatch(
     output = capsys.readouterr().out
     assert "opendataloader|fallback=pymupdf" in output
     assert "pymupdf|fallback=opendataloader" in output
-    assert "REBUILD_V2.bat" in output
+    assert "tools\\recovery\\REBUILD_V2.bat" in output
 
 
 def test_check_previews_default_policy_for_historical_opendataloader_config(
@@ -631,7 +631,9 @@ def test_rebuild_failure_reports_that_the_active_snapshot_was_preserved(
 
 
 def test_windows_entrypoint_uses_successor_script_without_deleting_v2_in_place() -> None:
-    source = (REPOSITORY_ROOT / "REBUILD_V2.bat").read_text(encoding="utf-8-sig")
+    source = (
+        REPOSITORY_ROOT / "tools" / "recovery" / "REBUILD_V2.bat"
+    ).read_text(encoding="utf-8-sig")
 
     assert "scripts\\migrations\\v2\\rebuild_v2_successor.py" in source
     assert 'if /I "%~1"=="--check" goto run_direct' in source

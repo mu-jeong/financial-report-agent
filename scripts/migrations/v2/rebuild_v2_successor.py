@@ -518,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
             print("[확인] 활성 프로필과 현재 설정이 일치합니다.")
         else:
             print(
-                "[조치 필요] REBUILD_V2.bat을 실행하면 기존 V2를 유지한 채 "
+                "[조치 필요] tools\\recovery\\REBUILD_V2.bat을 실행하면 기존 V2를 유지한 채 "
                 "새 successor를 생성합니다."
             )
         return 0
@@ -535,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
         if not repaired and not _default_policy_is_configured(ENV_PATH):
             print(
                 "[실패] 점검 후 .env 추출 설정이 변경되었습니다. "
-                "REBUILD_V2.bat --check를 다시 실행하세요."
+                "tools\\recovery\\REBUILD_V2.bat --check를 다시 실행하세요."
             )
             return 2
         if repaired:

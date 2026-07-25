@@ -19,11 +19,11 @@ def _repository(root: Path) -> Path:
         "apps/cli.py": "VALUE = 3\n",
         "tests/test_alpha.py": "def test_alpha(): pass\n",
         "tests/fixture.json": '{"value": 1}\n',
-        "quickstart.py": "VALUE = 4\n",
+        "scripts/quickstart.py": "VALUE = 4\n",
         "RUN_APP.bat": "@echo off\n",
         "RUN_QUICKSTART.bat": "@echo off\n",
         "MIGRATE_V2.bat": "@echo off\n",
-        "REBUILD_V2.bat": "@echo off\n",
+        "tools/recovery/REBUILD_V2.bat": "@echo off\n",
     }.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)

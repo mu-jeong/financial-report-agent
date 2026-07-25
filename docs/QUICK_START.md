@@ -6,7 +6,7 @@
 
 기존 V1 데이터의 V2 변환은 `MIGRATE_V2.bat`을 더블클릭합니다. 이 작업은 V1 원본을 유지하면서 기존 청크와 벡터를 V2 형식으로 변환하고, 임베딩 공간 호환성과 실제 GUI 실행을 확인한 뒤 같은 변환 snapshot을 쓰기 가능 상태로 활성화합니다. 전체 corpus 재임베딩은 하지 않으며 이후에는 새 문서와 변경된 문서만 처리합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
-이미 활성화된 V2의 추출 정책을 배포 기본값으로 바꾸려면 incremental update가 아니라 전체 successor 재구축이 필요합니다. 앱과 데이터 업데이트 창을 모두 닫고 `REBUILD_V2.bat --check`로 읽기 전용 점검을 수행한 뒤, `REBUILD_V2.bat`을 실행해 안내에 따라 진행하세요. 자세한 내용은 [활성 V2 전체 재구축](migrations/v2/V2_MIGRATION_USER.md#활성-v2-전체-재구축)을 참고하세요.
+이미 활성화된 V2의 추출 정책을 배포 기본값으로 바꾸려면 incremental update가 아니라 전체 successor 재구축이 필요합니다. 앱과 데이터 업데이트 창을 모두 닫고 `tools\recovery\REBUILD_V2.bat --check`로 읽기 전용 점검을 수행한 뒤, `tools\recovery\REBUILD_V2.bat`을 실행해 안내에 따라 진행하세요. 자세한 내용은 [활성 V2 전체 재구축](migrations/v2/V2_MIGRATION_USER.md#활성-v2-전체-재구축)을 참고하세요.
 
 ## 1. 실행 방법
 
@@ -29,7 +29,7 @@ API 키가 없다면 아래 문서를 먼저 따라 발급받으세요.
 
 ## 3. Quick Start가 자동으로 하는 일
 
-`RUN_QUICKSTART.bat`은 내부적으로 `quickstart.py`를 실행해 다음 작업을 순서대로 처리합니다.
+`RUN_QUICKSTART.bat`은 내부적으로 `scripts/quickstart.py`를 실행해 다음 작업을 순서대로 처리합니다.
 터미널에는 각 단계가 끝날 때마다 `[진행]` 프로그레스 바가 표시되어 현재 준비 상태를 확인할 수 있습니다.
 
 1. Python 버전 확인
@@ -82,11 +82,11 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 
 ## 7. 활성 V2 전체 재구축
 
-배포 기본값은 PyMuPDF를 primary로 사용하고, 실패한 PDF만 OpenDataLoader로 한 번 재시도합니다. 기존 active V2가 이 순서를 반대로 기록했거나 현재 설정과 다른 추출 profile을 사용한다면 `REBUILD_V2.bat`이 전체 PDF를 새 정책으로 다시 파싱·임베딩해 검증된 successor를 만듭니다.
+배포 기본값은 PyMuPDF를 primary로 사용하고, 실패한 PDF만 OpenDataLoader로 한 번 재시도합니다. 기존 active V2가 이 순서를 반대로 기록했거나 현재 설정과 다른 추출 profile을 사용한다면 `tools\recovery\REBUILD_V2.bat`이 전체 PDF를 새 정책으로 다시 파싱·임베딩해 검증된 successor를 만듭니다.
 
 ```bat
-REBUILD_V2.bat --check
-REBUILD_V2.bat
+tools\recovery\REBUILD_V2.bat --check
+tools\recovery\REBUILD_V2.bat
 ```
 
 - `--check`는 현재 snapshot·추출 profile·인덱싱 문서 수, 교정 후 목표 추출 profile·원본 PDF 수와 `.env` primary 충돌을 출력할 뿐 데이터를 바꾸지 않습니다.

@@ -14,11 +14,11 @@ def _launcher_install(root: Path) -> Path:
     payloads = {
         "apps/cli/app.py": b"# cli\n",
         "apps/gui/app.py": b"# gui\n",
-        "quickstart.py": b"# quickstart\n",
+        "scripts/quickstart.py": b"# quickstart\n",
         "RUN_APP.bat": b"@echo off\r\n",
         "RUN_QUICKSTART.bat": b"@echo off\r\n",
         "MIGRATE_V2.bat": b"@echo off\r\n",
-        "REBUILD_V2.bat": b"@echo off\r\n",
+        "tools/recovery/REBUILD_V2.bat": b"@echo off\r\n",
         "scripts/migrations/v2/migrate_v2_user.py": b"# migrate\n",
         "scripts/migrations/v2/rebuild_v2_successor.py": b"# rebuild\n",
         "src/retrieval/launcher_guard.py": b"# guard\n",

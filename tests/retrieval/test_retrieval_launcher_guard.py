@@ -50,7 +50,7 @@ def test_supported_launchers_guard_before_update_or_graph_import():
         encoding="utf-8"
     )
     run_app = (root / "RUN_APP.bat").read_text(encoding="utf-8")
-    quickstart = (root / "quickstart.py").read_text(encoding="utf-8")
+    quickstart = (root / "scripts" / "quickstart.py").read_text(encoding="utf-8")
     run_quickstart = (root / "RUN_QUICKSTART.bat").read_text(encoding="utf-8")
 
     assert gui.index("import streamlit as st") < gui.index(
@@ -65,7 +65,7 @@ def test_supported_launchers_guard_before_update_or_graph_import():
     assert quickstart.index("src.retrieval.launcher_guard") < quickstart.index(
         "src.core.report_crawler"
     )
-    assert "quickstart.py %*" in run_quickstart
+    assert "scripts\\quickstart.py %*" in run_quickstart
     assert '"--runtime-smoke"' in run_app
     quickstart_smoke_exit = (
         'if /I "%~1"=="--runtime-smoke" exit /b %EXIT_CODE%'

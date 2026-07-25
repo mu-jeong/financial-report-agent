@@ -22,7 +22,7 @@ if "%PYTHON_CMD%"=="" (
 )
 
 echo Starting Finance LLM Quick Start...
-%PYTHON_CMD% quickstart.py %*
+%PYTHON_CMD% scripts\quickstart.py %*
 set "EXIT_CODE=%errorlevel%"
 if /I "%~1"=="--runtime-smoke" exit /b %EXIT_CODE%
 
