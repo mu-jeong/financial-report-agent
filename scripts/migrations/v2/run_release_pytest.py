@@ -335,6 +335,10 @@ def _capture_release_layouts(root: Path) -> dict[str, Any]:
             _tree_files(root, root / relative, include_all=False)
         )
     source_files.extend(root / name for name in _ROOT_SOURCE_FILES)
+    # Some protected entrypoints (currently scripts/quickstart.py) are also
+    # discovered by the source-tree walk.  Count and hash each physical path
+    # once while keeping _layout_sha256 strict for genuinely duplicated input.
+    source_files = list(dict.fromkeys(source_files))
     return {
         "algorithm": LAYOUT_ALGORITHM,
         "test_file_count": len(test_files),

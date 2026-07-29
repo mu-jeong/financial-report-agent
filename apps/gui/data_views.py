@@ -1,4 +1,5 @@
 import calendar
+import sqlite3
 from datetime import date, datetime, timedelta
 from html import escape
 
@@ -423,11 +424,20 @@ def render_unembedded_reports(status: dict) -> None:
         key="unembedded_report_display_limit",
         help="최근 report_date 순으로 표시합니다. 전체 임베딩 버튼은 표시 개수와 무관하게 모든 pending 문서를 대상으로 합니다.",
     )
-    rows = status_module.build_unembedded_report_rows(
-        status_module.list_unembedded_reports(db_path, limit=int(display_limit))
-        if db_path
-        else []
-    )
+    list_error: str | None = None
+    try:
+        reports = (
+            status_module.list_unembedded_reports(
+                db_path,
+                limit=int(display_limit),
+            )
+            if db_path
+            else []
+        )
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        reports = []
+        list_error = f"{type(exc).__name__}: {exc}"
+    rows = status_module.build_unembedded_report_rows(reports)
     retrieval_status = status.get("retrieval") or {}
     native_v2 = retrieval_status.get("mode") in {
         "native",
@@ -445,6 +455,11 @@ def render_unembedded_reports(status: dict) -> None:
     )
     if rows:
         st.dataframe(rows, use_container_width=True, hide_index=True)
+    elif list_error:
+        st.error(
+            "미임베딩 문서 목록을 읽지 못했습니다. 데이터 상태의 native "
+            f"runtime 오류를 확인해 주세요. ({list_error})"
+        )
     else:
         st.success("현재 미임베딩 문서가 없습니다.")
 

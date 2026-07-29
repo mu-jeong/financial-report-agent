@@ -76,8 +76,14 @@ MONITORING_VIEW_FUNCTIONS = {
     "_all_thread_messages",
     "_latest_saved_evaluation_run",
     "_run_fixed_snapshot_evaluation",
+    "_fixed_snapshot_assets_present",
+    "_run_candidate_snapshot_evaluation",
     "_render_experiment_monitoring",
     "_render_global_monitoring",
+    "_rerun_candidate_action",
+    "_write_and_record_candidate_handoff",
+    "_run_and_record_candidate_snapshot",
+    "_render_candidate_lifecycle",
     "_render_issue_report_monitoring",
     "render_chat_monitoring_page",
     "render_global_monitoring_page",
@@ -112,6 +118,7 @@ EXPLICIT_WIDGET_KEYS = {
     "'update_date_range'",
     "'update_selected_range'",
     "'email_issue_report_import_text'",
+    "'feedback_loop_candidate_selector'",
     "'issue_report_control'",
     "'retry_search_engine_warmup'",
     "'sidebar_data_status_bottom'",
@@ -121,7 +128,43 @@ EXPLICIT_WIDGET_KEYS = {
     "'global_monitoring_category'",
     "f\"issue_report_category_{current_thread['id']}\"",
     "f\"issue_report_description_{current_thread['id']}\"",
+    "f\"issue_report_response_mode_{current_thread['id']}\"",
+    "f\"issue_report_selected_response_{current_thread['id']}\"",
+    "f\"issue_report_submit_{current_thread['id']}\"",
     "f\"issue_report_include_context_{current_thread['id']}\"",
+    "f\"candidate_approve_{candidate['id']}\"",
+    "f\"candidate_attach_handoff_{item['handoff_id']}\"",
+    "f\"candidate_attach_run_{run['run_id']}\"",
+    "f\"candidate_close_action_{candidate['id']}\"",
+    "f\"candidate_duplicate_reason_{candidate['id']}\"",
+    "f\"candidate_duplicate_{candidate['id']}\"",
+    "f\"candidate_edit_contract_reason_{candidate['id']}\"",
+    "f\"candidate_edit_contract_{candidate['id']}\"",
+    "f\"candidate_fixing_{candidate['id']}\"",
+    "f\"candidate_handoff_baseline_{candidate['id']}\"",
+    "f\"candidate_handoff_confirm_{candidate['id']}\"",
+    "f\"candidate_handoff_reason_{candidate['id']}\"",
+    "f\"candidate_handoff_save_{candidate['id']}\"",
+    "f\"candidate_latency_threshold_{status}_{candidate['id']}\"",
+    "f\"candidate_manual_check_{status}_{candidate['id']}_{assertion_id}\"",
+    "f\"candidate_manual_confirm_{status}_{candidate['id']}\"",
+    "f\"candidate_manual_note_{status}_{candidate['id']}\"",
+    "f\"candidate_manual_reason_{status}_{candidate['id']}\"",
+    "f\"candidate_record_manual_{status}_{candidate['id']}\"",
+    "f\"candidate_mark_reproduced_{candidate['id']}\"",
+    "f\"candidate_mark_triaged_{candidate['id']}\"",
+    "f\"candidate_mark_verified_{candidate['id']}\"",
+    "f\"candidate_needs_expectation_{candidate['id']}\"",
+    "f\"candidate_not_reproduced_reason_{candidate['id']}\"",
+    "f\"candidate_not_reproducible_{candidate['id']}\"",
+    "f\"candidate_ready_{candidate['id']}\"",
+    "f\"candidate_rejection_reason_{candidate['id']}\"",
+    "f\"candidate_reject_{candidate['id']}\"",
+    "f\"candidate_reopen_reason_{candidate['id']}\"",
+    "f\"candidate_reopen_{candidate['id']}\"",
+    "f\"candidate_repair_handoff_{item['handoff_id']}\"",
+    "f\"candidate_run_{run_kind}_{candidate['id']}\"",
+    "f\"candidate_snapshot_confirm_{status}_{candidate['id']}\"",
     "f\"no_result_suggestion_{message.get('id', index)}_{suggestion['label']}\"",
     "f\"toggle_issue_report_{current_thread['id']}\"",
     "f'cancel_thread_{thread_id}'",
@@ -129,6 +172,7 @@ EXPLICIT_WIDGET_KEYS = {
     "f'edit_thread_{thread_id}'",
     "f'pin_thread_{thread_id}'",
     "f'rename_input_{thread_id}'",
+    "f'repair_issue_report_text_{warning_index}'",
     "f'report_calendar_year_select_{current_value}'",
     "f'report_calendar_month_select_{selected_year}_{current_value}'",
     "f'save_thread_{thread_id}'",
@@ -1082,7 +1126,8 @@ def test_initial_status_import_does_not_load_native_vector_runtime():
 
     assert "\nfrom src.retrieval.runtime_guard import" not in data_update_source
     assert "\nfrom src.retrieval.vector_index import" not in bootstrap_source
-    assert "inspect_runtime(db_path, validate_snapshot=False)" in status_source
+    assert "inspect_runtime(" in status_source
+    assert "validate_snapshot=False" in status_source
 
     for path in _gui_sources():
         tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
@@ -1133,6 +1178,13 @@ def test_each_extracted_view_function_has_one_owner():
 
     for function_name, expected_path in EXPECTED_VIEW_OWNERS.items():
         assert owners.get(function_name) == [expected_path], function_name
+
+
+def test_unembedded_report_view_contains_a_sqlite_error_boundary():
+    source = DATA_VIEWS_PATH.read_text(encoding="utf-8-sig")
+
+    assert "except (OSError, sqlite3.Error, ValueError) as exc:" in source
+    assert "미임베딩 문서 목록을 읽지 못했습니다." in source
 
 
 def test_app_imports_or_reloads_gui_modules_once_per_run():
@@ -1222,3 +1274,79 @@ def test_app_only_composes_extracted_views_and_leaf_modules_do_not_import_app():
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
         ]
         assert not top_level_calls
+
+
+class TestSliceACandidateUi:
+    """Executable gate for the Slice A operator workflow."""
+
+    test_widget_keys_are_explicit = staticmethod(
+        test_gui_widget_and_session_keys_remain_stable_across_module_moves
+    )
+    test_candidate_view_functions_have_one_owner = staticmethod(
+        test_each_extracted_view_function_has_one_owner
+    )
+
+    def test_candidate_lifecycle_exposes_approved_evidence_controls(self):
+        source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
+
+        assert "run_candidate_evaluation_snapshot.py" in source
+        assert "monitoring.record_candidate_run(" in source
+        assert "monitoring.record_candidate_manual_evidence(" in source
+        assert "form_record_revision" in source
+        assert "form_revision_key=form_revision_key" in source
+        assert '"triaged", "needs_expectation"' in source
+        assert "candidate_triage_followup_" in source
+        assert "추가 정보 반영 후 후보 재분류" in source
+        assert 'to_status="reproduced"' in source
+        assert 'to_status="not_reproducible"' in source
+        assert 'to_status="verified"' in source
+        assert 'to_status="rejected"' in source
+        assert 'to_status="duplicate"' in source
+
+    def test_candidate_form_conflict_clears_loaded_revision_without_retry(self):
+        class CandidateConflictError(RuntimeError):
+            pass
+
+        class FakeMonitoring:
+            pass
+
+        FakeMonitoring.CandidateConflictError = CandidateConflictError
+
+        class FakeStreamlit:
+            def __init__(self):
+                self.session_state = {"loaded_revision": 7}
+                self.errors: list[str] = []
+                self.rerun_count = 0
+
+            def error(self, message):
+                self.errors.append(message)
+
+            def rerun(self):
+                self.rerun_count += 1
+
+        fake_st = FakeStreamlit()
+        rerun_action = _load_helpers(
+            MONITORING_VIEWS_PATH,
+            "_rerun_candidate_action",
+            extra_namespace={
+                "st": fake_st,
+                "monitoring": FakeMonitoring,
+            },
+        )["_rerun_candidate_action"]
+        calls = 0
+
+        def conflicting_action():
+            nonlocal calls
+            calls += 1
+            raise CandidateConflictError("stale")
+
+        rerun_action(
+            conflicting_action,
+            form_revision_key="loaded_revision",
+        )
+
+        assert calls == 1
+        assert "loaded_revision" not in fake_st.session_state
+        assert fake_st.rerun_count == 0
+        assert len(fake_st.errors) == 1
+        assert "다른 변경이 먼저 저장되었습니다" in fake_st.errors[0]

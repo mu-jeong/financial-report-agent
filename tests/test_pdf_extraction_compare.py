@@ -146,44 +146,53 @@ def test_docling_extraction_uses_document_converter(tmp_path, monkeypatch):
     assert pdf_options.do_table_structure is False
 
 
-def test_pymupdf_extraction_skips_detected_table_blocks(tmp_path, monkeypatch):
+def test_pymupdf_extraction_uses_loose_default_table_detection(
+    tmp_path,
+    monkeypatch,
+):
     pdf_path = tmp_path / "sample.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
-    class FakeTable:
-        bbox = (0, 20, 200, 80)
+    captured = {"closed": False, "find_tables_kwargs": []}
 
     class FakeFinder:
-        tables = [FakeTable()]
+        tables = [types.SimpleNamespace(bbox=(0, 20, 200, 80))]
 
     class FakePage:
         def find_tables(self, **kwargs):
+            captured["find_tables_kwargs"].append(kwargs)
             return FakeFinder()
 
         def get_text(self, mode, **kwargs):
-            if mode == "blocks":
-                assert kwargs == {"sort": True}
-                return [
-                    (0, 0, 200, 10, "narrative before", 0, 0),
-                    (0, 20, 200, 80, "table value 2026 100", 1, 0),
-                    (0, 90, 200, 110, "narrative after", 2, 0),
-                ]
-            raise AssertionError(f"unexpected get_text mode: {mode}")
+            assert mode == "blocks"
+            assert kwargs == {}
+            return [
+                (0, 0, 200, 10, "narrative before", 0, 0),
+                # Exactly 50% overlap is intentionally retained.
+                (0, 0, 200, 40, "partially overlapping narrative", 1, 0),
+                (0, 20, 200, 80, "table value 2026 100", 2, 0),
+                (0, 90, 200, 110, "narrative after", 3, 0),
+                (0, 0, 10, 10, "image metadata", 4, 1),
+            ]
 
     class FakeDocument:
         def __iter__(self):
             return iter([FakePage()])
 
         def close(self):
-            pass
+            captured["closed"] = True
 
     monkeypatch.setattr(pdf_extraction.fitz, "open", lambda source: FakeDocument())
 
     text = pdf_extraction._extract_pymupdf_text(pdf_path)
 
-    assert "narrative before" in text
-    assert "narrative after" in text
-    assert "table value" not in text
+    assert text == (
+        "narrative before"
+        "\n\npartially overlapping narrative"
+        "\n\nnarrative after"
+    )
+    assert captured["closed"] is True
+    assert captured["find_tables_kwargs"] == [{}]
 
 
 def test_pdf_to_markdown_cli_extraction_uses_stdout(tmp_path, monkeypatch):

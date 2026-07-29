@@ -15,6 +15,7 @@ from typing import Any
 from src.configs import config
 from src.retrieval.bootstrap import (
     RetrievalBootstrapError,
+    RetrievalPaths,
     inspect_runtime,
     retrieval_paths,
 )
@@ -59,6 +60,32 @@ def _safe_vector_info(faiss_dir: str) -> dict[str, Any]:
         "has_faiss_index": (path / "index.faiss").exists(),
         "has_pickle_index": (path / "index.pkl").exists(),
     }
+
+
+def _status_retrieval_paths(
+    db_path: str | Path,
+) -> tuple[RetrievalPaths, Path | None]:
+    """Resolve either a V1 anchor or the canonical V2 catalog path.
+
+    ``get_data_status`` exposes the active catalog as ``paths.db_path`` in
+    native mode. Callers may pass that value back into a status helper, so it
+    must not be interpreted as though its parent were the data root.
+    """
+    absolute = Path(
+        os.path.abspath(os.path.expanduser(str(db_path)))
+    )
+    is_canonical_catalog = (
+        absolute.name.casefold() == "catalog.sqlite3"
+        and absolute.parent.name.casefold() == "v2"
+        and absolute.parent.parent.name.casefold() == "retrieval"
+    )
+    data_root = absolute.parents[2] if is_canonical_catalog else None
+    paths = (
+        retrieval_paths(db_path, data_root=data_root)
+        if data_root is not None
+        else retrieval_paths(db_path)
+    )
+    return paths, data_root
 
 
 def _safe_db_info(db_path: str) -> dict[str, Any]:
@@ -163,11 +190,15 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
 def _safe_native_info(
     db_path: str,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
-    paths = retrieval_paths(db_path)
+    paths, data_root = _status_retrieval_paths(db_path)
     try:
         # The background search-engine warmup owns full FAISS validation.
         # Sidebar status needs catalog metadata only and must remain cheap.
-        selection = inspect_runtime(db_path, validate_snapshot=False)
+        selection = inspect_runtime(
+            db_path,
+            data_root=data_root,
+            validate_snapshot=False,
+        )
     except Exception as exc:
         return _unavailable_native_info(paths, exc)
     if selection.mode == "legacy_v1":
@@ -436,9 +467,13 @@ def _reports_columns(conn: sqlite3.Connection) -> set[str]:
 
 def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list[dict[str, Any]]:
     """Return recent reports that exist in SQLite but are not embedded yet."""
-    native_paths = retrieval_paths(db_path)
+    native_paths, data_root = _status_retrieval_paths(db_path)
     try:
-        selection = inspect_runtime(db_path, validate_snapshot=False)
+        selection = inspect_runtime(
+            db_path,
+            data_root=data_root,
+            validate_snapshot=False,
+        )
     except RetrievalBootstrapError:
         return []
     if selection.mode != "legacy_v1":
@@ -575,7 +610,7 @@ def get_data_status(
         effective_faiss_dir = faiss_dir
     else:
         db, vector_db, retrieval = native
-        paths = retrieval_paths(db_path)
+        paths, _ = _status_retrieval_paths(db_path)
         effective_db_path = str(paths.catalog)
         effective_faiss_dir = str(paths.v2_root / "snapshots")
     downloaded_pdfs = _safe_count_pdfs(save_dir)

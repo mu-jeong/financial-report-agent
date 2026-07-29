@@ -2,9 +2,21 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from src.configs.settings import BASE_DIR
 
 DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "evaluation_dataset.json"
+SNAPSHOT_ROOT = BASE_DIR / "tests" / "fixtures" / "eval_snapshot"
+pytestmark = pytest.mark.skipif(
+    not DATASET_PATH.is_file()
+    or not (SNAPSHOT_ROOT / "manifest.json").is_file()
+    or not (SNAPSHOT_ROOT / "reports.db").is_file(),
+    reason=(
+        "evaluation dataset and fixed snapshot are intentionally deferred "
+        "until the source data is complete"
+    ),
+)
 REQUIRED_SOURCE_FIELDS = {
     "report_type",
     "report_date",
@@ -70,7 +82,7 @@ def test_evaluation_dataset_has_expected_schema():
 
 
 def test_evaluation_dataset_sources_exist_in_fixed_snapshot():
-    db_path = BASE_DIR / "tests" / "fixtures" / "eval_snapshot" / "reports.db"
+    db_path = SNAPSHOT_ROOT / "reports.db"
     assert db_path.is_file()
 
     dataset = load_dataset()

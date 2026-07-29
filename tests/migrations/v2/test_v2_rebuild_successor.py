@@ -587,6 +587,56 @@ def test_matching_active_profile_repairs_historical_env_without_rebuilding(
     assert "재생성이 필요하지 않습니다" in capsys.readouterr().out
 
 
+def test_force_rebuilds_even_when_active_profile_matches(
+    monkeypatch,
+    capsys,
+) -> None:
+    inspection = rebuild_v2_successor.RebuildInspection(
+        active_snapshot_id="active-old",
+        active_profile="pymupdf|fallback=opendataloader",
+        requested_profile="pymupdf|fallback=opendataloader",
+        active_report_count=381,
+        source_pdf_count=4955,
+        profile_matches=True,
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        rebuild_v2_successor,
+        "load_config",
+        lambda: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        rebuild_v2_successor,
+        "inspect_rebuild",
+        lambda _config: inspection,
+    )
+
+    def fake_execute(_config, actual_inspection, *, policy):
+        captured["inspection"] = actual_inspection
+        captured["policy"] = policy
+        return SimpleNamespace(
+            previous_snapshot_id="active-old",
+            active_snapshot_id="active-new",
+            active_profile="pymupdf|fallback=opendataloader",
+            report_count=4955,
+            indexed_report_count=4955,
+            extraction_failure_count=0,
+        )
+
+    monkeypatch.setattr(
+        rebuild_v2_successor,
+        "execute_rebuild",
+        fake_execute,
+    )
+
+    assert rebuild_v2_successor.main(["--yes", "--force"]) == 0
+
+    assert captured == {"inspection": inspection, "policy": None}
+    output = capsys.readouterr().out
+    assert "현재 snapshot: active-new" in output
+    assert "원본 PDF: 4955개" in output
+
+
 def test_rebuild_failure_reports_that_the_active_snapshot_was_preserved(
     monkeypatch,
     capsys,

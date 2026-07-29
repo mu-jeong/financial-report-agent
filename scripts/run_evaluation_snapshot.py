@@ -34,6 +34,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default="debug/evaluation_runs")
     parser.add_argument("--case-id", action="append", default=[])
     parser.add_argument("--latency-threshold-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--evaluation-profile",
+        choices=(
+            "accuracy_first",
+            "balanced",
+            "speed_first",
+            "accuracy",
+            "speed",
+        ),
+        default="accuracy_first",
+        help=(
+            "dataset check profile; candidate runs use the approved "
+            "validation plan and repeated p95 budget"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -57,7 +72,17 @@ def _print_json(payload: dict[str, Any]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    dataset = load_evaluation_dataset(args.dataset)
+    try:
+        dataset = load_evaluation_dataset(args.dataset)
+    except FileNotFoundError as exc:
+        _print_json(
+            {
+                "status": "error",
+                "error": str(exc),
+                "stage": "load_dataset",
+            }
+        )
+        return 2
     manifest_path = args.manifest or (Path(args.snapshot_root) / "manifest.json")
     try:
         manifest = load_evaluation_snapshot_manifest(manifest_path)
@@ -83,6 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             selected_case_ids=args.case_id or None,
             latency_threshold_seconds=args.latency_threshold_seconds,
             execution_mode="fixed_snapshot",
+            evaluation_profile=args.evaluation_profile,
             data_source={
                 "snapshot_root": validation["snapshot_root"],
                 "db_path": validation["db_path"],

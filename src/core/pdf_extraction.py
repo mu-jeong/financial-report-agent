@@ -640,59 +640,45 @@ def _get_windows_env(name: str, target: str) -> str | None:
 
 
 def _extract_pymupdf_text(pdf_path: Path) -> str:
+    """Extract text blocks while excluding blocks mostly covered by a table."""
+
     doc = fitz.open(str(pdf_path))
     try:
         page_texts: list[str] = []
         for page in doc:
-            table_bboxes = _find_pymupdf_table_bboxes(page)
-            if not table_bboxes:
-                page_texts.append(page.get_text("text"))
-                continue
+            table_bboxes: list[fitz.Rect] = []
+            try:
+                finder = page.find_tables()
+                table_bboxes = [
+                    fitz.Rect(table.bbox)
+                    for table in getattr(finder, "tables", []) or []
+                ]
+            except AttributeError:
+                # PyMuPDF versions before find_tables() support still extract text.
+                pass
 
-            non_table_blocks = []
-            for block in page.get_text("blocks", sort=True):
+            non_table_blocks: list[str] = []
+            for block in page.get_text("blocks"):
+                if block[6] != 0:
+                    continue
+
+                block_rect = fitz.Rect(block[:4])
+                block_area = block_rect.get_area()
+                if block_area <= 0:
+                    continue
+
+                if any(
+                    block_rect.intersect(table_bbox).get_area() / block_area > 0.5
+                    for table_bbox in table_bboxes
+                ):
+                    continue
+
                 block_text = str(block[4] or "").strip()
-                if not block_text:
-                    continue
-                block_bbox = fitz.Rect(block[:4])
-                if _intersects_any(block_bbox, table_bboxes):
-                    continue
-                non_table_blocks.append(block_text)
+                if block_text:
+                    non_table_blocks.append(block_text)
+
             page_texts.append("\n\n".join(non_table_blocks))
 
         return "\n\n".join(page_texts)
     finally:
         doc.close()
-
-
-def _find_pymupdf_table_bboxes(page) -> list[fitz.Rect]:
-    """Detect PyMuPDF table regions so normal text extraction can skip them."""
-    table_bboxes: list[fitz.Rect] = []
-    seen: set[tuple[float, float, float, float]] = set()
-
-    # PyMuPDF supports both line-based and text-position based table detection.
-    # Run both so borderless financial tables are also excluded when possible.
-    for kwargs in ({}, {"strategy": "text"}):
-        try:
-            finder = page.find_tables(**kwargs)
-        except Exception as exc:
-            logger.debug("  PyMuPDF table detection failed with %s: %s", kwargs, exc)
-            continue
-
-        for table in getattr(finder, "tables", []) or []:
-            bbox = getattr(table, "bbox", None)
-            if bbox is None:
-                continue
-
-            rect = fitz.Rect(bbox)
-            key = tuple(round(value, 2) for value in rect)
-            if key in seen:
-                continue
-            seen.add(key)
-            table_bboxes.append(rect)
-
-    return table_bboxes
-
-
-def _intersects_any(rect: fitz.Rect, bboxes: list[fitz.Rect]) -> bool:
-    return any(rect.intersects(bbox) for bbox in bboxes)

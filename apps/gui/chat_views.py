@@ -62,21 +62,19 @@ def _render_issue_report_control(
     messages: list[dict],
 ) -> None:
     if report_result := st.session_state.pop("issue_report_success", None):
-        st.success(
-            "문제 신고 텍스트 파일을 저장했습니다. 아래 내용을 복사해 btr0813@naver.com 으로 보내주세요."
-        )
+        st.success("신고 완료. 저장된 파일 경로를 아래에 표시합니다.")
         st.code(report_result["file_path"], language="text")
         try:
             report_text = Path(report_result["file_path"]).read_text(encoding="utf-8")
         except OSError:
             report_text = ""
         if report_text:
-            st.caption("이메일 제목은 신고 텍스트의 '사용 안내'에 포함된 제목 예시를 사용하세요.")
+            st.caption("신고 텍스트를 복사해 저장/공유하세요.")
             components.html(
-                build_clipboard_copy_html(report_text, button_label="신고 내용 복사"),
+                build_clipboard_copy_html(report_text, button_label="클립보드 복사"),
                 height=48,
             )
-        st.toast(f"이슈 리포트가 저장되었습니다. (#{report_result['id']})", icon="✅")
+        st.toast(f"신고가 저장되었습니다. (#{report_result['id']})", icon="✅")
 
     with st.container(key="issue_report_control"):
         _, report_col = st.columns(
@@ -85,9 +83,9 @@ def _render_issue_report_control(
             vertical_alignment="center",
         )
         if report_col.button(
-            "⚠ 신고",
+            "신고",
             key=f"toggle_issue_report_{current_thread['id']}",
-            help="현재 대화에서 발생한 문제를 개발자가 확인할 수 있도록 저장합니다.",
+            help="채팅 화면에서 문제를 빠르게 보고할 수 있습니다.",
             use_container_width=True,
         ):
             st.session_state.show_issue_report_form = not st.session_state.get(
@@ -98,49 +96,112 @@ def _render_issue_report_control(
         if not st.session_state.get("show_issue_report_form"):
             return
 
-        with st.form(f"issue_report_form_{current_thread['id']}", clear_on_submit=True):
-            category = st.selectbox(
-                "문제 유형",
-                [
-                    "답변 품질 문제",
-                    "검색/출처 문제",
-                    "응답 지연/멈춤",
-                    "화면/사용성 문제",
-                    "기타",
-                ],
-                key=f"issue_report_category_{current_thread['id']}",
-            )
-            description = st.text_area(
-                "무슨 문제가 있었나요?",
-                placeholder="예: 질문 의도와 다른 리포트를 참고했어요 / 답변이 너무 오래 걸렸어요 / 출처 링크가 열리지 않아요",
-                height=110,
-                key=f"issue_report_description_{current_thread['id']}",
-            )
-            include_conversation = st.checkbox(
-                "전체 대화 내용을 함께 첨부",
-                value=True,
-                help="민감한 내용이 있으면 체크를 해제하고 설명만 제출하세요.",
-                key=f"issue_report_include_context_{current_thread['id']}",
-            )
-            submitted = st.form_submit_button(
-                "신고 제출",
-                use_container_width=True,
+        assistant_messages = [
+            message
+            for message in messages
+            if message.get("role") == "assistant"
+            and message.get("id") is not None
+        ]
+        target_label = st.selectbox(
+            "문제가 발생한 대상",
+            (
+                ["특정 응답", "화면·시스템(응답 없음)"]
+                if assistant_messages
+                else ["화면·시스템(응답 없음)"]
+            ),
+            key=f"issue_report_response_mode_{current_thread['id']}",
+        )
+        report_target_type = (
+            "response"
+            if target_label == "특정 응답"
+            else "ui_or_system"
+        )
+        selected_response_id: str | None = None
+        response_by_id = {
+            str(message["id"]): message
+            for message in assistant_messages
+        }
+        if report_target_type == "response":
+            selected_response_id = st.selectbox(
+                "문제가 있는 응답",
+                options=list(reversed(response_by_id)),
+                format_func=lambda message_id: (
+                    f"{message_id}: "
+                    f"{str(response_by_id[message_id].get('content') or '')[:48]}"
+                ),
+                key=f"issue_report_selected_response_{current_thread['id']}",
             )
 
+        category = st.selectbox(
+            "신고 분류",
+            [
+                "일반 답변 품질",
+                "검색 정확도 이슈",
+                "오답/오류",
+                "속도",
+                "버그/기능",
+                "기타",
+            ],
+            key=f"issue_report_category_{current_thread['id']}",
+        )
+        description = st.text_area(
+            "추가 설명(선택)",
+            placeholder="예: 다른 종목 자료가 섞였어요. / 버튼이 눌리지 않아요.",
+            height=110,
+            key=f"issue_report_description_{current_thread['id']}",
+        )
+        include_conversation = st.checkbox(
+            "전체 대화 첨부",
+            value=False,
+            help="기본값은 미첨부입니다. 아래 미리보기를 확인한 뒤 필요한 경우에만 선택하세요.",
+            key=f"issue_report_include_context_{current_thread['id']}",
+        )
+        report_context = (
+            issue_report_store.build_issue_report_submission_context(
+                thread=current_thread,
+                messages=messages,
+                report_target_type=report_target_type,
+                selected_message_id=selected_response_id,
+                include_conversation=include_conversation,
+            )
+        )
+        preview = issue_report_store.build_issue_report_preview(
+            context=report_context,
+            include_conversation=include_conversation,
+        )
+        with st.expander("제출 내용 미리보기", expanded=True):
+            st.json(preview)
+            if include_conversation:
+                st.warning(
+                    "전체 대화 원문과 메시지 메타데이터가 포함됩니다."
+                )
+        submitted = st.button(
+            "신고 제출",
+            key=f"issue_report_submit_{current_thread['id']}",
+            use_container_width=True,
+        )
+
         if submitted:
-            clean_description = description.strip()
-            if not clean_description:
-                st.warning("문제 내용을 한 줄 이상 입력해 주세요.")
-                return
+            selected_response = response_by_id.get(
+                str(selected_response_id)
+            )
+            selected_metadata = (
+                (selected_response or {}).get("metadata") or {}
+            )
+            report_kind = (
+                "system_error"
+                if report_target_type == "ui_or_system"
+                or selected_metadata.get("status")
+                in {"failed", "error"}
+                else "user_feedback"
+            )
             report_result = issue_report_store.create_issue_report(
                 current_thread["id"],
                 category,
-                clean_description,
-                issue_report_store.build_issue_report_context(
-                    thread=current_thread,
-                    messages=messages,
-                    include_conversation=include_conversation,
-                ),
+                description.strip() or f"{category} 신고",
+                report_context,
+                kind=report_kind,
+                report_target_type=report_target_type,
             )
             st.session_state.show_issue_report_form = False
             st.session_state.issue_report_success = report_result

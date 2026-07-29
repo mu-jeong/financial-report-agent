@@ -118,6 +118,10 @@ def test_get_data_status_uses_native_membership_without_pickle_assumptions(tmp_p
     assert Path(status["paths"]["db_path"]) == (
         data_root / "retrieval" / "v2" / "catalog.sqlite3"
     )
+    pending_rows = list_unembedded_reports(status["paths"]["db_path"])
+    assert [row["file_name"] for row in pending_rows] == [
+        fixture.file_names["excluded"]
+    ]
     assert result.snapshot_id == status["retrieval"]["active_snapshot_id"]
 
 
@@ -423,6 +427,7 @@ def test_missing_update_dates_by_category_requires_all_selected_categories():
 def test_issue_report_store_writes_reports_to_debug_folder(tmp_path, monkeypatch):
     debug_dir = tmp_path / "debug"
     monkeypatch.setattr(issue_report_store, "DEBUG_REPORT_DIR", debug_dir)
+    monkeypatch.setattr(issue_report_store, "get_app_version", lambda: "0.5.0")
     long_content = "앞부분" + ("가" * 1500) + "끝부분"
     messages = [
         {

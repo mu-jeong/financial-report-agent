@@ -2,6 +2,18 @@
 
 이 문서는 Finance LLM의 Monitoring Mode에서 개발된 내용을 전체 모니터링과 개별 Chat Monitoring으로 나누어 기록한다. Monitoring Mode는 일반 채팅 UX와 분리된 개발자용 진단 화면이며, `.env`의 `MONITORING_MODE=true`일 때만 노출된다.
 
+## 0. 현재 평가 데이터 상태
+
+2026-07-30 기준으로 정식 evaluation fixture, multi-turn dataset과 fixed
+snapshot은 없다. 과거 `tests/fixtures` 데이터와 그 데이터에서 생성된
+evaluation run은 제거했다. 현재 live DB나 단위 테스트의 임시 입력을
+승인된 baseline으로 간주하면 안 된다.
+
+평가 실행기와 검증 코드는 미래 데이터에 사용할 계약으로만 유지한다.
+데이터가 없으면 관련 UI는 준비 중 상태를 표시하고 데이터 의존 테스트는
+skip한다. 실제 데이터 준비 후 작업은
+[`docs/EVALUATION_DATASET.md`](EVALUATION_DATASET.md)에 기록되어 있다.
+
 ## 1. 설계 목표
 
 Monitoring Mode의 목적은 단순 사용량 통계가 아니라 RAG 품질 개선과 회귀 확인에 필요한 근거를 남기는 것이다.
@@ -21,9 +33,10 @@ Monitoring Mode의 목적은 단순 사용량 통계가 아니라 RAG 품질 개
 | 검색 scope/routing metadata | `src/nodes/search_scope.py`, `src/nodes/router.py` |
 | VectorDB retrieval metadata | `src/nodes/vectordb.py` |
 | RDB 실행 metadata | `src/nodes/rdb.py` |
-| 고정 평가셋 | `tests/fixtures/evaluation_dataset.json` |
-| Multi-turn 평가셋 | `tests/fixtures/multiturn_evaluation_dataset.json` (core helper/test 전용, GUI 미노출) |
-| 고정 snapshot manifest | `tests/fixtures/eval_snapshot/manifest.json` |
+| 평가 데이터 준비 TODO | `docs/EVALUATION_DATASET.md` |
+| 정식 evaluation dataset | 현재 없음. 향후 `tests/fixtures/evaluation_dataset.json`에 생성 |
+| Multi-turn dataset | 현재 없음. 향후 `tests/fixtures/multiturn_evaluation_dataset.json`에 생성 |
+| Fixed snapshot | 현재 없음. 향후 `tests/fixtures/eval_snapshot/`에 생성 |
 | 평가 실행 산출물 | `debug/evaluation_runs/evaluation_run_*.json` |
 | regression 후보 산출물 | `debug/regression_candidates/*.json` |
 
@@ -54,7 +67,7 @@ Sidebar
 
 ## 3. 전체 Monitoring
 
-전체 Monitoring은 선택된 chat 하나가 아니라 저장소, 평가 기준선, 모든 thread, issue report를 기준으로 시스템 상태를 본다.
+전체 Monitoring은 선택된 chat 하나가 아니라 저장소, 평가 준비 상태, 모든 thread, issue report를 기준으로 시스템 상태를 본다.
 
 ### 3.1 데이터 상태
 
@@ -97,13 +110,19 @@ V1에서는 `reports.is_embedded=0` row를 표시한다. V2의 의도된 의미�
 - 진행 상태는 기존 data update progress box를 재사용하며 `(현재/전체) 파일명`을 표시한다.
 - 이미 데이터 업데이트/임베딩 job이 실행 중이면 버튼은 비활성화된다.
 
-> 현재 알려진 제한: native status가 반환한 catalog 경로가 `list_unembedded_reports()`에서 legacy anchor로 다시 해석되어 live V2에서 `OperationalError: no such column: id`가 재현된다. 코드 수정 전에는 V2 `임베딩 누락 문서` 화면이 정상 동작한다고 가정하지 말고 `데이터 상태`의 manifest backlog 지표와 support export를 사용한다.
+Native V2에서는 status가 반환한 `catalog.sqlite3` 경로를 data root에
+다시 연결한 뒤 active build manifest와 `active_reports`를 비교한다.
+따라서 V1의 `reports.id`/`is_embedded` 쿼리를 native catalog에 적용하지
+않는다. 목록 조회 자체가 실패하더라도 오류를 해당 탭에 표시하고 전체
+Monitoring 화면은 계속 렌더링한다.
 
 ### 3.3 실험 실행
 
-`_render_experiment_monitoring()`은 고정 evaluation dataset을 실제 graph에 통과시켜 pass/fail 결과를 저장한다.
+`_render_experiment_monitoring()`은 정식 evaluation dataset이 준비된 이후
+dataset을 실제 graph에 통과시켜 pass/fail 결과를 저장하기 위한 화면이다.
+현재는 dataset이 없으므로 실행할 수 없다.
 
-지원 모드:
+데이터 준비 후 지원할 모드:
 
 1. `current_data`
    - `DB_PATH`를 legacy anchor로 넘기되 canonical runtime dispatch가 활성 backend를 선택한다. V1이면 `reports.db`/`vector_db`, V2이면 `retrieval/v2/catalog.sqlite3`와 active immutable snapshot을 사용한다.
@@ -135,7 +154,9 @@ V1에서는 `reports.is_embedded=0` row를 표시한다. V2의 의도된 의미�
 
 전체 run summary는 pass rate, route/filter/source/citation pass rate, no-result rate, 평균 latency를 제공한다. 같은 execution mode의 직전 run이 있으면 `compare_evaluation_runs()`로 delta를 표시한다. mode가 다른 run끼리는 비교하지 않는다.
 
-`tests/fixtures/multiturn_evaluation_dataset.json`과 `run_multiturn_evaluation_dataset()` helper는 후속 질문 scope 회귀를 programmatic하게 실행한다. 이 multi-turn runner는 현재 GUI에는 연결되지 않았다.
+`run_multiturn_evaluation_dataset()` helper는 후속 질문 scope 회귀를
+programmatic하게 실행할 수 있지만, 정식 multi-turn dataset은 아직 없다.
+이 runner는 현재 GUI에도 연결되지 않았다.
 
 실패 case는 `build_evaluation_failure_actions()`가 다음 조치 후보로 분류한다.
 
@@ -148,7 +169,9 @@ V1에서는 `reports.is_embedded=0` row를 표시한다. V2의 의도된 의미�
 
 ### 3.4 고정 평가셋
 
-`고정 평가셋` 화면은 `tests/fixtures/evaluation_dataset.json`의 coverage를 요약한다.
+`고정 평가셋` 화면은 미래에 생성될
+`tests/fixtures/evaluation_dataset.json`의 coverage를 요약한다. 현재는
+dataset과 fixed snapshot이 없다는 준비 상태만 표시한다.
 
 표시 내용:
 
@@ -162,7 +185,10 @@ V1에서는 `reports.is_embedded=0` row를 표시한다. V2의 의도된 의미�
 - 변경 허용 사유
 - 평가 case 목록
 
-`docs/EVALUATION_DATASET.md`에 정의된 정책처럼, 이 fixture는 성능 개선 전후를 비교하기 위한 기준선이다. source PDF 본문은 포함하지 않고 question, expected route/filter/source/RDB expectation 같은 재현 가능한 기대값만 저장한다.
+향후 fixture는 성능 개선 전후를 비교하기 위한 승인된 기준선으로 만든다.
+source PDF 본문은 포함하지 않고 question, expected
+route/filter/source/RDB expectation 같은 재현 가능한 기대값만 저장한다.
+생성·검토·완료 조건은 `docs/EVALUATION_DATASET.md`를 따른다.
 
 ### 3.5 Parsing 비교
 
@@ -227,6 +253,12 @@ V1에서는 `reports.is_embedded=0` row를 표시한다. V2의 의도된 의미�
 
 ### 3.7 이슈 신고/회귀 후보
 
+사용자 신고 진입점은 하나다. 일반 채팅의 `신고` 화면에서 `특정 응답` 또는
+`화면·시스템(응답 없음)`을 대상으로 고른다. 특정 응답이면 선택 메시지,
+직전 질문, 축약 trace와 이전 검색 범위를 자동으로 붙이고, 응답이 없는
+문제는 같은 신고 스키마에 수동 재현 시나리오를 남긴다. 전체 대화 첨부는
+기본 해제이며 저장 전에 포함 항목 미리보기를 표시한다.
+
 `_render_issue_report_monitoring()`은 `debug/issue_report_*.txt`와 같은 stem의 구조화 `.json` sidecar로 저장된 사용자 신고를 전체 개선 루프의 입력으로 모아 보여준다. 내부 상세 subheader는 `Issue reports`다.
 
 표시 내용:
@@ -254,9 +286,71 @@ Regression 후보 artifact에는 초기 운영 lifecycle 필드가 포함된다.
 - `impact_area`: debug hint/category/content 기반 추정값 (`filter_scope`, `routing`, `retrieval_source`, `citation`, `latency`, `ui`, `answer_quality`)
 - `eval_case_draft`: trace 기반 case 초안. `question`, `expected_route`, `expected_filters`, `expected_sources`, `expected_state`, `monitoring_dimensions`를 포함하며 정식 fixture 반영 전 운영자 검토가 필요하다.
 
-`이슈 신고/회귀 후보` 화면의 `Regression candidates` 영역은 저장된 후보 artifact를 다시 로드해 lifecycle field와 draft 유무를 표시한다. `eval_case_draft`가 있는 후보는 선택해서 `regression_candidate_current_data` execution mode로 즉시 실행할 수 있으며, run artifact는 기존 evaluation run과 같은 `debug/evaluation_runs/evaluation_run_*.json` 경로에 저장된다. 이 실행은 정식 baseline 편입 전 재현성 확인용이므로 fixed snapshot baseline과는 별도 mode로 비교한다.
+`이슈 신고/회귀 후보` 화면의 후보 영역은 저장된 후보 파일을 디스크에서 다시 읽어 상태와 개정 번호, 관찰 결과, 승인된 기대 결과를 표시한다. 상태 흐름은 다음과 같다.
 
-이 단계는 수동 신고를 이후 evaluation dataset case로 승격하기 전의 중간 저장소 역할을 한다.
+```text
+신규
+  → 분류 완료
+  → 기대 결과 작성
+  → 수정 전 재현 준비
+  → 오류 재현
+  → 수정 중
+  → 수정 후 검증
+  → 종료
+```
+
+후보 파일은 두 개의 개정 번호를 사용한다.
+
+- `record_revision`: 분류, 실행 결과 연결, 전달물 연결처럼 후보 기록이 바뀔 때 증가한다.
+- `contract_revision`: 재현 입력, 기대 결과, 적용 검사, 검증 방식처럼 검증 계약이 바뀔 때 증가한다.
+
+새 신고에서 승격한 후보는 검증 계약 v2를 사용한다.
+
+- `quality_profile`: `accuracy_first`, `balanced`, `speed_first`
+- `validation_plan.hard_checks`: 자동 검사, 수동 검사,
+  `performance_p95_pass`를 조합한 필수 기준
+- `validation_plan.soft_objectives`: 통과 여부와 분리해 보존하는 p95,
+  답변 간결성·깊이 목표
+- `validation_plan.performance_budget`: p95 예산, 측정 반복 수,
+  워밍업 수와 hard/soft 판정
+- `reproduction_manifest`: 앱·코드·모델·프롬프트·도구·데이터·인덱스·
+  설정·기능 플래그의 안전한 버전 또는 SHA-256 지문
+
+속도 우선 프로파일도 경로·필터·출처·오류 없음 같은 정확성·안전성
+검사를 최소 하나 요구한다. 자동 검사와 수동 문항이 함께 있으면 `mixed`
+계약이 되며, 수정 전 재현과 수정 후 검증 모두 두 종류의 최신 증거가
+있어야 다음 상태로 이동한다. 응답 없는 UI 후보는 질문 대신 승인된
+`scenario`로 수동 재현할 수 있다.
+
+화면에서 읽은 `record_revision`과 디스크의 현재 값이 다르면 덮어쓰지 않고 충돌로 처리한다. 검증 계약이 바뀌면 과거 실행 결과와 Codex 전달물은 감사 이력으로 보존되지만 현재 증거로 사용하지 않는다.
+
+주요 저장 위치:
+
+- 후보: `debug/regression_candidates/<candidate_id>.json`
+- 후보별 수정 전·후 실행: `debug/candidate_evaluation_runs/evaluation_run_*.json`
+- Codex 전달물: `debug/codex_handoffs/<safe_candidate_token>/<handoff_id>.manifest.json`
+- 사람이 읽는 전달 문서: 같은 위치의 `<handoff_id>.md`
+
+신고 JSON과 Codex 전달물 명세는 원본 파일이다. 신고의 `.txt`와 전달물의 `.md`는 원본에서 다시 만들 수 있는 동반 파일이다. 쓰기 중단으로 동반 파일만 누락되면 화면에서 발견해 재생성할 수 있다. 후보 실행이나 전달물 저장 뒤 후보 연결 전에 앱이 종료된 경우에도, 다음 화면 렌더링에서 디스크를 다시 탐색해 현재 검증 계약과 일치하는 파일만 연결 대상으로 제시한다.
+
+Codex 전달물은 후보 전체나 대화 전체를 내보내지 않는다. 허용된 재현 입력, 관찰 결과, 승인 기대 결과, 실패한 검사, 검증 명령만 구조화하고 이메일·전화번호·인증정보·로컬 경로 등은 제거한다. 운영자가 제거 결과 미리보기와 전달 내용을 확인하고 승인 사유를 입력해야 명세와 Markdown을 저장한다. 명세, 구조화 내용, Markdown 각각의 SHA-256 값을 다시 검증한 뒤에만 후보에 연결한다.
+
+기존 `eval_case_draft`의 현재 데이터 실행은 이전 진단 기능과의 호환을 위해 남아 있으며, 정식 수정 전·후 증거로 사용하지 않는다. 정식 후보 실행은 승인된 검사만 판정하고 수정 전 실행과 수정 후 실행을 별도 종류로 기록한다.
+
+정식 후보 실행은 질문만 새 스레드에 보내지 않는다. 승인된
+`chat_history`와 실행 가능한 `prior_search_scope`를 함께 주입한다.
+계약 v2는 성능 예산의 워밍업 뒤 지정 횟수만큼 반복하고 p95와 각
+연성 목표 결과를 실행 파일에 보존한다. 수정 전 실행은 후보의 전체
+재현 매니페스트와 같아야 한다. 수정 후 실행은 코드·프롬프트·도구
+변경은 기록하되 모델·데이터·인덱스·설정·기능 플래그가 달라지면
+증거 연결을 차단한다.
+
+정식 후보 실행 기능은 운영 화면에 연결되어 있지만 자동으로 시작되지 않는다. 실제 평가 자료와 V2 고정 스냅샷의 생성·검수가 끝났음을 운영자가 명시적으로 확인해야 별도 프로세스에서 수정 전 또는 수정 후 평가를 실행할 수 있다. 스냅샷이 없거나 검증에 실패하면 그래프를 호출하지 않고 `snapshot_unavailable` 차단 시도만 기록해 운영 화면에서 확인할 수 있다. 재현 매니페스트가 다르면 `reproduction_manifest_mismatch`로 그래프 호출 전에 차단한다. 자료가 확정되기 전까지는 합성 시험 자료로 신고 불러오기부터 수정 전 실패, Codex 전달물, 수정 후 통과, 종료까지의 전체 경로만 검증한다. 생성 중인 활성 DB·벡터 인덱스와 기존 고정 스냅샷은 이 작업에서 변경하지 않는다.
+
+저표본 사건도 모두 분류·개선 대상이다. 집계 표본이 기본 20건보다
+작으면 `low_sample`로 표시하고 비율만으로 자동 차단하지 않지만,
+개별 사건의 `improvement_eligible` 상태는 유지한다. 통제된 후보 반복
+실행은 실사용 표본과 분리된 승인 계약으로 다룬다.
 
 ## 4. 개별 Chat Monitoring
 
@@ -470,9 +564,11 @@ Trace viewer는 선택 응답을 세 개의 목적별 tab으로 나누어 보여
 
 Debug hint는 확정 판정이 아니라 조사 시작점이다. false positive가 있을 수 있으므로 trace detail과 diff를 함께 확인해야 한다.
 
-### 4.6 선택 trace에서 issue report 생성
+### 4.6 선택 trace의 단일 신고 흐름 연결
 
-Chat Monitoring 상세 화면의 `Create issue report with selected trace` 버튼은 선택 응답의 trace를 issue report로 저장한다.
+별도의 trace 전용 신고 시스템을 두지 않는다. 일반 채팅의 공통 신고
+화면에서 특정 응답을 선택하면 아래 축약 정보가 자동으로 표준 신고에
+연결된다.
 
 `build_chat_trace_issue_context()`가 포함하는 정보:
 
@@ -485,7 +581,12 @@ Chat Monitoring 상세 화면의 `Create issue report with selected trace` 버�
 - previous vs selected diff
 - debug hints
 
-이 report는 전체 Monitoring의 `이슈 신고/회귀 후보` 화면에서 다시 볼 수 있고, 필요하면 regression 후보로 승격할 수 있다.
+선택 trace 신고에는 실행용 `reproduction_input`도 함께 만들어진다.
+후속 질문이면 `requires_prior_scope=true`와 정규화된 이전 검색 범위를
+저장한다. 전체 대화 원문은 사용자가 미리보기를 확인하고 별도로
+선택한 경우에만 추가한다. 이 report는 전체 Monitoring의
+`이슈 신고/회귀 후보` 화면에서 다시 볼 수 있고, 필요하면 regression
+후보로 승격할 수 있다.
 
 ## 5. 응답 metadata 수집 흐름
 
@@ -552,8 +653,8 @@ metadata
 
 - Debug hints는 rule-based이므로 모든 실패를 포착하지 못한다.
 - keyword 기반 hint는 질문 표현에 따라 false positive/false negative가 발생할 수 있다.
-- `current_data` evaluation은 현재 canonical backend 상태에 의존하므로 장기 baseline 비교에는 고정 V1형 `fixed_snapshot`이 더 적합하다.
-- Native V2의 `임베딩 누락 문서` UI는 현재 catalog 경로를 legacy anchor로 재해석하는 결함 때문에 실패한다. 코드 수정 전에는 manifest backlog 지표를 사용한다.
+- 현재 정식 evaluation dataset과 fixed snapshot이 없으므로 장기 baseline 비교나 품질 수치 확정은 할 수 없다.
+- Native V2 미임베딩 목록은 active build manifest의 `legacy_not_vectorized`와 `source-extraction-failed` 제외 항목을 표시한다.
 - Monitoring metadata는 compact 진단 정보이며, 전체 chain-of-thought나 LLM 내부 판단을 저장하지 않는다.
 - Issue report와 evaluation run 산출물은 `debug/` 아래에 저장되며 Git에는 포함하지 않는다.
 - Chat Monitoring row는 안전성을 위해 preview 중심이지만, issue report 원문에는 문제 재현에 필요한 정보가 포함될 수 있으므로 외부 전달 전 확인이 필요하다.
@@ -563,7 +664,7 @@ metadata
 Monitoring 관련 주요 회귀 테스트는 다음 명령으로 실행한다.
 
 ```bash
-python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_status.py tests/test_vectordb_selection.py tests/test_evaluation_dataset.py tests/test_evaluation_snapshot_runner.py -q
+python -m pytest tests/test_artifact_io.py tests/test_feedback_loop.py tests/test_feedback_plan_revised.py tests/test_feedback_handoff.py tests/test_candidate_evaluation_snapshot_runner.py tests/test_monitoring.py tests/test_status.py tests/test_gui_view_contracts.py tests/test_evaluation_dataset.py tests/test_evaluation_snapshot_runner.py -q
 ```
 
 주요 테스트 범위:
@@ -575,7 +676,17 @@ python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_stat
 - previous vs selected diff
 - debug hints 감지
 - issue report context 생성
+- 신고/후보의 이전 형식 읽기 호환성과 원본 불변성
+- 후보 상태 전이, 개정 충돌, 계약 변경 시 과거 증거 무효화
+- 승인된 검사만 사용하는 수정 전·후 평가
+- 정확성 우선·속도 우선·응답 없는 UI 후보의 합성 종단 간 종료
+- 이전 검색 범위 주입, 재현 매니페스트 비교와 반복 p95 판정
+- 자동·수동 혼합 계약에서 두 증거를 모두 요구하는 상태 차단
+- 저표본 사건의 개선 대상 유지와 집계 자동 판단 분리
+- 실행 결과와 Codex 전달물의 디스크 재탐색·연결·복구
+- 전달물 허용 목록, 민감정보 제거, 세 종류 해시 검증
+- pytest 임시 입력의 수정 전 실패 → 전달물 → 수정 후 통과 → 종료
 - 전체 thread summary와 data integrity summary
 - evaluation run 비교와 failure triage
 - native runtime/data-integrity 요약과 snapshot-aware retrieval metadata
-- multi-turn evaluation helper/fixture (GUI에는 미노출)
+- multi-turn evaluation helper 계약 (정식 dataset은 아직 없고 GUI에도 미노출)

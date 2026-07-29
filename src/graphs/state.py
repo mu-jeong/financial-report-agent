@@ -4,6 +4,7 @@ from langchain_core.messages import BaseMessage
 
 class State(TypedDict):
     question: str
+    chat_history: Optional[list[tuple[str, str]]]
     messages: Annotated[list[BaseMessage], operator.add]  # ToolNode I/O용 메시지 목록
     rewritten_query: str  # 재작성된 검색용 쿼리 (항상 실행되는 노드)
     uses_chat_history: Optional[bool]  # query_rewrite가 이전 대화 맥락을 검색어에 반영했는지 여부

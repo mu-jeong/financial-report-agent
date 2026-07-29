@@ -59,5 +59,5 @@ def test_runner_script_executes_from_file_path_with_json_error(tmp_path):
     )
 
     assert completed.returncode == 2
-    assert '"stage": "load_manifest"' in completed.stdout
+    assert '"stage": "load_dataset"' in completed.stdout
     assert "ModuleNotFoundError" not in completed.stderr

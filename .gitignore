@@ -57,6 +57,10 @@ Thumbs.db
 /.tmp_*/
 ~$*.docx
 
+deliverables/
+
+# Evaluation datasets and fixed snapshots are intentionally absent until the
+# source data is complete and the baseline is reviewed.
 tests/fixtures/
 # ── 사용자 문제 신고 / 디버그 산출물 ─────────────────────────────────────────
 debug/*
