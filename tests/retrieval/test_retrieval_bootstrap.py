@@ -330,6 +330,52 @@ def test_startup_reconciliation_returns_validated_active_runtime(tmp_path: Path)
     assert not (tmp_path / "retrieval" / "v2" / "writer.lock").exists()
 
 
+def test_live_writer_allows_validated_read_only_startup(tmp_path: Path):
+    legacy, _snapshot = _native_install(tmp_path, epoch=1)
+
+    with NativeWriterLock(tmp_path):
+        selection = reconcile_and_inspect_runtime(
+            legacy,
+            allow_live_writer_read=True,
+        )
+
+    assert selection.mode == "native"
+    assert selection.active_snapshot_id == "snapshot"
+    assert selection.publication_generation == 1
+
+
+def test_live_writer_still_blocks_mutating_startup_by_default(tmp_path: Path):
+    legacy, _snapshot = _native_install(tmp_path, epoch=1)
+
+    with NativeWriterLock(tmp_path):
+        with pytest.raises(RetrievalBootstrapError, match="locked"):
+            reconcile_and_inspect_runtime(legacy)
+
+
+def test_live_writer_does_not_bypass_active_snapshot_validation(tmp_path: Path):
+    legacy, snapshot = _native_install(tmp_path, epoch=1)
+    snapshot.write_bytes(b"corrupt")
+
+    with NativeWriterLock(tmp_path):
+        with pytest.raises(RetrievalBootstrapError, match="fallback closure"):
+            reconcile_and_inspect_runtime(
+                legacy,
+                allow_live_writer_read=True,
+            )
+
+
+def test_untrusted_writer_lock_error_does_not_bypass_reconciliation(tmp_path: Path):
+    legacy, _snapshot = _native_install(tmp_path, epoch=1)
+    lock_path = tmp_path / "retrieval" / "v2" / "writer.lock"
+    lock_path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(
+        RetrievalBootstrapError,
+        match="record is unreadable",
+    ):
+        reconcile_and_inspect_runtime(legacy)
+
+
 def test_closed_floor_never_falls_back_when_active_snapshot_is_corrupt(tmp_path: Path):
     legacy, snapshot = _native_install(tmp_path, epoch=1)
     snapshot.write_bytes(b"corrupt")

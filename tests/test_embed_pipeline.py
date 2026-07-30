@@ -442,7 +442,13 @@ def test_run_pipeline_routes_native_runtime_to_incremental_update(
         paths=SimpleNamespace(data_root=data_root),
     )
     embeddings = object()
-    result = SimpleNamespace(report_count=4, chunk_count=12)
+    result = SimpleNamespace(
+        report_count=4,
+        indexed_report_count=4,
+        chunk_count=12,
+        attempted_report_uids=("report-1",),
+        deferred_report_count=0,
+    )
     outcome = SimpleNamespace(publication_generation=2, write_epoch=1)
 
     monkeypatch.setattr(
@@ -488,6 +494,76 @@ def test_run_pipeline_routes_native_runtime_to_incremental_update(
     assert calls[0][2]["retry_extraction_failures"] is True
     assert calls[0][2]["use_parent_child"] is False
     assert calls[0][2]["single_chunk_size"] == 777
+    assert calls[0][2]["max_changed_reports"] == 100
+    assert calls[0][2]["skip_report_uids"] == set()
+
+
+def test_run_pipeline_publishes_full_batches_then_the_final_partial_batch(
+    tmp_path,
+    monkeypatch,
+):
+    calls = []
+    data_root = tmp_path / "native"
+    source_root = tmp_path / "pdfs"
+    data_root.mkdir()
+    source_root.mkdir()
+    runtime = SimpleNamespace(
+        is_native=True,
+        paths=SimpleNamespace(data_root=data_root),
+    )
+    embeddings = object()
+    batches = [
+        SimpleNamespace(
+            report_count=250,
+            indexed_report_count=100,
+            chunk_count=300,
+            attempted_report_uids=tuple(f"report-{index}" for index in range(100)),
+            deferred_report_count=150,
+        ),
+        SimpleNamespace(
+            report_count=250,
+            indexed_report_count=200,
+            chunk_count=600,
+            attempted_report_uids=tuple(f"report-{index}" for index in range(100, 200)),
+            deferred_report_count=50,
+        ),
+        SimpleNamespace(
+            report_count=250,
+            indexed_report_count=250,
+            chunk_count=750,
+            attempted_report_uids=tuple(f"report-{index}" for index in range(200, 250)),
+            deferred_report_count=0,
+        ),
+    ]
+
+    monkeypatch.setattr(
+        embed_pipeline,
+        "guard_before_retrieval_write",
+        lambda _path, **_kwargs: runtime,
+    )
+    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(source_root))
+    monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
+    monkeypatch.setattr(embed_pipeline.config, "USE_PARENT_CHILD", True)
+    monkeypatch.setattr(embed_pipeline, "build_embeddings_fn", lambda: embeddings)
+
+    def fake_execute(_db_path, _source_directory, **kwargs):
+        calls.append(kwargs)
+        result = batches[len(calls) - 1]
+        return result, SimpleNamespace(
+            publication_generation=len(calls) + 1,
+            write_epoch=len(calls),
+        )
+
+    monkeypatch.setattr(build_service, "execute_incremental_update", fake_execute)
+
+    assert embed_pipeline.run_pipeline() == 0
+    assert len(calls) == 3
+    assert all(call["embeddings"] is embeddings for call in calls)
+    assert all(call["max_changed_reports"] == 100 for call in calls)
+    assert calls[0]["skip_report_uids"] == set()
+    assert len(calls[1]["skip_report_uids"]) == 100
+    assert len(calls[2]["skip_report_uids"]) == 200
 
 
 def test_run_pipeline_native_runtime_keeps_default_extractor_fallback_policy(
@@ -530,7 +606,13 @@ def test_run_pipeline_native_runtime_keeps_default_extractor_fallback_policy(
     def fake_execute(_db_path, _source_directory, **kwargs):
         captured.update(kwargs)
         return (
-            SimpleNamespace(report_count=1, chunk_count=1),
+            SimpleNamespace(
+                report_count=1,
+                indexed_report_count=1,
+                chunk_count=1,
+                attempted_report_uids=("report-1",),
+                deferred_report_count=0,
+            ),
             SimpleNamespace(publication_generation=2, write_epoch=1),
         )
 

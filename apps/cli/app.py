@@ -127,7 +127,10 @@ def main():
     args = parser.parse_args()
 
     if args.runtime_smoke:
-        selection = reconcile_and_inspect_runtime(DB_PATH)
+        selection = reconcile_and_inspect_runtime(
+            DB_PATH,
+            allow_live_writer_read=True,
+        )
         print(
             json.dumps(
                 {
@@ -151,7 +154,10 @@ def main():
         print(format_status_text())
         return
 
-    reconcile_and_inspect_runtime(DB_PATH)
+    reconcile_and_inspect_runtime(
+        DB_PATH,
+        allow_live_writer_read=True,
+    )
     run_cli()
 
 if __name__ == "__main__":

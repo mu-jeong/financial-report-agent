@@ -135,6 +135,7 @@ def publish_candidate_with_launcher_race(
                     reconcile_and_inspect_runtime(
                         legacy_anchor,
                         data_root=root,
+                        allow_live_writer_read=True,
                     )
                     if startup
                     else inspect_runtime(

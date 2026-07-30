@@ -192,8 +192,9 @@ def reconcile_and_inspect_runtime(
     legacy_db_path: str | Path,
     *,
     data_root: str | Path | None = None,
+    allow_live_writer_read: bool = False,
 ) -> RuntimeSelection:
-    """Run deterministic startup recovery, then select the validated runtime."""
+    """Recover when idle, optionally reading committed state during a live write."""
 
     paths = retrieval_paths(legacy_db_path, data_root=data_root)
     if paths.catalog.is_symlink() or (
@@ -208,7 +209,11 @@ def reconcile_and_inspect_runtime(
         GarbageCollectionError,
         RetrievalGarbageCollector,
     )
-    from src.retrieval.writer_lock import NativeWriterLock, WriterLockError
+    from src.retrieval.writer_lock import (
+        NativeWriterLock,
+        WriterLockBusyError,
+        WriterLockError,
+    )
 
     try:
         with NativeWriterLock(paths.data_root) as writer_lease:
@@ -238,6 +243,24 @@ def reconcile_and_inspect_runtime(
 
                 prime_native_dispatch(selection)
             return selection
+    except WriterLockBusyError as exc:
+        if not allow_live_writer_read:
+            raise RetrievalBootstrapError(
+                f"native startup reconciliation is locked: {exc}"
+            ) from exc
+        # A live build owns all recovery mutations. SQLite publication and the
+        # durable floor make the last committed active snapshot safe to inspect
+        # concurrently, so readers remain available between batch publications.
+        selection = inspect_runtime(
+            legacy_db_path,
+            data_root=paths.data_root,
+            validate_snapshot=True,
+        )
+        if selection.is_native:
+            from src.retrieval.dispatch import prime_native_dispatch
+
+            prime_native_dispatch(selection)
+        return selection
     except WriterLockError as exc:
         raise RetrievalBootstrapError(f"native startup reconciliation is locked: {exc}") from exc
 

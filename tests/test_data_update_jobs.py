@@ -73,6 +73,20 @@ def test_embedding_file_progress_from_line_ignores_non_file_progress_lines():
     assert embedding_file_progress_from_line("  [3/3] Embedding 42 chunks...") is None
 
 
+def test_embedding_file_progress_from_line_parses_native_snapshot_batches():
+    line = (
+        "2026-07-30 [INFO] embed_pipeline.py: "
+        "Native V2 batch publication complete: batch=3 generation=9 epoch=8 "
+        "batch_attempted=50 processed=250 active_reports=631 chunks=1900 deferred=0"
+    )
+
+    assert embedding_file_progress_from_line(line) == (
+        250,
+        250,
+        "V2 snapshot batch 3",
+    )
+
+
 def test_embedding_failure_message_points_profile_mismatches_to_rebuild_v2():
     output = (
         "NativeBuildError: incremental extractor differs from the active "

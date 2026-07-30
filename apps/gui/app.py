@@ -51,7 +51,10 @@ if _RUNTIME_SMOKE_REQUESTED:
     from src.retrieval.bootstrap import reconcile_and_inspect_runtime
 
     try:
-        _retrieval_runtime = reconcile_and_inspect_runtime(config_module.DB_PATH)
+        _retrieval_runtime = reconcile_and_inspect_runtime(
+            config_module.DB_PATH,
+            allow_live_writer_read=True,
+        )
     except Exception as exc:
         print(
             json.dumps(

@@ -345,6 +345,7 @@ def _run_pipeline_locked(
     )
     if runtime.is_native:
         from src.retrieval.build_service import (
+            DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE,
             NativeSourceExtractionError,
             execute_incremental_update,
         )
@@ -356,25 +357,57 @@ def _run_pipeline_locked(
         print("  Finance LLM Native V2 Incremental Update")
         print("=" * 60)
         if test_limit and test_limit > 0:
-            logger.info("Native V2 ignores --limit and scans the complete source inventory.")
-        try:
-            completed = execute_incremental_update(
-                config.DB_PATH,
-                config.SAVE_DIR,
-                data_root=runtime.paths.data_root,
-                embeddings=build_embeddings_fn(),
-                model=config.EMBEDDING_MODEL,
-                extractor_name=extraction_engine,
-                fallback_extractor_name=fallback_engine,
-                allow_extraction_fallback=allow_extraction_fallback,
-                use_parent_child=config.USE_PARENT_CHILD,
-                single_chunk_size=config.CHUNK_SIZE,
-                parent_chunk_size=config.PARENT_CHUNK_SIZE,
-                child_chunk_size=config.CHILD_CHUNK_SIZE,
-                metric="l2",
-                normalization="none",
-                retry_extraction_failures=retry_extraction_failures,
+            logger.info(
+                "Native V2 ignores --limit, scans the complete source inventory, "
+                "and publishes at most %s changed reports per snapshot.",
+                DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE,
             )
+        try:
+            embeddings = build_embeddings_fn()
+            attempted_report_uids: set[str] = set()
+            completed_batch_count = 0
+            last_completed = None
+            while True:
+                completed = execute_incremental_update(
+                    config.DB_PATH,
+                    config.SAVE_DIR,
+                    data_root=runtime.paths.data_root,
+                    embeddings=embeddings,
+                    model=config.EMBEDDING_MODEL,
+                    extractor_name=extraction_engine,
+                    fallback_extractor_name=fallback_engine,
+                    allow_extraction_fallback=allow_extraction_fallback,
+                    use_parent_child=config.USE_PARENT_CHILD,
+                    single_chunk_size=config.CHUNK_SIZE,
+                    parent_chunk_size=config.PARENT_CHUNK_SIZE,
+                    child_chunk_size=config.CHILD_CHUNK_SIZE,
+                    metric="l2",
+                    normalization="none",
+                    retry_extraction_failures=retry_extraction_failures,
+                    max_changed_reports=DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE,
+                    skip_report_uids=frozenset(attempted_report_uids),
+                )
+                if completed is None:
+                    break
+                result, outcome = completed
+                completed_batch_count += 1
+                last_completed = completed
+                attempted_report_uids.update(result.attempted_report_uids)
+                logger.info(
+                    "Native V2 batch publication complete: batch=%s "
+                    "generation=%s epoch=%s batch_attempted=%s processed=%s "
+                    "active_reports=%s chunks=%s deferred=%s",
+                    completed_batch_count,
+                    outcome.publication_generation,
+                    outcome.write_epoch,
+                    len(result.attempted_report_uids),
+                    len(attempted_report_uids),
+                    result.indexed_report_count,
+                    result.chunk_count,
+                    result.deferred_report_count,
+                )
+                if result.deferred_report_count == 0:
+                    break
         except NativeSourceExtractionError as exc:
             logger.error(
                 "Native V2 extraction failure escaped per-document recording: %s: %s",
@@ -385,12 +418,14 @@ def _run_pipeline_locked(
         except Exception as exc:
             logger.error(f"Native V2 incremental update failed: {type(exc).__name__}: {exc}")
             return 1
-        if completed is None:
+        if last_completed is None:
             logger.info("Native V2 is already current; no PDFs required processing.")
             return 0
-        result, outcome = completed
+        result, outcome = last_completed
         logger.info(
-            "Native V2 publication complete: generation=%s epoch=%s reports=%s chunks=%s",
+            "Native V2 update complete: snapshots=%s generation=%s epoch=%s "
+            "reports=%s chunks=%s",
+            completed_batch_count,
             outcome.publication_generation,
             outcome.write_epoch,
             result.report_count,

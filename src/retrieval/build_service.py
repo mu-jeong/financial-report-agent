@@ -66,9 +66,12 @@ class NativeSourceExtractionError(NativeBuildError):
 _EXCLUSION_POLICY_VERSION = "native-full-corpus-v2"
 _SOURCE_DELETED = "source-deleted"
 _SOURCE_EXTRACTION_FAILED = "source-extraction-failed"
+_SOURCE_BATCH_DEFERRED = "source-batch-deferred"
 _SOURCE_SUPERSEDED = "source-superseded"
+_BATCHED_EXCLUSION_POLICY_VERSION = "native-batched-corpus-v1"
 _SNAPSHOT_LINEAGE_TRAILER = b"FINANCE_LLM_V2_SNAPSHOT\0"
 _DEFAULT_FALLBACK_ENGINE = "pymupdf"
+DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE = 100
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +158,8 @@ class NativeBuildPlan:
     same_space_canary: SameSpaceCanary | None
     forward_recovery: bool
     build_mode: str
+    attempted_report_uids: tuple[str, ...] = ()
+    deferred_report_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -175,6 +180,8 @@ class CandidateResult:
     canonical_source_prefix: str
     deleted_relative_paths: tuple[str, ...]
     source_inventory: tuple[SourceFileSnapshot, ...]
+    attempted_report_uids: tuple[str, ...] = ()
+    deferred_report_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -210,6 +217,8 @@ def prepare_full_corpus_build(
     allow_degraded_forward_recovery: bool = False,
     writer_lease: WriterLease | None = None,
     _reuse_unchanged_vectors: bool = False,
+    _incremental_report_limit: int | None = None,
+    _incremental_skip_report_uids: frozenset[str] = frozenset(),
 ) -> NativeBuildPlan | None:
     """Prepare one deterministic full-corpus successor entirely off path.
 
@@ -241,12 +250,19 @@ def prepare_full_corpus_build(
         raise NativeBuildError("allow_extraction_fallback must be a boolean")
     if not isinstance(retry_extraction_failures, bool):
         raise NativeBuildError("retry_extraction_failures must be a boolean")
+    if _incremental_report_limit is not None:
+        _positive_size(_incremental_report_limit, "max_changed_reports")
+    if not _reuse_unchanged_vectors and (
+        _incremental_report_limit is not None or _incremental_skip_report_uids
+    ):
+        raise NativeBuildError("incremental batch controls require an incremental build")
 
     deleted = tuple(
         sorted({normalize_relative_path(value) for value in deleted_relative_paths})
     )
     (
         active_reports_by_path,
+        active_report_objects_by_path,
         existing_reports,
         prior_extraction_failure_uids,
     ) = _read_catalog_sources(selection)
@@ -356,6 +372,7 @@ def prepare_full_corpus_build(
             reports=reports,
             source_records=source_records,
             active_reports_by_path=active_reports_by_path,
+            active_report_objects_by_path=active_report_objects_by_path,
             prior_extraction_failure_uids=prior_extraction_failure_uids,
             source_root=source_root,
             source_inventory=source_inventory,
@@ -375,6 +392,8 @@ def prepare_full_corpus_build(
             normalization=normalization,
             prefix_template=prefix_template,
             retry_extraction_failures=retry_extraction_failures,
+            max_changed_reports=_incremental_report_limit,
+            skip_report_uids=_incremental_skip_report_uids,
         )
 
     canary = (
@@ -554,17 +573,28 @@ def prepare_full_corpus_build(
 def prepare_incremental_build(
     legacy_db_path: str | Path,
     source_directory: str | Path,
+    *,
+    max_changed_reports: int | None = None,
+    skip_report_uids: Iterable[str] = (),
     **kwargs: Any,
 ) -> NativeBuildPlan | None:
     """Build a complete successor while reusing every unchanged active vector."""
 
-    if "_reuse_unchanged_vectors" in kwargs:
-        raise TypeError("_reuse_unchanged_vectors is internal")
+    internal_keys = {
+        "_reuse_unchanged_vectors",
+        "_incremental_report_limit",
+        "_incremental_skip_report_uids",
+    }
+    if internal_keys.intersection(kwargs):
+        raise TypeError("incremental build controls are internal")
+    skipped = frozenset(str(report_uid) for report_uid in skip_report_uids)
     return prepare_full_corpus_build(
         legacy_db_path,
         source_directory,
         **kwargs,
         _reuse_unchanged_vectors=True,
+        _incremental_report_limit=max_changed_reports,
+        _incremental_skip_report_uids=skipped,
     )
 
 
@@ -574,6 +604,7 @@ def _prepare_incremental_plan(
     reports: tuple[CandidateReport, ...],
     source_records: list[dict[str, Any]],
     active_reports_by_path: Mapping[str, str],
+    active_report_objects_by_path: Mapping[str, CandidateReport],
     prior_extraction_failure_uids: frozenset[str],
     source_root: Path,
     source_inventory: tuple[SourceFileSnapshot, ...],
@@ -593,6 +624,8 @@ def _prepare_incremental_plan(
     normalization: str,
     prefix_template: str,
     retry_extraction_failures: bool,
+    max_changed_reports: int | None,
+    skip_report_uids: frozenset[str],
 ) -> NativeBuildPlan | None:
     if selection.write_epoch <= 0 or not selection.write_enabled:
         raise NativeBuildError("incremental updates require a writable native runtime")
@@ -605,12 +638,32 @@ def _prepare_incremental_plan(
         for record in source_records
         if active_reports_by_path.get(record["canonical_relative_path"])
         != record["report_uid"]
-        and (
+    ]
+    eligible_records = [
+        record
+        for record in changed_records
+        if (
             retry_extraction_failures
             or str(record["report_uid"]) not in carried_failure_uids
         )
+        and str(record["report_uid"]) not in skip_report_uids
     ]
-    if not changed_records and not deleted_relative_paths:
+    selected_records = (
+        eligible_records
+        if max_changed_reports is None
+        else eligible_records[:max_changed_reports]
+    )
+    deferred_records = eligible_records[len(selected_records) :]
+    deferred_report_uids = {
+        str(record["report_uid"]) for record in deferred_records
+    }
+    deferred_report_uids.update(
+        str(record["report_uid"])
+        for record in changed_records
+        if str(record["report_uid"]) in skip_report_uids
+        and str(record["report_uid"]) not in carried_failure_uids
+    )
+    if not selected_records and not deleted_relative_paths:
         return None
 
     unchanged_uids = {
@@ -619,7 +672,20 @@ def _prepare_incremental_plan(
         if active_reports_by_path.get(report.canonical_relative_path)
         == report.report_uid
     }
-    reusable = _read_reusable_snapshot(selection, unchanged_uids)
+    retained_active_reports: dict[str, CandidateReport] = {}
+    for record in changed_records:
+        report_uid = str(record["report_uid"])
+        if report_uid not in deferred_report_uids:
+            continue
+        active = active_report_objects_by_path.get(
+            str(record["canonical_relative_path"])
+        )
+        if active is not None and active.report_uid != report_uid:
+            retained_active_reports[active.report_uid] = active
+    reusable = _read_reusable_snapshot(
+        selection,
+        unchanged_uids.union(retained_active_reports.keys()),
+    )
     _validate_incremental_profile(
         reusable.profile,
         model=model,
@@ -642,17 +708,17 @@ def _prepare_incremental_plan(
             metric=metric,
             normalization=normalization,
         )
-        if changed_records
+        if selected_records
         else None
     )
     extracted, new_failure_uids = _extract_source_records(
-        changed_records,
+        selected_records,
         extractor_name=extractor_name,
         extractor=extractor,
         allow_extraction_fallback=allow_extraction_fallback,
         fallback_extractor_name=fallback_extractor_name,
     )
-    attempted_uids = {str(record["report_uid"]) for record in changed_records}
+    attempted_uids = {str(record["report_uid"]) for record in selected_records}
     extraction_failed_uids = (
         carried_failure_uids.difference(attempted_uids).union(new_failure_uids)
     )
@@ -661,6 +727,8 @@ def _prepare_incremental_plan(
         active_reports_by_path=active_reports_by_path,
         deleted_paths=set(deleted_relative_paths),
         extraction_failed_uids=extraction_failed_uids,
+        deferred_report_uids=deferred_report_uids,
+        retained_active_report_uids=frozenset(retained_active_reports),
     )
     if extracted:
         provisional_parents, provisional_chunks, embedding_texts = _split_full_corpus(
@@ -779,10 +847,19 @@ def _prepare_incremental_plan(
         dtype=np.float32,
     )
     vectors_by_physical_id.setflags(write=False)
+    plan_reports = tuple(
+        sorted(
+            {
+                report.report_uid: report
+                for report in (*reports, *retained_active_reports.values())
+            }.values(),
+            key=lambda report: bytes.fromhex(report.report_uid),
+        )
+    )
     return _finalize_native_build_plan(
         selection=selection,
         profile=reusable.profile,
-        reports=reports,
+        reports=plan_reports,
         parents=(*reusable.parents, *new_parents),
         chunks=chunks,
         manifest=manifest,
@@ -793,6 +870,8 @@ def _prepare_incremental_plan(
         source_inventory=source_inventory,
         same_space_canary=canary,
         build_mode="incremental",
+        attempted_report_uids=tuple(sorted(attempted_uids)),
+        deferred_report_count=len(deferred_report_uids),
     )
 
 
@@ -811,9 +890,13 @@ def _finalize_native_build_plan(
     source_inventory: tuple[SourceFileSnapshot, ...],
     same_space_canary: SameSpaceCanary | None,
     build_mode: str,
+    attempted_report_uids: tuple[str, ...] = (),
+    deferred_report_count: int = 0,
 ) -> NativeBuildPlan:
     if build_mode not in {"full", "incremental"}:
         raise NativeBuildError("unknown native build mode")
+    if deferred_report_count < 0:
+        raise NativeBuildError("deferred report count cannot be negative")
     _validate_plan_membership(reports, list(parents), chunks, manifest)
     if vectors_by_physical_id.shape != (len(chunks), profile.dimension):
         raise NativeBuildError("candidate vector payload shape is inconsistent")
@@ -900,6 +983,8 @@ def _finalize_native_build_plan(
         same_space_canary=same_space_canary,
         forward_recovery=bool(selection.degraded),
         build_mode=build_mode,
+        attempted_report_uids=attempted_report_uids,
+        deferred_report_count=deferred_report_count,
     )
 
 
@@ -1025,7 +1110,7 @@ def materialize_candidate(
         evidence_manifest_relative_path=evidence_relative,
         evidence_manifest_sha256=evidence_sha256,
         descriptor=descriptor,
-        report_count=len(plan.reports),
+        report_count=len(plan.source_inventory),
         indexed_report_count=plan.manifest.included_count,
         extraction_failure_count=sum(
             entry.reason_code == _SOURCE_EXTRACTION_FAILED
@@ -1037,6 +1122,8 @@ def materialize_candidate(
         canonical_source_prefix=plan.canonical_source_prefix,
         deleted_relative_paths=plan.deleted_relative_paths,
         source_inventory=plan.source_inventory,
+        attempted_report_uids=plan.attempted_report_uids,
+        deferred_report_count=plan.deferred_report_count,
     )
 
 
@@ -1413,20 +1500,47 @@ def _validate_snapshot_vector_payload(
 
 def _read_catalog_sources(
     selection: RuntimeSelection,
-) -> tuple[dict[str, str], dict[str, int], frozenset[str]]:
+) -> tuple[
+    dict[str, str],
+    dict[str, CandidateReport],
+    dict[str, int],
+    frozenset[str],
+]:
     connection = _open_read_only_catalog(selection.paths.catalog)
+    connection.row_factory = sqlite3.Row
     try:
         active_reports: dict[str, str] = {}
+        active_report_objects: dict[str, CandidateReport] = {}
         for row in connection.execute(
-            "SELECT canonical_relative_path, report_uid FROM active_reports"
+            """
+            SELECT report_id, report_uid, canonical_relative_path, source_sha256,
+                   retrieval_metadata_sha256, report_type, report_date,
+                   target_name, title, broker
+            FROM active_reports
+            """
         ):
-            path = str(row[0])
-            report_uid = str(row[1])
+            path = str(row["canonical_relative_path"])
+            report_uid = str(row["report_uid"])
             previous = active_reports.setdefault(path, report_uid)
             if previous != report_uid:
                 raise NativeBuildError(
                     "active snapshot contains multiple report objects for one source path"
                 )
+            active_report_objects[path] = CandidateReport(
+                report_uid=report_uid,
+                canonical_relative_path=path,
+                source_sha256=str(row["source_sha256"]),
+                retrieval_metadata_sha256=str(row["retrieval_metadata_sha256"]),
+                report_type=str(row["report_type"]),
+                report_date=str(row["report_date"]),
+                target_name=(
+                    None if row["target_name"] is None else str(row["target_name"])
+                ),
+                title=str(row["title"]),
+                broker=str(row["broker"]),
+                file_name=Path(path).name,
+                existing_report_id=int(row["report_id"]),
+            )
         existing = {
             str(row[0]): int(row[1])
             for row in connection.execute("SELECT report_uid, report_id FROM reports")
@@ -1464,6 +1578,7 @@ def _read_catalog_sources(
                 prior_extraction_failures.add(report_uid)
         return (
             active_reports,
+            active_report_objects,
             existing,
             frozenset(prior_extraction_failures),
         )
@@ -1674,6 +1789,8 @@ def _build_candidate_manifest(
     active_reports_by_path: Mapping[str, str],
     deleted_paths: set[str],
     extraction_failed_uids: set[str] | frozenset[str] = frozenset(),
+    deferred_report_uids: set[str] | frozenset[str] = frozenset(),
+    retained_active_report_uids: frozenset[str] = frozenset(),
 ) -> CorpusManifest:
     """Partition current and retired active report objects with stable reasons."""
 
@@ -1686,23 +1803,35 @@ def _build_candidate_manifest(
         raise NativeBuildError(
             "extraction failure references a report outside the current source corpus"
         )
-    decisions = [
-        (
-            ManifestDecision.excluded(
+    unknown_deferred = set(deferred_report_uids).difference(current_uids)
+    if unknown_deferred:
+        raise NativeBuildError(
+            "deferred report references a report outside the current source corpus"
+        )
+    decisions: list[ManifestDecision] = []
+    for report in reports:
+        if report.report_uid in extraction_failed_uids:
+            decision = ManifestDecision.excluded(
                 report.report_uid,
                 _SOURCE_EXTRACTION_FAILED,
             )
-            if report.report_uid in extraction_failed_uids
-            else ManifestDecision.included(report.report_uid)
-        )
-        for report in reports
-    ]
+        elif report.report_uid in deferred_report_uids:
+            decision = ManifestDecision.excluded(
+                report.report_uid,
+                _SOURCE_BATCH_DEFERRED,
+            )
+        else:
+            decision = ManifestDecision.included(report.report_uid)
+        decisions.append(decision)
     for path, report_uid in sorted(active_reports_by_path.items()):
         if report_uid in current_uids:
             continue
         if path in deleted_paths:
             reason = _SOURCE_DELETED
         elif path in current_by_path:
+            if report_uid in retained_active_report_uids:
+                decisions.append(ManifestDecision.included(report_uid))
+                continue
             reason = _SOURCE_SUPERSEDED
         else:
             raise NativeBuildError(
@@ -1714,13 +1843,18 @@ def _build_candidate_manifest(
         [decision.report_uid for decision in decisions],
         decisions,
         ExclusionPolicy(
-            version=_EXCLUSION_POLICY_VERSION,
+            version=(
+                _BATCHED_EXCLUSION_POLICY_VERSION
+                if deferred_report_uids
+                else _EXCLUSION_POLICY_VERSION
+            ),
             excluded_reason_codes=frozenset(
                 {
                     _SOURCE_DELETED,
                     _SOURCE_EXTRACTION_FAILED,
                     _SOURCE_SUPERSEDED,
                 }
+                | ({_SOURCE_BATCH_DEFERRED} if deferred_report_uids else set())
             ),
         ),
     )
@@ -2473,11 +2607,14 @@ def _write_candidate_evidence(
         "snapshot_file_sha256": descriptor.sha256,
         "snapshot_size_bytes": descriptor.size_bytes,
         "counts": {
-            "reports": len(plan.reports),
+            "reports": len(plan.source_inventory),
             "parents": len(plan.parents),
             "chunks": len(plan.chunks),
             "ntotal": descriptor.ntotal,
+            "attempted_reports": len(plan.attempted_report_uids),
+            "deferred_reports": plan.deferred_report_count,
         },
+        "attempted_report_uids": list(plan.attempted_report_uids),
         "deleted_relative_paths": list(plan.deleted_relative_paths),
         "forward_recovery": plan.forward_recovery,
         "same_space_canary": (
@@ -2547,7 +2684,7 @@ def _completed_candidate_result(
         evidence_manifest_relative_path=evidence_relative,
         evidence_manifest_sha256=evidence_sha256,
         descriptor=descriptor,
-        report_count=len(plan.reports),
+        report_count=len(plan.source_inventory),
         indexed_report_count=plan.manifest.included_count,
         extraction_failure_count=sum(
             entry.reason_code == _SOURCE_EXTRACTION_FAILED
@@ -2559,6 +2696,8 @@ def _completed_candidate_result(
         canonical_source_prefix=plan.canonical_source_prefix,
         deleted_relative_paths=plan.deleted_relative_paths,
         source_inventory=plan.source_inventory,
+        attempted_report_uids=plan.attempted_report_uids,
+        deferred_report_count=plan.deferred_report_count,
     )
 
 
@@ -2615,6 +2754,7 @@ def _sha256_file(path: Path) -> str:
 
 __all__ = [
     "CandidateResult",
+    "DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE",
     "NativeBuildError",
     "NativeSourceExtractionError",
     "NativeBuildPlan",

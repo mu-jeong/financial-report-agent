@@ -458,6 +458,223 @@ def test_incremental_update_reuses_unchanged_vectors_and_processes_only_pending_
     assert any("newly searchable" in text for text in embeddings.calls[1])
 
 
+def test_incremental_update_batches_publish_the_final_partial_batch(
+    tmp_path: Path,
+) -> None:
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=_migration_profile(),
+    )
+    _activate_seed_for_incremental(data_root)
+    (sources / "c.pdf").write_bytes(b"new-c")
+    (sources / "d.pdf").write_bytes(b"new-d")
+
+    def metadata(file_name: str):
+        existing = _metadata(file_name)
+        if existing is not None:
+            return existing
+        stem = Path(file_name).stem.upper()
+        return {
+            "report_type": "company",
+            "report_date": "2026-01-03",
+            "target_name": stem,
+            "title": f"{stem} update",
+            "broker": "Broker",
+        }
+
+    def extract(path: Path, engine: str) -> str:
+        if path.name in {"a.pdf", "b.pdf"}:
+            return _extract(path, engine)
+        return f"{path.stem} newly searchable report content"
+
+    options = {
+        "data_root": data_root,
+        "embeddings": DeterministicEmbeddings(),
+        "model": "model-a",
+        "extractor_name": "deterministic-extractor",
+        "extractor": extract,
+        "metadata_parser": metadata,
+        "allow_extraction_fallback": False,
+        "use_parent_child": True,
+        "parent_chunk_size": 2000,
+        "child_chunk_size": 500,
+        "metric": "l2",
+        "normalization": "none",
+        "max_changed_reports": 2,
+    }
+    first_result, first_publication = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        **options,
+    )
+
+    catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
+    with sqlite3.connect(catalog) as connection:
+        first_active_paths = {
+            row[0]
+            for row in connection.execute(
+                "SELECT canonical_relative_path FROM active_reports"
+            )
+        }
+        first_manifest = json.loads(
+            connection.execute(
+                "SELECT source_manifest_json FROM retrieval_builds WHERE build_id = ?",
+                (first_result.build_id,),
+            ).fetchone()[0]
+        )
+
+    assert len(first_result.attempted_report_uids) == 2
+    assert first_result.deferred_report_count == 1
+    assert first_active_paths == {
+        "downloaded/a.pdf",
+        "downloaded/b.pdf",
+        "downloaded/c.pdf",
+    }
+    assert first_manifest["exclusion_policy"]["version"] == "native-batched-corpus-v1"
+    assert {
+        entry["reason_code"]
+        for entry in first_manifest["reports"]
+        if entry["status"] == "excluded"
+    } == {"source-batch-deferred"}
+
+    second_result, second_publication = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        **options,
+    )
+    with sqlite3.connect(catalog) as connection:
+        final_active_paths = {
+            row[0]
+            for row in connection.execute(
+                "SELECT canonical_relative_path FROM active_reports"
+            )
+        }
+
+    assert len(second_result.attempted_report_uids) == 1
+    assert second_result.deferred_report_count == 0
+    assert final_active_paths == {
+        "downloaded/a.pdf",
+        "downloaded/b.pdf",
+        "downloaded/c.pdf",
+        "downloaded/d.pdf",
+    }
+    assert (
+        second_publication.publication_generation
+        == first_publication.publication_generation + 1
+    )
+
+
+def test_deferred_changed_report_keeps_its_previous_version_searchable(
+    tmp_path: Path,
+) -> None:
+    data_root, sources = _native_seed(
+        tmp_path,
+        seed_matches_current_source=True,
+        profile=_migration_profile(),
+    )
+    _activate_seed_for_incremental(data_root)
+    common_options = {
+        "data_root": data_root,
+        "model": "model-a",
+        "extractor_name": "deterministic-extractor",
+        "allow_extraction_fallback": False,
+        "use_parent_child": True,
+        "parent_chunk_size": 2000,
+        "child_chunk_size": 500,
+        "metric": "l2",
+        "normalization": "none",
+    }
+    execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        embeddings=DeterministicEmbeddings(),
+        extractor=_extract,
+        metadata_parser=_metadata,
+        **common_options,
+    )
+    catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
+    with sqlite3.connect(catalog) as connection:
+        previous_b_uid = connection.execute(
+            """
+            SELECT report_uid FROM active_reports
+            WHERE canonical_relative_path = 'downloaded/b.pdf'
+            """
+        ).fetchone()[0]
+
+    (sources / "aa.pdf").write_bytes(b"new-aa")
+    (sources / "b.pdf").write_bytes(b"changed-b")
+
+    def metadata(file_name: str):
+        if file_name == "aa.pdf":
+            return {
+                "report_type": "company",
+                "report_date": "2026-01-03",
+                "target_name": "AA",
+                "title": "AA update",
+                "broker": "Broker",
+            }
+        return _metadata(file_name)
+
+    def extract(path: Path, engine: str) -> str:
+        if path.name == "aa.pdf":
+            return "aa newly searchable report content"
+        if path.name == "b.pdf":
+            return "changed b report content"
+        return _extract(path, engine)
+
+    first_result, _first_publication = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        embeddings=DeterministicEmbeddings(),
+        extractor=extract,
+        metadata_parser=metadata,
+        max_changed_reports=1,
+        **common_options,
+    )
+    with sqlite3.connect(catalog) as connection:
+        active_after_first = dict(
+            connection.execute(
+                "SELECT canonical_relative_path, report_uid FROM active_reports"
+            )
+        )
+        manifest = json.loads(
+            connection.execute(
+                "SELECT source_manifest_json FROM retrieval_builds WHERE build_id = ?",
+                (first_result.build_id,),
+            ).fetchone()[0]
+        )
+
+    assert first_result.deferred_report_count == 1
+    assert active_after_first["downloaded/b.pdf"] == previous_b_uid
+    assert "downloaded/aa.pdf" in active_after_first
+    assert any(
+        entry["report_uid"] == previous_b_uid
+        and entry["status"] == "included"
+        for entry in manifest["reports"]
+    )
+
+    second_result, _second_publication = execute_incremental_update(
+        data_root / "reports.db",
+        sources,
+        embeddings=DeterministicEmbeddings(),
+        extractor=extract,
+        metadata_parser=metadata,
+        max_changed_reports=1,
+        **common_options,
+    )
+    with sqlite3.connect(catalog) as connection:
+        current_b_uid = connection.execute(
+            """
+            SELECT report_uid FROM active_reports
+            WHERE canonical_relative_path = 'downloaded/b.pdf'
+            """
+        ).fetchone()[0]
+
+    assert second_result.deferred_report_count == 0
+    assert current_b_uid != previous_b_uid
+
+
 def test_incremental_update_is_a_noop_without_source_changes(tmp_path: Path) -> None:
     data_root, sources = _native_seed(
         tmp_path,

@@ -578,12 +578,23 @@ def _processed_report_count(output: str) -> int:
 
 def embedding_file_progress_from_line(line: str) -> tuple[int, int, str] | None:
     match = re.match(r"^\[(\d+)/(\d+)\]\s*(.+)$", line.rstrip())
-    if not match:
-        return None
-    current = int(match.group(1))
-    total = int(match.group(2))
-    label = match.group(3).strip()
-    return current, total, label
+    if match:
+        current = int(match.group(1))
+        total = int(match.group(2))
+        label = match.group(3).strip()
+        return current, total, label
+
+    native = re.search(
+        r"Native V2 batch publication complete: batch=(\d+).*"
+        r"processed=(\d+).*deferred=(\d+)",
+        line.rstrip(),
+    )
+    if native:
+        batch = int(native.group(1))
+        processed = int(native.group(2))
+        deferred = int(native.group(3))
+        return processed, processed + deferred, f"V2 snapshot batch {batch}"
+    return None
 
 
 def embedding_failure_message(exit_code: int, output: str) -> str:

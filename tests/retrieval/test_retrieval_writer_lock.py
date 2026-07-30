@@ -12,6 +12,7 @@ import src.retrieval.writer_lock as writer_lock_module
 from src.retrieval.writer_lock import (
     NativeWriterLock,
     ProcessState,
+    WriterLockBusyError,
     WriterLockError,
     assert_writer_lease_owned,
 )
@@ -47,7 +48,7 @@ def test_live_nonce_owner_blocks_second_writer_and_release_allows_next(tmp_path:
     first = NativeWriterLock(root, process_probe=probe)
 
     with first:
-        with pytest.raises(WriterLockError, match="live process"):
+        with pytest.raises(WriterLockBusyError, match="live process"):
             NativeWriterLock(root, process_probe=probe).acquire()
 
     with NativeWriterLock(root, process_probe=probe):

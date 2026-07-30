@@ -22,6 +22,10 @@ class WriterLockError(RuntimeError):
     """Raised when exclusive native writer ownership cannot be proved."""
 
 
+class WriterLockBusyError(WriterLockError):
+    """Raised when another live process currently owns the writer lock."""
+
+
 @dataclass(frozen=True)
 class ProcessState:
     alive: bool
@@ -348,7 +352,9 @@ class NativeWriterLock:
         identity = owner["process_identity"]
         state = self._probe(pid)
         if state.alive and state.identity == identity:
-            raise WriterLockError("native writer lock is already owned by a live process")
+            raise WriterLockBusyError(
+                "native writer lock is already owned by a live process"
+            )
         if state.alive and state.identity is None:
             raise WriterLockError("writer owner is alive but its identity is unavailable")
         if age < self.stale_after_seconds:
@@ -574,7 +580,7 @@ def _acquire_process_guard(path: Path) -> int:
         return descriptor
     except (BlockingIOError, PermissionError) as exc:
         os.close(descriptor)
-        raise WriterLockError(
+        raise WriterLockBusyError(
             "native writer lock is already owned by a live process"
         ) from exc
     except BaseException:
@@ -649,6 +655,7 @@ __all__ = [
     "NativeWriterLock",
     "ProcessState",
     "WriterLease",
+    "WriterLockBusyError",
     "WriterLockError",
     "assert_writer_lease_owned",
     "probe_process",

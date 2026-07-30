@@ -61,7 +61,10 @@ def _import_graph_app():
     """Validate retrieval, then import the expensive graph in the worker."""
     config_module = importlib.import_module("src.configs.config")
     bootstrap_module = importlib.import_module("src.retrieval.bootstrap")
-    bootstrap_module.reconcile_and_inspect_runtime(config_module.DB_PATH)
+    bootstrap_module.reconcile_and_inspect_runtime(
+        config_module.DB_PATH,
+        allow_live_writer_read=True,
+    )
     module = importlib.import_module("src.graphs.main_graph")
     graph_app = module.graph_app
     if not callable(getattr(graph_app, "invoke", None)):

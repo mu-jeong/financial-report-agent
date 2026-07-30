@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.configs import config as config_module
 from src.retrieval import launcher_guard
+from src.retrieval.writer_lock import NativeWriterLock
 from tests.retrieval.test_retrieval_build_service import _native_seed
 
 
@@ -41,6 +42,27 @@ def test_launcher_guard_write_mode_fails_closed_at_epoch_zero(
     assert payload["status"] == "blocked"
     assert payload["error"] == "RetrievalWriteBlocked"
     assert "writes are disabled" in payload["message"]
+
+
+def test_launcher_guard_keeps_reads_available_but_blocks_writes_during_live_writer(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    data_root, _sources = _native_seed(tmp_path)
+    monkeypatch.setattr(config_module, "DB_PATH", str(data_root / "reports.db"))
+
+    with NativeWriterLock(data_root):
+        read_result = launcher_guard.main([])
+        read_payload = json.loads(capsys.readouterr().out)
+        write_result = launcher_guard.main(["--write"])
+        write_payload = json.loads(capsys.readouterr().out)
+
+    assert read_result == 0
+    assert read_payload["status"] == "ok"
+    assert write_result == 2
+    assert write_payload["error"] == "RetrievalBootstrapError"
+    assert "locked" in write_payload["message"]
 
 
 def test_supported_launchers_guard_before_update_or_graph_import():
