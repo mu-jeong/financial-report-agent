@@ -15,6 +15,7 @@ from pathlib import Path
 from src.retrieval.bootstrap import (
     RetrievalPaths,
     RuntimeSelection,
+    RuntimeValidationMode,
     inspect_runtime,
     retrieval_paths,
 )
@@ -111,6 +112,7 @@ def resolve_retrieval_dispatch(
     *,
     data_root: str | Path | None = None,
     validate_snapshot: bool = True,
+    catalog_validation: RuntimeValidationMode = "full",
 ) -> ResolvedRetrievalDispatch:
     """Resolve one request without repeatedly inspecting an established V2.
 
@@ -136,7 +138,12 @@ def resolve_retrieval_dispatch(
             legacy_db_path,
             data_root=root,
             validate_snapshot=validate_snapshot,
+            catalog_validation=catalog_validation,
         )
+        if selection.is_native and not validate_snapshot:
+            raise RetrievalDispatchStateError(
+                "cold native dispatch requires active snapshot validation"
+            )
         if selection.is_native:
             holder = _prime_native_dispatch_locked(selection.paths)
             return ResolvedRetrievalDispatch(

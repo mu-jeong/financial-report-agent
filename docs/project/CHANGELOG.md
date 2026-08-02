@@ -2,6 +2,24 @@
 
 이 문서는 프로젝트의 주요 변경 사항을 간단히 기록합니다.
 
+## Unreleased
+
+### Added
+
+- Native V2 업데이트가 성공한 문서를 작은 불변 단위로 즉시 검색에 반영하고, 재시작 후에도 이미 반영된 진행 상태를 이어받도록 했습니다.
+- Base snapshot과 진행 중 업데이트를 한 요청 revision으로 고정해 검색하는 composite reader와 delta-aware SQL/status projection을 추가했습니다.
+- 검색에서 제외된 임시 vector 파일의 정리 대기 수·용량·최장 보존 시간을 CLI 상태와 Monitoring 화면에 추가했습니다.
+
+### Changed
+
+- 개별 Chat Monitoring은 정확도와 trace 진단을 제외하고 최근·평균 응답시간, RDB 평균 조회시간, Vector DB 평균 검색시간과 응답별 시간 표만 표시하도록 단순화했습니다.
+- Monitoring 기본 화면을 응답 속도(P95)와 correctness-only 답변 정확도로 축소하고, 응답 trace·검색 자료·평가·parsing·신고 도구는 단일 `문제 상황 자세히 보기` 영역으로 이동했습니다. 활성 discovery와 무결성 집계는 Native V2 계약만 사용하며 과거 고정 DB/vector 실행 경로는 UI에서 제거했습니다.
+- Monitoring의 속도 표본과 정확도 run에 실제 Native V2 runtime provenance를 요구하고, legacy/epoch-zero 상태에서는 평가와 V1 상세 지표를 fail closed하도록 변경했습니다.
+- V2 업데이트는 batch마다 전체 snapshot을 다시 만들지 않고, 작업 종료 시 기존 vector를 재사용한 완전한 snapshot을 한 번만 게시합니다.
+- 변경 문서 파싱이 실패하면 이전 검색 가능 버전을 유지하며, GUI는 업데이트 중에도 검색 사용 가능 여부와 처리 완료 문서의 순차 반영을 안내합니다.
+- 임시 vector 파일 정리를 공용 snapshot GC에 통합해 소유 base GC 직후, 모든 snapshot 게시 후, 정상 시작 시 자동 재시도합니다.
+- GC는 immutable hash/size를 확인한 quarantine 파일만 삭제하며, fast startup에서도 정리를 재조정합니다. 게시 후 정리 오류는 게시 실패 대신 `cleanup_pending`으로 반환합니다.
+
 ## v0.5.1 - 2026-07-25
 
 ### Added

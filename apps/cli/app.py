@@ -130,6 +130,7 @@ def main():
         selection = reconcile_and_inspect_runtime(
             DB_PATH,
             allow_live_writer_read=True,
+            prefer_fast_read=True,
         )
         print(
             json.dumps(
@@ -157,6 +158,7 @@ def main():
     reconcile_and_inspect_runtime(
         DB_PATH,
         allow_live_writer_read=True,
+        prefer_fast_read=True,
     )
     run_cli()
 

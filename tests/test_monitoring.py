@@ -3,12 +3,15 @@ from pathlib import Path
 import pytest
 
 from src.core.monitoring import (
+    CandidateValidationError,
     build_chat_trace_debug_hints,
     build_chat_trace_issue_context,
+    build_native_v2_evaluation_data_source,
     build_eval_case_draft_from_issue_report,
     build_regression_candidate_dataset,
     build_regression_candidate_rows,
     list_regression_candidates,
+    list_v2_regression_candidate_artifacts,
     build_message_trace_detail,
     build_message_trace_summary,
     build_issue_report_rows,
@@ -22,21 +25,49 @@ from src.core.monitoring import (
     build_evaluation_failure_actions,
     filter_evaluation_runs_by_mode,
     build_message_monitoring_rows,
-    build_global_monitoring_section_labels,
-    build_monitoring_tab_labels,
+    build_chat_latency_rows,
     compare_evaluation_runs,
     compact_graph_monitoring_metadata,
+    compute_evaluation_run_hash,
     evaluate_dataset_case_result,
     promote_issue_report_to_eval_candidate,
     run_evaluation_dataset,
     select_evaluation_cases,
     summarize_all_chat_threads,
     summarize_chat_messages,
-    summarize_data_integrity,
+    summarize_chat_latency_metrics,
+    summarize_evaluation_accuracy,
     summarize_evaluation_dataset,
     summarize_issue_reports,
+    summarize_v2_data_integrity,
     validate_evaluation_snapshot,
 )
+
+
+def _native_v2_data_source() -> dict:
+    return {
+        "backend_mode": "native_v2",
+        "runtime_mode": "native",
+        "snapshot_id": "snapshot-v2",
+        "build_id": "build-v2",
+        "profile_hash": "a" * 64,
+        "publication_generation": 3,
+        "write_epoch": 2,
+        "v1_fallback_open": False,
+        "degraded": False,
+    }
+
+
+def _attested_native_v2_run(results: list[dict]) -> dict:
+    run = {
+        "schema_version": 2,
+        "execution_mode": "native_v2",
+        "data_source": _native_v2_data_source(),
+        "results": results,
+    }
+    run["run_hash"] = compute_evaluation_run_hash(run)
+    run["integrity_status"] = "valid"
+    return run
 
 
 def test_summarize_evaluation_dataset_counts_monitoring_dimensions():
@@ -146,6 +177,15 @@ def test_chat_monitoring_summary_and_rows_are_safe_metadata_only():
                 "latency_seconds": 1.5,
                 "selected_sources": [{"rank": 1}, {"rank": 2}],
                 "search_scope": {"search_filters": {"target_name": "NAVER"}},
+                "retrieval_runtime": {
+                    "mode": "native",
+                    "active_snapshot_id": "snapshot-v2",
+                    "active_build_id": "build-v2",
+                    "publication_generation": 3,
+                    "write_epoch": 2,
+                    "v1_fallback_open": False,
+                    "degraded": False,
+                },
             },
         },
         {
@@ -163,10 +203,114 @@ def test_chat_monitoring_summary_and_rows_are_safe_metadata_only():
     assert summary["routes"] == {"vectordb": 1}
     assert summary["avg_selected_source_count"] == 2.0
     assert summary["avg_rerank_source_count"] == 2.0
+    assert summary["latency_sample_count"] == 1
+    assert summary["p95_latency_seconds"] == 1.5
     assert rows[0]["search_filters"] == {"target_name": "NAVER"}
     assert rows[0]["user_question_preview"] == "질문 본문"
     assert rows[0]["assistant_preview"] == "긴 답변 본문"
     assert "content" not in rows[0]
+
+
+def test_chat_latency_metrics_use_only_successful_native_v2_samples():
+    runtime = {
+        "mode": "native",
+        "active_snapshot_id": "snapshot-v2",
+        "publication_generation": 3,
+        "write_epoch": 2,
+        "v1_fallback_open": False,
+        "degraded": False,
+    }
+    messages = [
+        {
+            "role": "assistant",
+            "created_at": "2026-08-02T10:00:00",
+            "metadata": {
+                "status": "succeeded",
+                "route": "rdb",
+                "latency_seconds": 2.0,
+                "retrieval_runtime": runtime,
+                "monitoring": {"rdb": {"query_ns": 100_000_000}},
+            },
+        },
+        {
+            "role": "assistant",
+            "created_at": "2026-08-02T10:01:00",
+            "metadata": {
+                "status": "succeeded",
+                "route": "vectordb",
+                "latency_seconds": 4.0,
+                "retrieval_runtime": runtime,
+                "monitoring": {
+                    "retrieval": {"native_total_ns": 400_000_000}
+                },
+            },
+        },
+        {
+            "role": "assistant",
+            "created_at": "2026-08-02T10:02:00",
+            "metadata": {
+                "status": "succeeded",
+                "route": "vectordb",
+                "latency_seconds": 6.0,
+                "retrieval_runtime": runtime,
+                "monitoring": {
+                    "retrieval": {"native_total_ns": 600_000_000}
+                },
+            },
+        },
+        {
+            "role": "assistant",
+            "metadata": {
+                "status": "succeeded",
+                "route": "rdb",
+                "latency_seconds": 90.0,
+                "monitoring": {"rdb": {"query_ns": 90_000_000_000}},
+            },
+        },
+        {
+            "role": "assistant",
+            "metadata": {
+                "status": "failed",
+                "route": "vectordb",
+                "latency_seconds": 80.0,
+                "retrieval_runtime": runtime,
+                "monitoring": {
+                    "retrieval": {"native_total_ns": 80_000_000_000}
+                },
+            },
+        },
+    ]
+
+    summary = summarize_chat_latency_metrics(messages)
+    rows = build_chat_latency_rows(messages)
+
+    assert summary == {
+        "latest_response_seconds": 6.0,
+        "avg_response_seconds": 4.0,
+        "response_sample_count": 3,
+        "avg_rdb_seconds": 0.1,
+        "rdb_sample_count": 1,
+        "avg_vector_seconds": 0.5,
+        "vector_sample_count": 2,
+    }
+    assert [row["route"] for row in rows] == ["rdb", "vectordb", "vectordb"]
+    assert rows[0]["rdb_seconds"] == 0.1
+    assert rows[0]["vector_seconds"] is None
+    assert rows[-1]["response_seconds"] == 6.0
+    assert rows[-1]["vector_seconds"] == 0.6
+
+
+def test_chat_latency_metrics_return_measurement_pending_without_samples():
+    assert summarize_chat_latency_metrics([]) == {
+        "latest_response_seconds": None,
+        "avg_response_seconds": None,
+        "response_sample_count": 0,
+        "avg_rdb_seconds": None,
+        "rdb_sample_count": 0,
+        "avg_vector_seconds": None,
+        "vector_sample_count": 0,
+    }
+    assert build_chat_latency_rows([]) == []
 
 
 
@@ -504,6 +648,28 @@ def test_compact_graph_monitoring_metadata_handles_no_result_none_rerank_info():
     assert metadata["monitoring"]["retrieval"]["candidate_count_after_filter"] == 0
 
 
+def test_compact_graph_monitoring_metadata_keeps_rdb_query_duration():
+    metadata = compact_graph_monitoring_metadata(
+        final_state={
+            "route": "rdb",
+            "sql_query": "SELECT COUNT(*) FROM reports",
+            "rdb_result": {"columns": ["count"], "rows": [(3,)]},
+            "monitoring_metrics": {
+                "rdb": {
+                    "query_ns": 125_000_000,
+                    "row_count": 1,
+                    "column_count": 1,
+                    "guardrail_blocked": False,
+                }
+            },
+        },
+        latency_seconds=1.0,
+        rerank_info=None,
+    )
+
+    assert metadata["monitoring"]["rdb"]["query_ns"] == 125_000_000
+
+
 def test_evaluate_dataset_case_result_scores_route_filter_source_citation_and_latency():
     case = {
         "id": "case-1",
@@ -585,10 +751,36 @@ def test_run_evaluation_dataset_saves_run_and_summary(tmp_path):
 
     run = run_evaluation_dataset(dataset, fake_invoke, output_dir=tmp_path)
 
+    assert run["schema_version"] == 2
+    assert run["integrity_status"] == "valid"
+    assert run["run_hash"]
     assert run["summary"]["case_count"] == 1
     assert run["summary"]["passed"] == 1
+    assert run["summary"]["accuracy_rate"] == 1.0
     assert run["summary"]["source_hit_rate"] == 1.0
     assert Path(run["json_path"]).exists()
+
+
+def test_native_v2_evaluation_rejects_unattested_graph_results(tmp_path):
+    dataset = {
+        "name": "native-v2-eval",
+        "version": 2,
+        "cases": [{"id": "case-1", "question": "question"}],
+    }
+
+    with pytest.raises(
+        CandidateValidationError,
+        match="does not match the pinned Native V2 revision",
+    ):
+        run_evaluation_dataset(
+            dataset,
+            lambda *_args, **_kwargs: {"generation": "unattested"},
+            output_dir=tmp_path,
+            execution_mode="native_v2",
+            data_source=_native_v2_data_source(),
+        )
+
+    assert list(tmp_path.glob("evaluation_run_*.json")) == []
 
 
 def test_compare_evaluation_runs_reports_metric_deltas():
@@ -638,8 +830,47 @@ def test_summarize_all_chat_threads_and_issue_reports_for_global_monitoring():
     assert "Description" in rows[0]["preview"]
 
 
-def test_summarize_data_integrity_flags_missing_indexes_and_pending_embeddings():
-    summary = summarize_data_integrity(
+def test_speed_summary_excludes_legacy_messages_without_v2_provenance():
+    summary = summarize_all_chat_threads(
+        [
+            {
+                "thread": {"id": "thread-a", "name": "mixed"},
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "metadata": {
+                            "status": "succeeded",
+                            "latency_seconds": 99.0,
+                        },
+                    },
+                    {
+                        "role": "assistant",
+                        "metadata": {
+                            "status": "succeeded",
+                            "latency_seconds": 1.25,
+                            "retrieval_runtime": {
+                                "mode": "native",
+                                "active_snapshot_id": "snapshot-v2",
+                                "active_build_id": "build-v2",
+                                "publication_generation": 3,
+                                "write_epoch": 2,
+                                "v1_fallback_open": False,
+                                "degraded": False,
+                            },
+                        },
+                    },
+                ],
+            }
+        ]
+    )
+
+    assert summary["latency_sample_count"] == 1
+    assert summary["avg_latency_seconds"] == 1.25
+    assert summary["p95_latency_seconds"] == 1.25
+
+
+def test_summarize_v2_data_integrity_never_falls_back_to_v1_metrics():
+    summary = summarize_v2_data_integrity(
         {
             "db": {"total_reports": 10, "embedded_reports": 7, "pending_reports": 3, "parent_chunks": 0},
             "vector_db": {"has_faiss_index": False, "file_count": 0},
@@ -648,13 +879,16 @@ def test_summarize_data_integrity_flags_missing_indexes_and_pending_embeddings()
         }
     )
 
-    assert summary["checks"]["faiss_index"]["status"] == "fail"
-    assert summary["checks"]["embedding_backlog"]["status"] == "warning"
-    assert summary["checks"]["pdf_vs_db"]["status"] == "warning"
+    assert summary["checks"] == {
+        "v2_runtime": {
+            "status": "fail",
+            "detail": "V2 retrieval status is unavailable",
+        }
+    }
 
 
-def test_summarize_data_integrity_uses_native_snapshot_membership_not_pickle_shape():
-    summary = summarize_data_integrity(
+def test_summarize_v2_data_integrity_uses_native_snapshot_membership_not_pickle_shape():
+    summary = summarize_v2_data_integrity(
         {
             "db": {
                 "total_reports": 4,
@@ -685,19 +919,99 @@ def test_summarize_data_integrity_uses_native_snapshot_membership_not_pickle_sha
     assert "embedding_backlog" not in summary["checks"]
 
 
-def test_monitoring_tab_labels_separate_global_and_chat_monitoring():
-    assert build_monitoring_tab_labels() == [
-        "운영 상태",
-        "평가/실험",
-        "이슈/회귀",
-        "Chat Monitoring",
-    ]
+def test_summarize_v2_data_integrity_rejects_epoch_zero_compatibility():
+    summary = summarize_v2_data_integrity(
+        {"retrieval": {"mode": "epoch_zero_compatibility"}}
+    )
+
+    assert summary["checks"]["v2_runtime"]["status"] == "fail"
 
 
-def test_global_monitoring_section_labels_group_related_pages():
-    assert build_global_monitoring_section_labels("운영 상태") == ["데이터 상태", "임베딩 누락 문서", "전체 응답 품질"]
-    assert build_global_monitoring_section_labels("평가/실험") == ["고정 평가셋", "실험 실행", "Parsing 비교"]
-    assert build_global_monitoring_section_labels("이슈/회귀") == ["이슈 신고/회귀 후보"]
+def test_build_native_v2_evaluation_data_source_rejects_epoch_zero():
+    with pytest.raises(
+        CandidateValidationError,
+        match="successor Native V2",
+    ):
+        build_native_v2_evaluation_data_source(
+            {
+                "retrieval": {
+                    "mode": "native",
+                    "active_snapshot_id": "snapshot-v2",
+                    "active_build_id": "build-v2",
+                    "profile_hash": "a" * 64,
+                    "publication_generation": 1,
+                    "write_epoch": 0,
+                    "v1_fallback_open": True,
+                    "degraded": False,
+                }
+            }
+        )
+
+
+def test_evaluation_accuracy_excludes_latency_from_correctness():
+    run = _attested_native_v2_run(
+        [
+            {
+                "active_checks": ["source_hit", "citation_valid", "latency_pass"],
+                "check_results": {
+                    "source_hit": True,
+                    "citation_valid": True,
+                    "latency_pass": False,
+                },
+            },
+            {
+                "active_checks": ["source_hit", "citation_valid"],
+                "check_results": {
+                    "source_hit": False,
+                    "citation_valid": True,
+                },
+            },
+        ]
+    )
+
+    assert summarize_evaluation_accuracy(run) == {
+        "accuracy_rate": 0.5,
+        "passed": 1,
+        "case_count": 2,
+        "measured": True,
+    }
+
+
+def test_evaluation_accuracy_ignores_pre_v2_and_unscored_runs():
+    unavailable = {
+        "accuracy_rate": None,
+        "passed": 0,
+        "case_count": 0,
+        "measured": False,
+    }
+
+    assert summarize_evaluation_accuracy(None) == unavailable
+    assert summarize_evaluation_accuracy({"results": []}) == unavailable
+    assert summarize_evaluation_accuracy(
+        _attested_native_v2_run(
+            [{"active_checks": ["latency_pass"]}]
+        )
+    ) == unavailable
+
+
+def test_evaluation_accuracy_rejects_self_labeled_or_tampered_v2_runs():
+    result = {
+        "active_checks": ["source_hit"],
+        "check_results": {"source_hit": True},
+    }
+    self_labeled = {
+        "schema_version": 2,
+        "execution_mode": "native_v2",
+        "data_source": {"backend_mode": "native_v2"},
+        "results": [result],
+    }
+    self_labeled["run_hash"] = compute_evaluation_run_hash(self_labeled)
+    self_labeled["integrity_status"] = "valid"
+    tampered = _attested_native_v2_run([result])
+    tampered["data_source"]["snapshot_id"] = "other-snapshot"
+
+    assert summarize_evaluation_accuracy(self_labeled)["measured"] is False
+    assert summarize_evaluation_accuracy(tampered)["measured"] is False
 
 def test_promote_issue_report_to_eval_candidate_saves_regression_candidate(tmp_path):
     candidate = promote_issue_report_to_eval_candidate(
@@ -865,10 +1179,36 @@ def test_regression_candidate_helpers_list_rows_and_build_draft_dataset(tmp_path
     assert dataset["cases"] == [candidate_a["eval_case_draft"]]
 
 
+def test_active_monitoring_candidate_list_ignores_v1_contracts(tmp_path):
+    promote_issue_report_to_eval_candidate(
+        {"id": "old", "category": "답변 품질", "content": "old"},
+        output_dir=tmp_path,
+    )
+    current = promote_issue_report_to_eval_candidate(
+        {
+            "schema_version": 2,
+            "report_contract_version": 2,
+            "id": "current",
+            "kind": "user_feedback",
+            "report_target_type": "ui_or_system",
+            "category": "답변 품질",
+            "comment": "current",
+        },
+        output_dir=tmp_path,
+    )
+
+    artifacts = list_v2_regression_candidate_artifacts(tmp_path)
+
+    assert [candidate["id"] for candidate in artifacts["items"]] == [
+        current["id"]
+    ]
+    assert artifacts["warnings"] == []
+
+
 def test_monitoring_page_labels_make_global_monitoring_directly_accessible():
     assert build_monitoring_page_labels() == [
         "Chat",
-        "전체 Monitoring",
+        "Monitoring",
     ]
 
 def test_select_evaluation_cases_uses_selected_ids_not_count():
@@ -1069,6 +1409,9 @@ def test_run_multiturn_evaluation_dataset_carries_scope_and_thread_without_chat_
 
     run = run_multiturn_evaluation_dataset(dataset, fake_invoke, output_dir=tmp_path)
 
+    assert run["schema_version"] == 2
+    assert len(run["run_hash"]) == 64
+    assert run["integrity_status"] == "valid"
     assert run["evaluation_type"] == "multiturn"
     assert run["summary"]["case_count"] == 1
     assert run["summary"]["turn_count"] == 2

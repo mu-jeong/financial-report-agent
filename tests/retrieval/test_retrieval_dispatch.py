@@ -10,11 +10,13 @@ import pytest
 
 from src.retrieval import dispatch as dispatch_module
 from src.retrieval.bootstrap import (
+    RetrievalBootstrapError,
     RetrievalPaths,
     RuntimeSelection,
     reconcile_and_inspect_runtime,
 )
 from src.retrieval.dispatch import (
+    RetrievalDispatchStateError,
     prime_native_dispatch,
     reset_native_dispatchers,
     resolve_retrieval_dispatch,
@@ -119,6 +121,20 @@ def test_same_process_reconciliation_primes_native_dispatch(tmp_path, monkeypatc
     assert primed == [selection]
     assert resolved.mode == "native"
     assert resolved.native is not None
+
+
+def test_lax_cold_resolution_cannot_poison_strict_snapshot_validation(tmp_path):
+    legacy, snapshot = _native_install(tmp_path, epoch=1)
+    snapshot.write_bytes(b"corrupt")
+
+    with pytest.raises(
+        RetrievalDispatchStateError,
+        match="requires active snapshot validation",
+    ):
+        resolve_retrieval_dispatch(legacy, validate_snapshot=False)
+
+    with pytest.raises(RetrievalBootstrapError, match="fallback closure"):
+        resolve_retrieval_dispatch(legacy)
 
 
 def test_concurrent_native_first_resolution_constructs_once(tmp_path, monkeypatch):

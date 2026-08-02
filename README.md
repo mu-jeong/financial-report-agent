@@ -164,7 +164,7 @@ python -m src.core.embed_pipeline --all        # V1: pending 전체, V2: 같은 
 python -m src.core.embed_pipeline --limit 100  # V1에서만 처리량 제한
 ```
 
-V1에서는 `TEST_LIMIT`, `--limit`, `--all`이 pending 처리량을 결정합니다. V2에서는 limit 옵션을 무시하고 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩하고 변경되지 않은 청크와 벡터를 재사용합니다. primary와 fallback이 모두 실패한 문서는 active manifest에 제외 상태로 남기고 나머지를 계속 처리합니다. 같은 바이트의 기존 실패는 일반 업데이트에서 반복 파싱하지 않으며, Monitoring Mode의 `임베딩 누락 문서`에서 재시도할 때만 다시 처리합니다. 변화가 없으면 새 publication을 만들지 않습니다.
+V1에서는 `TEST_LIMIT`, `--limit`, `--all`이 pending 처리량을 결정합니다. V2에서는 limit 옵션을 무시하고 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩합니다. 성공한 문서는 작은 불변 업데이트 단위로 즉시 검색에 반영되므로 전체 작업 중에도 기존 검색을 계속 사용할 수 있습니다. 모든 문서 처리가 끝나면 기존 청크와 벡터까지 재사용해 완전한 snapshot을 한 번만 게시합니다. primary와 fallback이 모두 실패한 변경 문서는 이전 검색 가능 버전을 유지한 채 실패 상태로 기록하고 나머지를 계속 처리합니다. 같은 바이트의 기존 실패는 일반 업데이트에서 반복 파싱하지 않으며, Monitoring Mode의 `임베딩 누락 문서`에서 재시도할 때만 다시 처리합니다. 새 변경도 정리할 중간 상태도 없으면 publication을 만들지 않습니다. 자세한 동작과 복구 경계는 [`docs/CONTINUOUS_UPDATES.md`](docs/CONTINUOUS_UPDATES.md)를 참고하세요.
 
 V2 활성 상태에서는 `data/retrieval/v2`, `data/reports.db`, `data/vector_db`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. 위 표의 추출 정책 변경에 해당할 때만 `tools\recovery\REBUILD_V2.bat --check`로 점검한 뒤 `tools\recovery\REBUILD_V2.bat`으로 검증된 full-corpus successor를 만드세요.
 
@@ -197,7 +197,7 @@ GUI 답변 생성은 백그라운드 thread에서 실행됩니다. 답변 생성
 
 참고 문서의 `열기` 버튼은 브라우저 링크가 아니라 Streamlit 서버가 실행 중인 PC에서 PDF를 직접 엽니다. 파일은 `REPORT_PDF_DIR` 환경 변수의 폴더와 참고 문서의 파일명을 조합해 찾습니다. V1 임베딩 경로는 이 값을 `.env`에 자동 동기화합니다. V2는 기존 `REPORT_PDF_DIR` 또는 기본 `data/downloaded`를 사용하므로 PDF 위치를 바꿨다면 `.env`에서 직접 갱신하세요. 로컬 사용에는 적합하지만 원격 배포에서는 서버 PC에서 파일이 열립니다.
 
-사이드바 캘린더는 검색 가능한 리포트 날짜를 데이터 있음으로 표시합니다. V1은 `reports.is_embedded=1`, V2는 active snapshot의 `active_reports`를 기준으로 집계합니다. 데이터 업데이트에서는 `company`, `industry`, `economy` 카테고리를 선택할 수 있고, 선택한 카테고리 중 하나라도 비어 있는 평일은 업데이트 대상으로 포함합니다. 필요한 다운로드와 임베딩은 백그라운드 작업으로 실행됩니다.
+사이드바 캘린더는 검색 가능한 리포트 날짜를 데이터 있음으로 표시합니다. V1은 `reports.is_embedded=1`, V2는 현재 base snapshot과 이미 반영된 업데이트를 합친 `active_reports`를 기준으로 집계합니다. 데이터 업데이트에서는 `company`, `industry`, `economy` 카테고리를 선택할 수 있고, 선택한 카테고리 중 하나라도 비어 있는 평일은 업데이트 대상으로 포함합니다. 필요한 다운로드와 임베딩은 백그라운드 작업으로 실행되며, 처리 완료 문서는 작업 종료 전에도 검색과 캘린더에 순차 반영됩니다.
 
 ### 대화 후속 질문과 참고 문서 표시
 
@@ -246,15 +246,15 @@ python -m pytest -q
 
 ### 평가용 테스트셋
 
-평가용 fixture는 `tests/fixtures/evaluation_dataset.json`에 있습니다. 재현 기준은 `tests/fixtures/eval_snapshot/`에 고정된 V1형 `reports.db`와 `vector_db`이며, live `data/reports.db`가 아닙니다. PDF 본문은 포함하지 않고 질문/기대 라우팅/기대 필터/기대 출처 파일명/RDB 기대 집계값만 담았습니다.
+현재 승인된 정식 evaluation fixture는 없습니다. 임시 데이터나 과거 run을 정확도 기준으로 사용하지 않으며, Monitoring 화면은 이 경우 정확도를 `측정 전`으로 표시합니다.
 
-테스트셋은 한 번 기준선으로 정하면 변경 사유가 생기기 전까지 그대로 유지합니다. 선정 기준과 고정 정책은 fixture의 `selection_criteria`, `stability_policy`, [`docs/EVALUATION_DATASET.md`](docs/EVALUATION_DATASET.md)에 함께 저장합니다. `scripts/build_evaluation_dataset.py`는 source가 사라졌거나 지표 축이 바뀌는 등 명시적 변경 사유가 있을 때만 재생성에 사용합니다.
+향후 fixture는 Native V2 data/index revision과 함께 고정하고, 질문·기대 라우팅·필터·출처·상태만 저장합니다. PDF 본문은 포함하지 않습니다. 준비 기준과 절차는 [`docs/EVALUATION_DATASET.md`](docs/EVALUATION_DATASET.md)를 참고하세요.
 
 ```bash
 python -m pytest tests/test_evaluation_dataset.py -q
 ```
 
-이 테스트셋은 향후 parsing, chunking, retrieval/rerank, 모델 변경에 따른 답변 변화, RDB 라우팅, 날짜별 데이터 캘린더와 latency 회귀 평가에 사용할 고정 기준 데이터입니다. 현재 자동 evaluator는 provider cost나 answer similarity를 직접 계산하지 않습니다.
+평가 계약은 향후 parsing, chunking, retrieval/rerank, 모델 변경에 따른 정확도와 latency 회귀를 분리해 측정합니다. 현재 자동 evaluator는 provider cost나 answer similarity를 직접 계산하지 않습니다.
 
 ## 주의사항
 
@@ -266,7 +266,7 @@ python -m pytest tests/test_evaluation_dataset.py -q
 
 ## Monitoring Mode
 
-Monitoring Mode는 성능 개선과 회귀 확인을 위한 개발자용 지표 모니터링 모드입니다. 일반 GUI에서는 이 진단 정보를 숨기고 `.env`에서 명시적으로 켰을 때만 노출합니다. `Chat` 화면의 `Chat Monitoring`과 별도 `전체 Monitoring` 화면에서 데이터 상태, 고정 평가셋, 대화별 route/source/latency metadata, PDF parsing 비교와 issue report를 확인합니다. 구현 세부 내용은 [`docs/MONITORING.md`](docs/MONITORING.md)에 정리되어 있습니다.
+Monitoring Mode는 답변 속도와 정확도를 우선 확인하고, 문제가 있을 때만 상세 진단으로 내려가는 Native V2 개발자 화면입니다. 일반 GUI에서는 숨기고 `.env`에서 명시적으로 켰을 때만 노출합니다. 구현 계약은 [`docs/MONITORING.md`](docs/MONITORING.md)에 정리되어 있습니다.
 
 ### 실행 방법
 
@@ -282,30 +282,32 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 사이드바에 `Chat`과 `전체 Monitoring` 화면 선택이 표시됩니다. `Chat` 화면에는 `Chat / Chat Monitoring` 탭이 있고, `전체 Monitoring`에서는 `운영 상태`, `평가/실험`, `이슈/회귀` 범주별 데이터 상태, 누락 문서, 평가 실행·비교, parsing 비교, issue report와 회귀 후보를 확인합니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 현재 대화의 최근·평균 응답시간과 RDB·Vector DB 평균 조회시간만 보여줍니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여주고, 응답 trace, 검색 자료 상태, 정확도 평가, parsing 비교, issue report와 회귀 후보는 `문제 상황 자세히 보기` 안에서 선택합니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
 
 ### 테스트 방법
 
 ```bash
-python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_evaluation_dataset.py -q
+python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_gui_view_contracts.py tests/test_feedback_loop.py -q
 python -m pytest -q
 ```
 
-### 목표
+### 화면 원칙
 
-- 검색/답변 품질 저하 원인을 빠르게 찾는 성능개선 지표 대시보드 제공
-- 수집 → 추출 → 임베딩 → 검색 → rerank → 답변 생성까지 단계별 병목 확인
-- parsing/chunking/retrieval/rerank/model 변경 전후의 답변 변화와 품질 지표 추적
-- API 비용, latency, Top-K 품질, 필터 적용 결과를 한 화면에서 추적
-- 일반 사용자 UX와 개발자 진단 UX를 분리
+- 속도는 assistant 응답 latency의 P95로 표시합니다.
+- 속도는 실제 Native V2 runtime provenance가 저장된 응답만 집계해 과거 V1 기록을 제외합니다.
+- 정확도는 snapshot/build/profile/generation과 hash가 검증된 Native V2 평가 run의 correctness 검사만 집계하며 latency는 제외합니다.
+- 평가 자료가 없으면 0%가 아니라 `측정 전`으로 표시합니다.
+- Native V2 상태가 없을 때 과거 지표로 우회하지 않습니다.
+- 스키마 없는 과거 report·candidate·run은 활성 화면에서 제외하되 자동 삭제하지 않습니다.
 
-### 현재 구현된 화면
+### 문제 상황 상세 영역
 
-- 운영 상태: backend별 데이터 상태, 임베딩 누락 문서, 전체 응답 품질과 native runtime health
-- 평가/실험: 고정 평가셋, current/fixed-snapshot 실험 실행·비교, parsing engine 평가 결과
-- 이슈/회귀: 구조화 issue report와 회귀 후보 관리
-- Conversation metrics: 현재 대화의 route, source 수, latency, `scope_decision`, native retrieval coverage 등 monitoring metadata 요약
-- Chat Monitoring trace viewer: assistant 응답 row에서 특정 턴을 선택해 `Trace summary`, `Scope / routing`, `Advanced diagnostics` 세 tab으로 확인합니다. 기본 화면에는 핵심 trace, 직전 성공 응답 대비 diff, 자동 debug hint를 모으고, retrieval/rerank, sources, answer/citation raw detail은 필요할 때만 펼쳐 봅니다. 선택한 trace는 issue report로 바로 저장할 수 있습니다.
+- 현재 문제
+- 응답 원인 확인
+- 검색 자료 준비
+- 정확도 평가
+- 문서 읽기 품질 비교
+- 신고·수정 확인
 
 ### TODO
 

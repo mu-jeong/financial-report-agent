@@ -274,6 +274,7 @@ def _open_report_pdf(file_name: str) -> tuple[bool, str | None]:
     return True, None
 
 
+@st.fragment
 def _render_sources(
     rerank_info: list[dict] | None,
     *,

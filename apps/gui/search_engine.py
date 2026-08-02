@@ -21,6 +21,7 @@ def _new_search_engine_registry() -> dict[str, Any]:
     return {
         "state": "idle",
         "graph_app": None,
+        "retrieval_runtime": None,
         "error": None,
         "started_at": None,
         "ready_at": None,
@@ -57,14 +58,35 @@ def get_search_engine_status() -> dict[str, Any]:
     return _status_snapshot(_search_engine_registry())
 
 
+def get_retrieval_runtime_provenance() -> dict[str, Any] | None:
+    """Return the runtime identity validated by the warmup bootstrap."""
+
+    registry = _search_engine_registry()
+    with registry["lock"]:
+        value = registry.get("retrieval_runtime")
+        return dict(value) if isinstance(value, dict) else None
+
+
 def _import_graph_app():
     """Validate retrieval, then import the expensive graph in the worker."""
     config_module = importlib.import_module("src.configs.config")
     bootstrap_module = importlib.import_module("src.retrieval.bootstrap")
-    bootstrap_module.reconcile_and_inspect_runtime(
+    selection = bootstrap_module.reconcile_and_inspect_runtime(
         config_module.DB_PATH,
         allow_live_writer_read=True,
+        prefer_fast_read=True,
     )
+    registry = _search_engine_registry()
+    with registry["lock"]:
+        registry["retrieval_runtime"] = {
+            "mode": selection.mode,
+            "active_snapshot_id": selection.active_snapshot_id,
+            "active_build_id": selection.active_build_id,
+            "publication_generation": selection.publication_generation,
+            "write_epoch": selection.write_epoch,
+            "v1_fallback_open": selection.v1_fallback_open,
+            "degraded": selection.degraded,
+        }
     module = importlib.import_module("src.graphs.main_graph")
     graph_app = module.graph_app
     if not callable(getattr(graph_app, "invoke", None)):
@@ -110,6 +132,7 @@ def start_search_engine_warmup(*, retry: bool = False) -> dict[str, Any]:
 
         registry["state"] = "warming"
         registry["graph_app"] = None
+        registry["retrieval_runtime"] = None
         registry["error"] = None
         registry["started_at"] = time.time()
         registry["ready_at"] = None

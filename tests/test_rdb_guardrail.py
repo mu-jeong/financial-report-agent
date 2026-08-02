@@ -183,6 +183,25 @@ def test_execute_sql_blocks_unauthorized_tables_inside_cte():
     assert result.startswith("Error:")
 
 
+def test_rdb_execute_node_records_query_duration_on_blocked_result(monkeypatch):
+    ticks = iter([1_000_000_000, 1_125_000_000])
+    monkeypatch.setattr(rdb.time, "perf_counter_ns", lambda: next(ticks))
+    monkeypatch.setattr(
+        rdb,
+        "execute_sql",
+        lambda _query: "Error: blocked for deterministic test",
+    )
+
+    result = rdb.rdb_execute_node(
+        {
+            "question": "count reports",
+            "sql_query": "SELECT COUNT(*) FROM reports",
+        }
+    )
+
+    assert result["monitoring_metrics"]["rdb"]["query_ns"] == 125_000_000
+
+
 def test_extract_sources_from_rdb_result_uses_file_name_rows():
     result = {
         "columns": ["report_type", "report_date", "target_name", "broker", "title", "file_name"],

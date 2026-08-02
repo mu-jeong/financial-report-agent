@@ -82,12 +82,15 @@ V2에서는 이 관계를 SQLite의 membership row로 옮겼습니다. 관계형
   대체하고 C의 벡터를 어떻게 제거할지는 별도 정리 로직과 운영 절차에 의존합니다.
 - V2는 현재 전체 inventory와 이전 manifest를 비교합니다. A는 재사용하고, B는 새로
   추출·분할·임베딩하며, C는 후보 manifest와 membership에서 제외합니다.
-- 후보 snapshot이 완전성과 무결성 검사를 통과하면 활성 포인터를 한 번 전환합니다.
-  검사에 실패하면 기존 snapshot이 계속 서비스됩니다.
+- B 처리가 성공하면 작은 불변 segment가 catalog transaction과 함께 활성화되어 작업이
+  끝나기 전에도 새 B를 검색할 수 있습니다. C 삭제도 같은 overlay에서 반영됩니다.
+- 모든 처리가 끝나면 base와 segment의 기존 vector를 재사용해 완전한 후보 snapshot을
+  한 번 만들고, 완전성과 무결성 검사를 통과한 뒤 활성 포인터를 전환합니다.
+  중간 처리가 실패하면 이미 게시된 segment와 기존 snapshot은 계속 서비스됩니다.
 
-이 방식에서 중요한 것은 “변경된 것만 계산한다”와 “결과는 전체 상태를 표현한다”를
-동시에 만족한다는 점입니다. 계산 비용은 증분 처리로 줄이면서도, 최종 snapshot은 특정
-시점의 검색 corpus 전체를 설명합니다.
+이 방식에서 중요한 것은 “변경된 것만 계산한다”, “완료된 문서는 바로 검색한다”,
+“최종 결과는 전체 상태를 표현한다”를 동시에 만족한다는 점입니다. 계산 비용은 증분
+처리로 줄이면서도, 최종 snapshot은 특정 시점의 검색 corpus 전체를 설명합니다.
 
 ### 2.4 검색 동작의 차이
 
@@ -380,8 +383,11 @@ V2는 매 build마다 발견한 전체 source를 `included` 또는 버전이 있
 
 V2는 경로, source PDF hash, retrieval metadata hash, embedding profile을 비교합니다.
 `chunk_uid`가 동일한 항목은 기존 parent·chunk·vector를 재사용하고 신규·변경 항목만
-추출·임베딩합니다. 삭제 항목은 provider 호출 없이 다음 complete snapshot에서
-제외합니다. 결과는 증분 계산이지만 게시되는 것은 언제나 완전한 corpus revision입니다.
+추출·임베딩합니다. 성공한 변경은 작은 불변 segment로 먼저 게시하고, 삭제 항목은
+provider 호출 없이 현재 composite revision에서 제외합니다. 작업 마지막에는 base와
+segment vector를 다시 임베딩하지 않고 완전한 corpus snapshot으로 한 번 compact합니다.
+따라서 중간 가시성은 빠르지만 장기 운영 단위와 crash-safe pointer publication은 여전히
+완전한 snapshot입니다.
 
 ### 6.6 reader와 writer가 동시에 움직이는 문제
 
@@ -841,11 +847,13 @@ fail closed는 가용성을 조금 희생할 수 있지만, 재무 문서 검색
 아닙니다. catalog가 논리적 권위이지만 vector 검색에는 catalog가 검증한 active FAISS
 artifact가 필요합니다. SSOT는 모든 파일을 대체한다는 뜻이 아닙니다.
 
-### 왜 snapshot을 매번 완전한 형태로 만드나요?
+### 왜 마지막 snapshot은 완전한 형태로 만드나요?
 
-활성 revision 하나만 읽어도 전체 검색 corpus를 설명할 수 있게 하기 위해서입니다.
-계산은 증분으로 하지만 결과는 완전하게 만들면 여러 delta를 조합하다 생기는 누락과 순서
-문제를 피할 수 있습니다.
+업데이트 중에는 base snapshot과 작은 불변 segment를 합쳐 완료 문서를 즉시 제공합니다.
+작업 마지막에는 활성 revision 하나만으로 전체 검색 corpus를 설명할 수 있도록 완전한
+snapshot으로 한 번 정리합니다. 이 경계가 segment 수를 제한하고 기존 checkpoint,
+predecessor, rollback 복구 계약을 그대로 유지합니다. 자세한 결정은
+[`../../CONTINUOUS_UPDATES.md`](../../CONTINUOUS_UPDATES.md)를 참고하세요.
 
 ### 왜 손상 시 자동으로 V1으로 돌아가지 않나요?
 

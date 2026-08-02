@@ -1,4 +1,5 @@
 import functools
+import time
 from collections import Counter
 
 import sqlglot
@@ -163,9 +164,12 @@ def execute_sql(query: str):
 
 def rdb_execute_node(state: State) -> dict:
     sql_query = state["sql_query"]
+    query_started = time.perf_counter_ns()
     db_result = execute_sql(sql_query)
+    query_ns = max(0, time.perf_counter_ns() - query_started)
     rdb_metrics = {
         "sql_query": sql_query,
+        "query_ns": query_ns,
         "row_count": None,
         "column_count": None,
         "guardrail_blocked": "Error:" in str(db_result),

@@ -3,8 +3,59 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 from apps.gui import search_engine
+
+
+def test_graph_import_requests_zero_scan_read_startup(monkeypatch):
+    graph_app = SimpleNamespace(invoke=lambda *_args, **_kwargs: None)
+    calls = []
+
+    def reconcile(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            mode="native",
+            active_snapshot_id="snapshot-v2",
+            active_build_id="build-v2",
+            publication_generation=3,
+            write_epoch=2,
+            v1_fallback_open=False,
+            degraded=False,
+        )
+
+    modules = {
+        "src.configs.config": SimpleNamespace(DB_PATH="reports.db"),
+        "src.retrieval.bootstrap": SimpleNamespace(
+            reconcile_and_inspect_runtime=reconcile
+        ),
+        "src.graphs.main_graph": SimpleNamespace(graph_app=graph_app),
+    }
+    monkeypatch.setattr(
+        search_engine.importlib,
+        "import_module",
+        lambda name: modules[name],
+    )
+
+    assert search_engine._import_graph_app() is graph_app
+    assert calls == [
+        (
+            ("reports.db",),
+            {
+                "allow_live_writer_read": True,
+                "prefer_fast_read": True,
+            },
+        )
+    ]
+    assert search_engine.get_retrieval_runtime_provenance() == {
+        "mode": "native",
+        "active_snapshot_id": "snapshot-v2",
+        "active_build_id": "build-v2",
+        "publication_generation": 3,
+        "write_epoch": 2,
+        "v1_fallback_open": False,
+        "degraded": False,
+    }
 
 
 def test_warmup_starts_one_background_import_and_reuses_ready_graph(monkeypatch):

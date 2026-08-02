@@ -292,6 +292,27 @@ def test_report_discovery_marks_both_unreadable_companions_as_blocking(
     )
 
 
+def test_active_monitoring_discovery_ignores_schema_less_reports(
+    tmp_path,
+    monkeypatch,
+):
+    debug_dir = tmp_path / "debug"
+    _copy_report_pair(debug_dir)
+    monkeypatch.setattr(issue_report_store, "DEBUG_REPORT_DIR", debug_dir)
+    created = issue_report_store.create_issue_report(
+        "thread-v2",
+        "답변 품질",
+        "v2 report",
+        {"report_target_type": "ui_or_system"},
+        report_target_type="ui_or_system",
+    )
+
+    discovered = issue_report_store.list_v2_issue_report_artifacts()
+
+    assert [item["id"] for item in discovered["items"]] == [created["id"]]
+    assert discovered["warnings"] == []
+
+
 def test_report_write_failure_keeps_canonical_json_for_recovery(tmp_path, monkeypatch):
     debug_dir = tmp_path / "debug"
     monkeypatch.setattr(issue_report_store, "DEBUG_REPORT_DIR", debug_dir)

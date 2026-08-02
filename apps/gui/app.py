@@ -54,6 +54,7 @@ if _RUNTIME_SMOKE_REQUESTED:
         _retrieval_runtime = reconcile_and_inspect_runtime(
             config_module.DB_PATH,
             allow_live_writer_read=True,
+            prefer_fast_read=True,
         )
     except Exception as exc:
         print(
@@ -170,10 +171,10 @@ with st.sidebar:
 
 if MONITORING_MODE:
     active_page = st.session_state.get("active_monitoring_page", "Chat")
-    if active_page == "전체 Monitoring":
+    if active_page == "Monitoring":
         monitoring_views.render_global_monitoring_page()
     else:
-        chat_tab, chat_monitoring_tab = st.tabs(["Chat", "Chat Monitoring"])
+        chat_tab, chat_monitoring_tab = st.tabs(["Chat", "답변 모니터링"])
         with chat_tab:
             chat_views.render_chat(current_id, current_thread)
         with chat_monitoring_tab:

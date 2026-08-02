@@ -1,5 +1,6 @@
 from datetime import date
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,17 +74,31 @@ def test_embedding_file_progress_from_line_ignores_non_file_progress_lines():
     assert embedding_file_progress_from_line("  [3/3] Embedding 42 chunks...") is None
 
 
-def test_embedding_file_progress_from_line_parses_native_snapshot_batches():
+def test_embedding_file_progress_from_line_parses_native_delta_batches():
     line = (
         "2026-07-30 [INFO] embed_pipeline.py: "
-        "Native V2 batch publication complete: batch=3 generation=9 epoch=8 "
-        "batch_attempted=50 processed=250 active_reports=631 chunks=1900 deferred=0"
+        "Native V2 delta publication complete: batch=3 delta_generation=9 "
+        "batch_attempted=50 processed=250 published=48 failed=2 deferred=12"
     )
 
     assert embedding_file_progress_from_line(line) == (
         250,
-        250,
-        "V2 snapshot batch 3",
+        262,
+        "처리 완료 문서 반영 · 3차",
+    )
+
+
+def test_embedding_file_progress_from_line_parses_native_final_compaction():
+    line = (
+        "2026-07-30 [INFO] embed_pipeline.py: "
+        "Native V2 final compaction complete: generation=10 epoch=9 "
+        "reports=631 chunks=1900"
+    )
+
+    assert embedding_file_progress_from_line(line) == (
+        1,
+        1,
+        "검색 데이터 정리",
     )
 
 
@@ -133,6 +148,10 @@ def test_embedding_extraction_failure_count_reads_safe_v1_and_v2_summaries():
         "Excluding PDF after primary and fallback extraction failed: a.pdf\n"
         "Excluding PDF after primary and fallback extraction failed: b.pdf\n"
     ) == 2
+    assert data_update_jobs.embedding_extraction_failure_count(
+        "Native V2 delta publication complete: batch=1 failed=2\n"
+        "Native V2 update complete: deltas=1 compactions=1 failed=4\n"
+    ) == 4
 
 
 def test_embedding_job_surfaces_partial_extraction_completion(monkeypatch):
@@ -192,6 +211,91 @@ def test_is_update_job_active_keeps_running_status_without_pid_active():
     assert is_update_job_active({"state": "running"})
 
 
+def test_run_update_job_native_runtime_embeds_and_compacts_with_no_new_downloads(
+    monkeypatch,
+):
+    statuses: list[dict[str, object]] = []
+    subprocess_commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: SimpleNamespace(is_native=True),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda command, **_kwargs: (subprocess_commands.append(command) or 0, ""),
+    )
+
+    def fake_run_subprocess_stream(command, *, on_line=None, **_kwargs):
+        subprocess_commands.append(command)
+        assert on_line is not None
+        on_line(
+            "Native V2 final compaction complete: generation=10 epoch=9 "
+            "reports=631 chunks=1900"
+        )
+        return 0, ""
+
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        fake_run_subprocess_stream,
+    )
+    monkeypatch.setattr(data_update_jobs, "_write_status", statuses.append)
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-07-30",
+        end_date="2026-07-30",
+        label="native update",
+    ) == 0
+
+    assert len(subprocess_commands) == 2
+    assert subprocess_commands[0][2:] == ["src.core.report_crawler"]
+    assert subprocess_commands[1] == build_embedding_command(
+        None,
+        continue_on_extraction_error=True,
+    )
+    assert any(
+        status.get("embedding_file") == "검색 데이터 정리" for status in statuses
+    )
+    assert statuses[-1]["phase"] == "done"
+
+
+def test_run_update_job_legacy_runtime_keeps_no_data_early_exit(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    subprocess_commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: SimpleNamespace(is_native=False),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda command, **_kwargs: (subprocess_commands.append(command) or 0, ""),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy no-data updates must not run embedding")
+        ),
+    )
+    monkeypatch.setattr(data_update_jobs, "_write_status", statuses.append)
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-07-30",
+        end_date="2026-07-30",
+        label="legacy update",
+    ) == 0
+
+    assert len(subprocess_commands) == 1
+    assert subprocess_commands[0][2:] == ["src.core.report_crawler"]
+    assert statuses[-1]["phase"] == "no_data"
+
+
 def test_start_update_job_passes_parent_pid_and_records_status(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
@@ -206,6 +310,11 @@ def test_start_update_job_passes_parent_pid_and_records_status(monkeypatch, tmp_
     monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "latest.log")
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(data_update_jobs.os, "getpid", lambda: 1234)
     monkeypatch.setattr(data_update_jobs.subprocess, "Popen", fake_popen)
 
@@ -236,6 +345,11 @@ def test_start_embedding_job_records_limit_and_parent_pid(monkeypatch, tmp_path)
     monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "latest.log")
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(data_update_jobs.os, "getpid", lambda: 1234)
     monkeypatch.setattr(data_update_jobs.subprocess, "Popen", fake_popen)
 
@@ -267,6 +381,11 @@ def test_start_embedding_job_forwards_explicit_native_failure_retry(
     monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "latest.log")
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(data_update_jobs.os, "getpid", lambda: 1234)
     monkeypatch.setattr(data_update_jobs.subprocess, "Popen", fake_popen)
 

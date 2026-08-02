@@ -32,6 +32,10 @@ class _LazyGraphApp:
     def invoke(graph_input: dict, *, config: dict) -> dict:
         return search_engine.invoke_graph(graph_input, config=config)
 
+    @staticmethod
+    def runtime_provenance() -> dict | None:
+        return search_engine.get_retrieval_runtime_provenance()
+
 
 graph_app = _LazyGraphApp()
 
@@ -168,6 +172,7 @@ def _run_chat_response_job(
 ) -> None:
     started_at = time.perf_counter()
     engine_queue_released = False
+    runtime_provenance = None
 
     def release_engine_queue() -> bool:
         nonlocal engine_queue_released
@@ -201,6 +206,13 @@ def _run_chat_response_job(
         prepare_graph = getattr(graph_app, "prepare", None)
         if callable(prepare_graph):
             prepare_graph()
+        read_runtime_provenance = getattr(
+            graph_app,
+            "runtime_provenance",
+            None,
+        )
+        if callable(read_runtime_provenance):
+            runtime_provenance = read_runtime_provenance()
         if queued_while_warming:
             update_message(
                 assistant_message_id,
@@ -233,6 +245,8 @@ def _run_chat_response_job(
             "no_vector_results": bool(final_state.get("no_vector_results")),
             "selected_sources": selected_sources,
         }
+        if isinstance(runtime_provenance, dict):
+            metadata["retrieval_runtime"] = runtime_provenance
         metadata.update(
             compact_graph_monitoring_metadata(
                 final_state=final_state,
@@ -261,15 +275,18 @@ def _run_chat_response_job(
         )
     except Exception as exc:
         release_engine_queue()
+        failure_metadata = {
+            "status": "failed",
+            "job_id": job_id,
+            "error": str(exc),
+            "latency_seconds": round(time.perf_counter() - started_at, 3),
+        }
+        if isinstance(runtime_provenance, dict):
+            failure_metadata["retrieval_runtime"] = runtime_provenance
         update_message(
             assistant_message_id,
             "답변을 생성하는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
-            {
-                "status": "failed",
-                "job_id": job_id,
-                "error": str(exc),
-                "latency_seconds": round(time.perf_counter() - started_at, 3),
-            },
+            failure_metadata,
         )
         _record_chat_job_event(
             {

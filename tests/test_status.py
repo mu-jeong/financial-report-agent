@@ -10,13 +10,51 @@ from src.core.status import (
     assess_readiness,
     build_unembedded_report_rows,
     format_readiness_text,
+    format_duration,
     format_status_text,
     get_data_status,
+    get_native_v2_data_status,
     list_unembedded_reports,
 )
 from src.migrations.v2.evidence import seal_compatibility_bundle
 from src.migrations.v2.import_v1 import convert_v1_seed
+from src.retrieval.delta_schema import install_delta_schema
 from tests.migrations.v2.fixtures_factory.v1 import build_v1_fixture
+from tests.retrieval.test_retrieval_delta_reader import _DeltaChange, _publish_delta
+from tests.retrieval.test_retrieval_repository import _create_catalog, _digest
+
+
+def test_native_v2_monitoring_status_never_reads_legacy_db_or_vector(
+    tmp_path,
+    monkeypatch,
+):
+    legacy_db = tmp_path / "reports.db"
+    legacy_db.write_bytes(b"legacy")
+
+    monkeypatch.setattr(status_module, "_safe_native_info", lambda _path: None)
+    monkeypatch.setattr(
+        status_module,
+        "_safe_db_info",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("legacy DB status must not be read")
+        ),
+    )
+    monkeypatch.setattr(
+        status_module,
+        "_safe_vector_info",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("legacy vector status must not be read")
+        ),
+    )
+
+    status = get_native_v2_data_status(
+        save_dir=str(tmp_path / "downloaded"),
+        db_path=str(legacy_db),
+    )
+
+    assert status["retrieval"]["mode"] == "unavailable"
+    assert status["db"]["total_reports"] == 0
+    assert status["vector_db"]["ntotal"] == 0
 
 
 def test_get_data_status_reports_db_pdf_and_vector_counts(tmp_path):
@@ -86,6 +124,62 @@ def test_get_data_status_reports_db_pdf_and_vector_counts(tmp_path):
     assert "SQLite 리포트: 3건" in format_status_text(status)
 
 
+def test_format_duration_uses_compact_operator_units():
+    assert format_duration(59) == "59초"
+    assert format_duration(60) == "1분"
+    assert format_duration(3600) == "1시간"
+    assert format_duration(90000) == "1일 1시간"
+
+
+def test_pending_cleanup_summary_tolerates_concurrent_file_disappearance(
+    tmp_path,
+    monkeypatch,
+):
+    catalog, _base_rows = _create_catalog(tmp_path)
+    segment_id = _digest("disappearing-cleanup-segment")
+    relative_path = f"deltas/{segment_id}.faiss"
+    artifact_path = tmp_path / relative_path
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(b"pending cleanup")
+    with sqlite3.connect(catalog) as connection:
+        install_delta_schema(connection)
+        connection.execute(
+            """
+            INSERT INTO retrieval_delta_segments (
+                segment_id, base_snapshot_id, base_publication_generation,
+                sequence, relative_path, file_sha256, size_bytes,
+                dimension, metric, ntotal, state, state_changed_at
+            ) VALUES (?, 'snapshot-1', 7, 1, ?, ?, 15, 2, 'l2', 1,
+                      'compacted', '2026-08-01T00:00:00.000Z')
+            """,
+            (segment_id, relative_path, _digest("pending cleanup")),
+        )
+        connection.commit()
+
+    real_lstat = Path.lstat
+
+    def disappear_before_stat(path: Path):
+        if path == artifact_path:
+            artifact_path.unlink()
+            raise FileNotFoundError(str(artifact_path))
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", disappear_before_stat)
+    with sqlite3.connect(catalog) as connection:
+        connection.row_factory = sqlite3.Row
+        summary = status_module._pending_cleanup_summary(
+            connection,
+            tmp_path,
+        )
+
+    assert summary == {
+        "pending_cleanup_file_count": 0,
+        "pending_cleanup_size_bytes": 0,
+        "oldest_pending_cleanup_at": None,
+        "oldest_pending_cleanup_age_seconds": 0,
+    }
+
+
 def test_get_data_status_uses_native_membership_without_pickle_assumptions(tmp_path):
     copied = tmp_path / "copied"
     fixture = build_v1_fixture(copied)
@@ -109,6 +203,8 @@ def test_get_data_status_uses_native_membership_without_pickle_assumptions(tmp_p
     assert status["retrieval"]["mode"] == "native"
     assert status["retrieval"]["write_epoch"] == 0
     assert status["retrieval"]["membership_count"] == fixture.symbolic_n
+    assert "delta_generation" not in status["retrieval"]
+    assert "delta_segment_count" not in status["retrieval"]
     assert status["vector_db"]["ntotal"] == fixture.symbolic_n
     assert status["vector_db"]["has_faiss_index"] is True
     assert status["vector_db"]["has_pickle_index"] is False
@@ -123,6 +219,161 @@ def test_get_data_status_uses_native_membership_without_pickle_assumptions(tmp_p
         fixture.file_names["excluded"]
     ]
     assert result.snapshot_id == status["retrieval"]["active_snapshot_id"]
+
+
+def test_native_status_includes_active_delta_membership_and_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    catalog, base_rows = _create_catalog(tmp_path)
+    _publish_delta(
+        catalog,
+        tmp_path,
+        sequence=1,
+        changes=(
+            _DeltaChange(
+                "upsert",
+                str(base_rows[0]["path"]),
+                "replacement body",
+                (9.0, 1.0),
+            ),
+            _DeltaChange("delete", str(base_rows[1]["path"])),
+        ),
+    )
+    cleanup_payload = b"compacted artifact pending cleanup"
+    cleanup_segment_id = _digest("compacted-status-segment")
+    cleanup_relative_path = f"deltas/{cleanup_segment_id}.faiss"
+    cleanup_path = tmp_path / cleanup_relative_path
+    cleanup_path.write_bytes(cleanup_payload)
+    with sqlite3.connect(catalog) as connection:
+        connection.execute(
+            """
+            INSERT INTO retrieval_delta_segments (
+                segment_id, base_snapshot_id, base_publication_generation,
+                sequence, relative_path, file_sha256, size_bytes,
+                dimension, metric, ntotal, state, state_changed_at
+            ) VALUES (?, 'snapshot-1', 7, 2, ?, ?, ?, 2, 'l2', 1,
+                      'compacted', '2026-08-01T00:00:00.000Z')
+            """,
+            (
+                cleanup_segment_id,
+                cleanup_relative_path,
+                _digest("compacted artifact pending cleanup"),
+                len(cleanup_payload),
+            ),
+        )
+        connection.commit()
+    paths = SimpleNamespace(catalog=catalog, data_root=tmp_path)
+    selection = SimpleNamespace(
+        mode="native",
+        publication_generation=7,
+        write_epoch=1,
+        active_build_id="build-1",
+        active_snapshot_id="snapshot-1",
+        predecessor_snapshot_id=None,
+        v1_fallback_open=False,
+        compatibility_bundle_id=None,
+        degraded=False,
+        write_enabled=True,
+    )
+    monkeypatch.setattr(
+        status_module,
+        "_status_retrieval_paths",
+        lambda _db_path: (paths, tmp_path),
+    )
+    monkeypatch.setattr(
+        status_module,
+        "inspect_runtime",
+        lambda _db_path, **_kwargs: selection,
+    )
+
+    db, vector_db, retrieval = status_module._safe_native_info("unused.db")
+
+    assert db["parent_chunks"] == 4
+    assert retrieval["membership_count"] == 4
+    assert retrieval["delta_generation"] == 1
+    assert retrieval["delta_segment_count"] == 1
+    assert retrieval["pending_cleanup_file_count"] == 1
+    assert retrieval["pending_cleanup_size_bytes"] == len(cleanup_payload)
+    assert retrieval["oldest_pending_cleanup_at"] == "2026-08-01T00:00:00.000Z"
+    assert retrieval["oldest_pending_cleanup_age_seconds"] >= 0
+    assert vector_db["ntotal"] == 4
+    assert vector_db["file_count"] == 2
+    assert {entry["name"] for entry in vector_db["files"]} == {
+        "snapshot-1.faiss",
+        next((tmp_path / "deltas").iterdir()).name,
+    }
+    assert vector_db["total_size_bytes"] == sum(
+        entry["size_bytes"] for entry in vector_db["files"]
+    )
+
+
+def test_list_unembedded_reports_includes_ready_delta_failures_without_active_duplicates(
+    tmp_path,
+    monkeypatch,
+):
+    catalog, base_rows = _create_catalog(tmp_path)
+    failed_uid = _digest("delta-failed-report")
+    active_uid = _digest("report-1")
+    segment_id = _digest("failed-segment")
+    with sqlite3.connect(catalog) as connection:
+        install_delta_schema(connection)
+        connection.execute(
+            """
+            INSERT INTO reports (
+                report_id, report_uid, canonical_relative_path, source_sha256,
+                retrieval_metadata_sha256, report_type, report_date,
+                target_name, title, broker
+            ) VALUES (6, ?, 'reports/failed.pdf', ?, ?, 'company',
+                      '2026-08-02', 'Failed', 'Failed report', 'Broker A')
+            """,
+            (failed_uid, _digest("failed-source"), _digest("failed-metadata")),
+        )
+        connection.execute(
+            """
+            INSERT INTO retrieval_delta_segments (
+                segment_id, base_snapshot_id, base_publication_generation,
+                sequence, relative_path, file_sha256, size_bytes,
+                dimension, metric, ntotal
+            ) VALUES (?, 'snapshot-1', 7, 1,
+                      NULL, NULL, 0, 2, 'l2', 0)
+            """,
+            (segment_id,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO retrieval_delta_reports (
+                segment_id, canonical_relative_path, action, report_uid, reason_code
+            ) VALUES (?, ?, 'failed', ?, 'source-extraction-failed')
+            """,
+            [
+                (segment_id, "reports/failed.pdf", failed_uid),
+                (segment_id, str(base_rows[0]["path"]), active_uid),
+            ],
+        )
+        connection.execute(
+            "UPDATE retrieval_delta_segments SET state = 'ready' "
+            "WHERE segment_id = ?",
+            (segment_id,),
+        )
+        connection.commit()
+    paths = SimpleNamespace(catalog=catalog, data_root=tmp_path)
+    monkeypatch.setattr(
+        status_module,
+        "_status_retrieval_paths",
+        lambda _db_path: (paths, tmp_path),
+    )
+    monkeypatch.setattr(
+        status_module,
+        "inspect_runtime",
+        lambda _db_path, **_kwargs: SimpleNamespace(mode="native"),
+    )
+
+    rows = list_unembedded_reports("unused.db")
+
+    assert [row["file_name"] for row in rows] == ["failed.pdf"]
+    assert rows[0]["embedding_extraction_engine"] == "test-extractor"
+    assert rows[0]["embedding_last_error"].startswith("NativeSourceExtractionError")
 
 
 def test_status_never_downgrades_missing_native_authority_to_legacy(tmp_path):

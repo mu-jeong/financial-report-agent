@@ -1197,6 +1197,7 @@ def execute_incremental_update(
     root = Path(kwargs.get("data_root") or Path(legacy_db_path).parent).resolve(strict=True)
     with NativeWriterLock(root) as writer_lease:
         StartupReconciler(root).reconcile(writer_lease=writer_lease)
+        _reject_pending_continuous_update(root)
         plan = prepare_incremental_build(
             legacy_db_path,
             source_directory,
@@ -1213,6 +1214,43 @@ def execute_incremental_update(
             result,
             root,
             writer_lease=writer_lease,
+        )
+
+
+def _reject_pending_continuous_update(root: Path) -> None:
+    """Prevent the legacy snapshot-only writer from bypassing a ready delta chain."""
+
+    catalog = root / "retrieval" / "v2" / "catalog.sqlite3"
+    connection = _open_read_only_catalog(catalog)
+    try:
+        from src.retrieval.delta_schema import delta_schema_installed
+
+        try:
+            has_delta_schema = delta_schema_installed(connection)
+        except SchemaError as exc:
+            raise NativeBuildError("retrieval delta schema is invalid") from exc
+        if not has_delta_schema:
+            return
+        pending = connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM retrieval_delta_segments AS segment
+                JOIN retrieval_runtime AS runtime
+                  ON runtime.runtime_id = 1
+                 AND runtime.active_snapshot_id = segment.base_snapshot_id
+                 AND runtime.publication_generation =
+                     segment.base_publication_generation
+                WHERE segment.state = 'ready'
+            )
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    if pending is not None and bool(pending[0]):
+        raise NativeBuildError(
+            "execute_incremental_update cannot run while a continuous update "
+            "is pending; use execute_continuous_update to resume and compact it"
         )
 
 
@@ -1576,6 +1614,32 @@ def _read_catalog_sources(
                         "active source extraction failure identity is invalid"
                     )
                 prior_extraction_failures.add(report_uid)
+        try:
+            from src.retrieval.delta_schema import delta_schema_installed
+
+            has_delta_schema = delta_schema_installed(connection)
+        except SchemaError as exc:
+            raise NativeBuildError('retrieval delta schema is invalid') from exc
+        if has_delta_schema:
+            prior_extraction_failures.update(
+                str(row[0])
+                for row in connection.execute(
+                    '''
+                    SELECT DISTINCT action.report_uid
+                    FROM retrieval_delta_reports AS action
+                    JOIN retrieval_delta_segments AS segment
+                      ON segment.segment_id = action.segment_id
+                    JOIN retrieval_runtime AS runtime
+                      ON runtime.runtime_id = 1
+                     AND runtime.active_snapshot_id = segment.base_snapshot_id
+                     AND runtime.publication_generation =
+                         segment.base_publication_generation
+                    WHERE segment.state = 'ready'
+                      AND action.action = 'failed'
+                      AND action.report_uid IS NOT NULL
+                    '''
+                )
+            )
         return (
             active_reports,
             active_report_objects,

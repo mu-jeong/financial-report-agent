@@ -118,14 +118,16 @@ class NativeRetrievalReader:
         counters = {'eligibility_ns': 0, 'faiss_ns': 0, 'hydration_ns': 0}
 
         lease_started = time.perf_counter_ns()
-        with self.repository.request() as session:
+        with self.repository.request(
+            materialize_indexes=not compiled.is_empty,
+        ) as session:
             eligibility_started = time.perf_counter_ns()
             eligible_count = session.eligible_count(compiled)
             counters['eligibility_ns'] += time.perf_counter_ns() - eligibility_started
             strategy = self._choose_strategy(
                 compiled,
                 eligible_count,
-                session.revision.descriptor.ntotal,
+                session.total_count,
             )
             if strategy is SearchStrategy.EMPTY:
                 response = self._response(
@@ -235,7 +237,7 @@ class NativeRetrievalReader:
         eligible_count: int,
         counters: dict[str, int],
     ) -> SearchResponse:
-        total = session.revision.descriptor.ntotal
+        total = session.total_count
         target = min(k, eligible_count)
         fetch_k = min(
             total,
@@ -296,7 +298,7 @@ class NativeRetrievalReader:
             revision=session.revision,
             strategy=strategy,
             eligible_count=eligible_count,
-            snapshot_total=session.revision.descriptor.ntotal,
+            snapshot_total=session.total_count,
             faiss_calls=faiss_calls,
             faiss_fetch_k=faiss_fetch_k,
             candidate_count=candidate_count,

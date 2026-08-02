@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from src.retrieval import publication as publication_module
+from src.retrieval import recovery as recovery_module
 from src.retrieval.bootstrap import (
     RetrievalBootstrapError,
     inspect_runtime,
@@ -328,6 +330,87 @@ def test_startup_reconciliation_returns_validated_active_runtime(tmp_path: Path)
     assert selection.mode == "native"
     assert selection.active_snapshot_id == "snapshot"
     assert not (tmp_path / "retrieval" / "v2" / "writer.lock").exists()
+
+
+def test_fast_read_startup_runs_no_full_catalog_integrity_suite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    legacy, _snapshot = _native_install(tmp_path)
+
+    def reject_full_validation(_connection):
+        raise AssertionError("fast read startup ran a full catalog scan")
+
+    monkeypatch.setattr(
+        publication_module,
+        "_validate_catalog_integrity",
+        reject_full_validation,
+    )
+    monkeypatch.setattr(
+        recovery_module.StartupReconciler,
+        "reconcile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("clean fast read entered recovery")
+        ),
+    )
+
+    selection = reconcile_and_inspect_runtime(
+        legacy,
+        prefer_fast_read=True,
+    )
+
+    assert selection.mode == "native"
+    assert selection.active_snapshot_id == "snapshot"
+
+
+def test_direct_runtime_inspection_runs_one_full_catalog_integrity_suite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    legacy, _snapshot = _native_install(tmp_path)
+    original_validate = publication_module._validate_catalog_integrity
+    validations = 0
+
+    def count_full_validation(connection):
+        nonlocal validations
+        validations += 1
+        original_validate(connection)
+
+    monkeypatch.setattr(
+        publication_module,
+        "_validate_catalog_integrity",
+        count_full_validation,
+    )
+
+    selection = inspect_runtime(legacy)
+
+    assert selection.mode == "native"
+    assert validations == 1
+
+
+def test_strict_startup_runs_one_full_catalog_integrity_suite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    legacy, _snapshot = _native_install(tmp_path)
+    original_validate = recovery_module._validate_catalog_integrity
+    validations = 0
+
+    def count_full_validation(connection):
+        nonlocal validations
+        validations += 1
+        original_validate(connection)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "_validate_catalog_integrity",
+        count_full_validation,
+    )
+
+    selection = reconcile_and_inspect_runtime(legacy)
+
+    assert selection.mode == "native"
+    assert validations == 1
 
 
 def test_live_writer_allows_validated_read_only_startup(tmp_path: Path):

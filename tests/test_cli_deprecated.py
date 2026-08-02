@@ -21,7 +21,7 @@ def test_runtime_smoke_reconciles_before_interactive_cli(monkeypatch, capsys):
     monkeypatch.setattr(
         cli_app,
         "reconcile_and_inspect_runtime",
-        lambda _path, *, allow_live_writer_read: SimpleNamespace(
+        lambda _path, *, allow_live_writer_read, prefer_fast_read: SimpleNamespace(
             mode="native",
             active_snapshot_id="snapshot-successor",
             publication_generation=3,

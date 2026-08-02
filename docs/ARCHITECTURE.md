@@ -32,12 +32,13 @@ report_crawler → data/downloaded/*.pdf
 V2:
 report_crawler → data/downloaded/*.pdf → embed_pipeline runtime dispatch
   → source inventory hash 비교 → 신규·변경 PDF만 추출/chunk/embedding
-  → 변경 없는 chunk/vector 재사용 → off-path catalog/snapshot 검증
-  → publication generation/write epoch를 올려 원자적으로 활성화
-  → native catalog + immutable snapshot reader → answer + references
+  → 성공 batch를 작은 불변 검색 단위로 원자적 활성화
+  → base snapshot + 활성 batch를 합성해 업데이트 중에도 검색
+  → 변경 없는 chunk/vector를 재사용해 마지막에 한 번만 완전한 snapshot 게시
+  → native catalog + immutable composite reader → answer + references
 ```
 
-Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 별도 Python 프로세스로 실행합니다. 이미 완료된 날짜/카테고리 조합을 제외한 날짜 범위만 crawler에 전달합니다. V1 embedding은 pending row를 처리하지만 V2 embedding은 전체 source inventory를 스캔한 뒤 신규·변경 PDF만 파싱·임베딩하고 변경 없는 vector를 재사용합니다. 진행 상태는 `logs/data_update_jobs/status.json`에 기록되며 GUI는 fragment로 이 파일을 주기적으로 읽습니다.
+Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 별도 Python 프로세스로 실행합니다. 이미 완료된 날짜/카테고리 조합을 제외한 날짜 범위만 crawler에 전달합니다. V1 embedding은 pending row를 처리하지만 V2 embedding은 전체 source inventory를 한 번 스캔한 뒤 신규·변경 PDF만 파싱·임베딩합니다. 성공한 문서는 batch commit 직후 검색 가능하고, 마지막 compaction은 base와 batch vector를 재임베딩하지 않고 재배치합니다. 진행 상태는 `logs/data_update_jobs/status.json`에 기록되며 GUI는 fragment로 이 파일을 주기적으로 읽습니다. 저장 구조와 장애 복구 계약은 [`CONTINUOUS_UPDATES.md`](CONTINUOUS_UPDATES.md)에 정리합니다.
 
 ## 3. 수집 계층
 
@@ -57,7 +58,7 @@ Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 �
    - 배포 템플릿의 production embedding은 기본 `pymupdf`가 실패하면 명시된 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 한 번 시도합니다. 새 키가 없는 기존 설정, 빈 값, 또는 primary와 다른 pending extractor override는 자동 fallback하지 않습니다. Native V2 incremental build는 active embedding profile과 동일한 추출 정책만 재사용합니다.
 2. `MarkdownHeaderTextSplitter`와 `RecursiveCharacterTextSplitter`로 문서를 chunk로 나눕니다.
 3. V1은 parent를 `parent_chunks`, 검색 chunk를 mutable `data/vector_db`에 추가하고 `reports.is_embedded=1`을 기록합니다.
-4. V2는 신규·변경 문서만 처리하고 기존 불변 parent/chunk/vector를 재사용한 뒤 완전한 candidate catalog와 새 immutable FAISS snapshot을 검증·게시합니다. 삭제된 source는 provider 호출 없이 다음 complete snapshot에서 제외하고 변화가 없으면 publication을 만들지 않습니다.
+4. V2는 신규·변경 문서만 처리해 작은 immutable FAISS segment를 catalog transaction과 함께 활성화합니다. reader와 SQL projection은 base snapshot과 현재 segment head를 같은 revision으로 읽습니다. 이전 버전은 새 버전이 성공할 때까지 유지되며 삭제는 provider 호출 없이 즉시 overlay에서 제외됩니다. 작업 종료 시 기존 parent/chunk/vector를 재사용해 완전한 candidate catalog와 새 immutable FAISS snapshot을 한 번 검증·게시합니다. 검색에서 제외된 segment artifact는 열린 lazy request를 보호하기 위해 소유 base의 GC까지 보존한 뒤 공용 snapshot garbage collector가 게시 후와 정상 시작 시 재조정하며, 운영 상태에는 사용자 용어로 정리 대기 파일 수·용량·최장 보존 시간을 표시합니다.
 
 V1에서는 profile 변경 시 legacy index 재생성이 필요합니다. 활성 V2에서는 `data/vector_db` 삭제나 `reports.is_embedded` 수정을 재구축 방법으로 사용하지 않습니다. Profile 변경은 incremental writer가 거부하므로 별도로 검증된 full native successor를 준비·게시해야 합니다.
 
@@ -78,7 +79,7 @@ LangGraph는 대략 다음 노드로 구성됩니다.
 4. RDB path: SQL guardrail을 통과한 read-only SELECT만 SQLite에 실행합니다.
 5. VectorDB path: FAISS 후보를 넉넉히 가져온 뒤 metadata filter, 최신성 가중치, 선택형 rerank를 적용합니다.
    - VectorDB 진입점은 canonical bootstrap으로 `legacy_v1`, `epoch_zero_compatibility`, `native` backend를 선택합니다.
-   - Native 요청은 catalog에서 scope를 compile하고 한 publication revision의 snapshot lease를 잡은 뒤 DIRECT/SELECTOR/ADAPTIVE 전략으로 검색·hydrate합니다. Native authority가 손상되면 임의의 V1 파일로 fallback하지 않고 fail closed합니다.
+   - Native 요청은 catalog에서 scope를 compile하고 한 composite revision의 base/segment lease를 함께 잡은 뒤 DIRECT/SELECTOR/ADAPTIVE 전략으로 검색·hydrate합니다. 요청 중 새 batch나 최종 snapshot이 게시되어도 열린 요청은 고정된 revision을 끝까지 사용합니다. Native authority가 손상되면 임의의 V1 파일로 fallback하지 않고 fail closed합니다.
    - `metadata_matches()`는 날짜/종목/증권사/리포트 유형뿐 아니라 `file_names` 필터도 처리해 직전 답변에 실제 사용된 PDF 범위로 재검색할 수 있습니다.
    - `select_top_passages()`는 명시 파일 scope, 복수 문서/list 의도, 섹션 follow-up에서 `ensure_document_coverage()`를 적용해 최종 context가 한 PDF의 여러 chunk로만 채워지는 상황을 줄입니다. 적용 여부와 이유는 `document_coverage_applied`, `document_coverage_reason`으로 monitoring metadata에 남습니다.
 6. VectorDB 결과가 없으면 해당 thread의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.

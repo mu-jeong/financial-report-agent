@@ -848,8 +848,20 @@ class StartupReconciler:
 def _validate_startup_control_plane(
     data_root: Path,
     connection: sqlite3.Connection,
+    *,
+    validate_integrity: bool = True,
 ) -> None:
-    _validate_catalog_integrity(connection)
+    if validate_integrity:
+        _validate_catalog_integrity(connection)
+    _validate_startup_control_plane_records(data_root, connection)
+
+
+def _validate_startup_control_plane_records(
+    data_root: Path,
+    connection: sqlite3.Connection,
+) -> None:
+    """Validate journals and durable floors without a whole-catalog scan."""
+
     _validate_external_commit_intents(data_root, connection)
     running = connection.execute(
         """

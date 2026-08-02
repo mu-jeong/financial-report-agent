@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import streamlit as st
@@ -26,22 +24,25 @@ MONITORING_REGRESSION_CANDIDATE_DIR = Path("debug") / "regression_candidates"
 MONITORING_CANDIDATE_RUN_DIR = Path("debug") / "candidate_evaluation_runs"
 MONITORING_CODEX_HANDOFF_DIR = Path("debug") / "codex_handoffs"
 
+_PROBLEM_AREA_LABELS = {
+    "summary": "현재 문제",
+    "response": "응답 원인 확인",
+    "search_data": "검색 자료 준비",
+    "evaluation": "정확도 평가",
+    "parsing": "문서 읽기 품질 비교",
+    "issues": "신고·수정 확인",
+}
 
-def _dimension_rows(summary: dict) -> list[dict]:
-    return [
-        {"dimension": key, "case_count": value}
-        for key, value in sorted(
-            (summary.get("monitoring_dimensions") or {}).items(),
-            key=lambda item: (-item[1], item[0]),
-        )
-    ]
-
-
-def _case_type_rows(summary: dict) -> list[dict]:
-    return [
-        {"case_type": key, "case_count": value}
-        for key, value in sorted((summary.get("case_types") or {}).items())
-    ]
+_V2_CHECK_LABELS = {
+    "v2_runtime": "현재 검색 자료 준비",
+    "native_snapshot": "현재 검색 자료 준비",
+    "native_membership": "검색 대상 일치",
+    "manifest_backlog": "아직 검색에 반영되지 않은 문서",
+    "pdf_vs_manifest": "원문과 검색 자료 일치",
+    "search_coverage": "검색 자료 반영률",
+    "runtime_health": "검색 서비스 상태",
+    "cleanup_backlog": "정리 대기 파일",
+}
 
 
 def _parse_monitoring_paths(raw_paths: str) -> list[str]:
@@ -213,160 +214,48 @@ def _latest_saved_evaluation_run(
         if exclude_path and str(run_path) == exclude_path:
             continue
         try:
-            run = json.loads(run_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            run = monitoring.load_evaluation_run(run_path)
+        except monitoring.CandidateLoadError:
             continue
         loaded_runs.append(run)
     matching_runs = monitoring.filter_evaluation_runs_by_mode(loaded_runs, execution_mode)
+    if execution_mode == "native_v2":
+        matching_runs = [
+            run
+            for run in matching_runs
+            if monitoring.is_verified_native_v2_evaluation_run(run)
+        ]
     return matching_runs[0] if matching_runs else None
 
 
-def _run_fixed_snapshot_evaluation(
-    *,
-    selected_case_ids: list[str],
-    latency_threshold_seconds: float,
-) -> dict:
-    repo_root = Path(__file__).resolve().parents[2]
-    command = [
-        sys.executable,
-        str(repo_root / "scripts" / "run_evaluation_snapshot.py"),
-        "--dataset",
-        str(repo_root / "tests" / "fixtures" / "evaluation_dataset.json"),
-        "--snapshot-root",
-        str(repo_root / "tests" / "fixtures" / "eval_snapshot"),
-        "--output-dir",
-        str(repo_root / MONITORING_EVAL_RUN_DIR),
-        "--latency-threshold-seconds",
-        str(latency_threshold_seconds),
-    ]
-    for case_id in selected_case_ids:
-        command.extend(["--case-id", case_id])
-    completed = subprocess.run(
-        command,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=None,
-    )
-    stdout = (completed.stdout or "").strip()
-    stderr = (completed.stderr or "").strip()
-    try:
-        payload = json.loads(stdout.splitlines()[-1]) if stdout else {}
-    except (IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Snapshot runner returned non-JSON output. stdout={stdout!r}, stderr={stderr!r}") from exc
-    if completed.returncode != 0 or payload.get("status") != "ok":
-        detail = payload.get("validation") or payload.get("error") or stderr or stdout
-        raise RuntimeError(f"Snapshot evaluation failed: {detail}")
-    json_path = Path(payload["json_path"])
-    if not json_path.is_absolute():
-        json_path = repo_root / json_path
-    return json.loads(json_path.read_text(encoding="utf-8"))
-
-
-def _run_candidate_snapshot_evaluation(
-    candidate: dict,
-    *,
-    run_kind: str,
-    latency_threshold_seconds: float,
-) -> dict:
-    repo_root = Path(__file__).resolve().parents[2]
-    command = [
-        sys.executable,
-        str(repo_root / "scripts" / "run_candidate_evaluation_snapshot.py"),
-        "--candidate",
-        str(candidate["json_path"]),
-        "--dataset",
-        str(repo_root / "tests" / "fixtures" / "evaluation_dataset.json"),
-        "--snapshot-root",
-        str(repo_root / "tests" / "fixtures" / "eval_snapshot"),
-        "--output-dir",
-        str(repo_root / MONITORING_CANDIDATE_RUN_DIR),
-        "--run-kind",
-        run_kind,
-        "--latency-threshold-seconds",
-        str(latency_threshold_seconds),
-    ]
-    completed = subprocess.run(
-        command,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=None,
-    )
-    stdout = (completed.stdout or "").strip()
-    stderr = (completed.stderr or "").strip()
-    try:
-        payload = json.loads(stdout.splitlines()[-1]) if stdout else {}
-    except (IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            "고정 자료 후보 실행기가 올바른 결과를 반환하지 않았습니다."
-        ) from exc
-    if completed.returncode != 0 or payload.get("status") != "ok":
-        detail = (
-            payload.get("stage")
-            or payload.get("error_type")
-            or stderr
-            or "unknown"
-        )
-        raise RuntimeError(f"고정 자료 후보 실행 실패: {detail}")
-    return monitoring.load_evaluation_run(payload["json_path"])
-
-
-def _fixed_snapshot_assets_present() -> bool:
-    required_paths = (
-        monitoring.EVALUATION_DATASET_PATH,
-        monitoring.EVALUATION_SNAPSHOT_MANIFEST_PATH,
-        monitoring.EVALUATION_SNAPSHOT_ROOT / "reports.db",
-        monitoring.EVALUATION_SNAPSHOT_ROOT / "vector_db" / "index.faiss",
-        monitoring.EVALUATION_SNAPSHOT_ROOT / "vector_db" / "index.pkl",
-    )
-    return all(path.is_file() for path in required_paths)
-
-
 def _render_experiment_monitoring() -> None:
-    st.subheader("실험 실행")
+    st.subheader("답변 정확도 평가")
     st.caption(
-        "승인된 evaluation dataset이 준비된 이후 current data 또는 fixed "
-        "snapshot 모드로 평가합니다."
+        "승인된 기준 질문을 현재 Native V2 검색 데이터로 평가합니다. "
+        "스키마가 검증된 V2 평가 run만 정확도 집계에 반영합니다."
     )
     try:
         dataset = monitoring.load_evaluation_dataset()
     except FileNotFoundError:
         st.info(
-            "현재 정식 evaluation dataset과 fixed snapshot은 없습니다. "
+            "현재 승인된 기준 질문이 없습니다. "
             "원천 데이터 준비 후 docs/EVALUATION_DATASET.md의 절차에 따라 "
             "생성·검토해야 합니다."
         )
         return
 
-    mode_label = st.radio(
-        "실험 실행 모드",
-        ["현재 데이터로 실행", "고정 테스트 snapshot으로 실행"],
-        index=1,
-        horizontal=True,
-        help="baseline 비교는 같은 실행 모드끼리만 의미 있습니다.",
+    execution_mode = "native_v2"
+    try:
+        data_source = monitoring.build_native_v2_evaluation_data_source(
+            status_module.get_native_v2_data_status()
+        )
+    except monitoring.CandidateValidationError as exc:
+        data_source = None
+        st.warning(str(exc))
+    st.info(
+        "실행 시 canonical runtime이 선택한 현재 Native V2 catalog와 "
+        "snapshot만 사용합니다."
     )
-    execution_mode = "fixed_snapshot" if mode_label == "고정 테스트 snapshot으로 실행" else "current_data"
-    snapshot_validation = None
-    if execution_mode == "current_data":
-        st.info("현재 `data/reports.db`와 `data/vector_db`를 사용합니다. DB/index가 바뀌면 baseline 비교가 흔들릴 수 있습니다.")
-    else:
-        st.info("`tests/fixtures/eval_snapshot`의 고정 DB/index를 별도 Python 프로세스에서 사용합니다.")
-        try:
-            manifest = monitoring.load_evaluation_snapshot_manifest()
-        except FileNotFoundError:
-            st.error("Snapshot manifest를 찾지 못했습니다: tests/fixtures/eval_snapshot/manifest.json")
-        else:
-            snapshot_validation = monitoring.validate_evaluation_snapshot(dataset, manifest)
-            if snapshot_validation["status"] == "pass":
-                st.success("Fixed snapshot validation passed.")
-            else:
-                st.error("Fixed snapshot validation failed. Snapshot DB/index를 생성한 뒤 실행할 수 있습니다.")
-                st.dataframe(snapshot_validation["checks"], use_container_width=True, hide_index=True)
 
     cases = dataset.get("cases") or []
     case_ids = [str(case.get("id")) for case in cases]
@@ -383,41 +272,36 @@ def _render_experiment_monitoring() -> None:
     latency_threshold = st.number_input("Latency threshold seconds", min_value=1.0, max_value=300.0, value=30.0, step=1.0)
     selected_cases = monitoring.select_evaluation_cases(dataset, selected_case_ids)
     st.caption(f"선택된 테스트: {len(selected_cases)}개")
-    snapshot_ready = execution_mode == "current_data" or (snapshot_validation or {}).get("status") == "pass"
-    if st.button("Run selected evaluation cases", use_container_width=True, disabled=not selected_cases or not snapshot_ready):
+    if st.button(
+        "Run selected evaluation cases",
+        use_container_width=True,
+        disabled=not selected_cases or data_source is None,
+    ):
+        assert data_source is not None
         with st.spinner("Evaluation dataset 실행 중..."):
             try:
-                if execution_mode == "fixed_snapshot":
-                    run = _run_fixed_snapshot_evaluation(
-                        selected_case_ids=selected_case_ids,
-                        latency_threshold_seconds=float(latency_threshold),
-                    )
-                else:
-                    run = monitoring.run_evaluation_dataset(
-                        dataset,
-                        search_engine.invoke_graph,
-                        output_dir=MONITORING_EVAL_RUN_DIR,
-                        selected_case_ids=selected_case_ids,
-                        latency_threshold_seconds=float(latency_threshold),
-                        execution_mode="current_data",
-                        data_source={"db_path": "data/reports.db", "faiss_dir": "data/vector_db"},
-                    )
+                run = monitoring.run_evaluation_dataset(
+                    dataset,
+                    search_engine.invoke_graph,
+                    output_dir=MONITORING_EVAL_RUN_DIR,
+                    selected_case_ids=selected_case_ids,
+                    latency_threshold_seconds=float(latency_threshold),
+                    execution_mode=execution_mode,
+                    data_source=data_source,
+                )
             except Exception as exc:
                 st.error(f"Evaluation run failed: {exc}")
             else:
                 st.session_state.latest_evaluation_run = run
                 st.success("Evaluation run saved.")
 
-    latest_run = st.session_state.get("latest_evaluation_run")
-    if latest_run and (latest_run.get("execution_mode") or "current_data") != execution_mode:
-        latest_run = None
-    run = latest_run or _latest_saved_evaluation_run(execution_mode=execution_mode)
+    run = _latest_v2_accuracy_run()
     if not run:
         st.caption("아직 저장된 evaluation run이 없습니다.")
         return
 
     st.markdown("#### Latest run summary")
-    st.caption(f"Execution mode: `{run.get('execution_mode') or 'current_data'}`")
+    st.caption(f"Execution mode: `{run.get('execution_mode')}`")
     summary = run.get("summary") or {}
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Cases", summary.get("case_count", 0))
@@ -433,7 +317,7 @@ def _render_experiment_monitoring() -> None:
 
     previous = _latest_saved_evaluation_run(
         exclude_path=run.get("json_path"),
-        execution_mode=run.get("execution_mode") or "current_data",
+        execution_mode=run.get("execution_mode"),
     )
     comparison = monitoring.compare_evaluation_runs(run, previous)
     if comparison:
@@ -453,24 +337,23 @@ def _render_experiment_monitoring() -> None:
         st.warning("Fail 케이스는 아래 권장 조치 기준으로 다음 작업을 선택하세요.")
         st.dataframe(failure_actions, use_container_width=True, hide_index=True)
         failed_case_ids = [str(row["case_id"]) for row in failure_actions if row.get("case_id")]
-        if st.button("Rerun failed cases only", use_container_width=True):
+        if st.button(
+            "Rerun failed cases only",
+            use_container_width=True,
+            disabled=data_source is None,
+        ):
+            assert data_source is not None
             with st.spinner("Failed cases 재실행 중..."):
                 try:
-                    if (run.get("execution_mode") or "current_data") == "fixed_snapshot":
-                        rerun = _run_fixed_snapshot_evaluation(
-                            selected_case_ids=failed_case_ids,
-                            latency_threshold_seconds=float(latency_threshold),
-                        )
-                    else:
-                        rerun = monitoring.run_evaluation_dataset(
-                            dataset,
-                            search_engine.invoke_graph,
-                            output_dir=MONITORING_EVAL_RUN_DIR,
-                            selected_case_ids=failed_case_ids,
-                            latency_threshold_seconds=float(latency_threshold),
-                            execution_mode="current_data",
-                            data_source={"db_path": "data/reports.db", "faiss_dir": "data/vector_db"},
-                        )
+                    rerun = monitoring.run_evaluation_dataset(
+                        dataset,
+                        search_engine.invoke_graph,
+                        output_dir=MONITORING_EVAL_RUN_DIR,
+                        selected_case_ids=failed_case_ids,
+                        latency_threshold_seconds=float(latency_threshold),
+                        execution_mode=execution_mode,
+                        data_source=data_source,
+                    )
                 except Exception as exc:
                     st.error(f"Failed-case rerun failed: {exc}")
                 else:
@@ -481,46 +364,176 @@ def _render_experiment_monitoring() -> None:
         st.success("현재 run에는 triage가 필요한 fail 케이스가 없습니다.")
 
 
-def _render_global_monitoring(status: dict) -> None:
-    st.subheader("전체 Monitoring")
-    st.caption("모든 대화와 저장소 상태를 집계해 운영 품질을 봅니다. 개별 chat 원문은 기본 노출하지 않습니다.")
-    thread_messages = _all_thread_messages()
-    summary = monitoring.summarize_all_chat_threads(thread_messages)
-    integrity = monitoring.summarize_data_integrity(status)
+def _latest_v2_accuracy_run() -> dict | None:
+    latest = st.session_state.get("latest_evaluation_run")
+    if monitoring.is_verified_native_v2_evaluation_run(latest):
+        return latest
+    return _latest_saved_evaluation_run(execution_mode="native_v2")
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Threads", summary["thread_count"])
-    col2.metric("Assistant", summary["assistant_message_count"])
-    col3.metric("Failure rate", f"{summary['failure_rate'] * 100:.1f}%")
-    col4.metric("No-result rate", f"{summary['no_result_rate'] * 100:.1f}%")
 
-    col1, col2, col3 = st.columns(3)
-    avg_latency = summary.get("avg_latency_seconds")
+def _render_answer_metrics(
+    summary: dict,
+    accuracy: dict,
+) -> None:
+    speed_column, accuracy_column = st.columns(2)
     p95_latency = summary.get("p95_latency_seconds")
-    col1.metric("Avg latency", "-" if avg_latency is None else f"{avg_latency:.2f}s")
-    col2.metric("P95 latency", "-" if p95_latency is None else f"{p95_latency:.2f}s")
-    col3.metric("Integrity issues", integrity["warning_count"] + integrity["fail_count"])
+    average_latency = summary.get("avg_latency_seconds")
+    latency_count = int(summary.get("latency_sample_count") or 0)
+    with speed_column:
+        st.metric(
+            "응답 속도",
+            "측정 전" if p95_latency is None else f"{p95_latency:.2f}초",
+        )
+        if p95_latency is None:
+            st.caption("아직 완료된 답변의 속도 표본이 없습니다.")
+        else:
+            st.caption(
+                f"최근 {latency_count}개 답변의 P95 · "
+                f"평균 {average_latency:.2f}초"
+            )
 
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Status counts")
-        st.dataframe([{"status": key, "count": value} for key, value in sorted(summary["statuses"].items())], use_container_width=True, hide_index=True)
-    with right:
-        st.markdown("#### Route counts")
-        st.dataframe([{"route": key, "count": value} for key, value in sorted(summary["routes"].items())], use_container_width=True, hide_index=True)
+    with accuracy_column:
+        accuracy_rate = accuracy.get("accuracy_rate")
+        st.metric(
+            "답변 정확도",
+            (
+                "측정 전"
+                if accuracy_rate is None
+                else f"{float(accuracy_rate) * 100:.1f}%"
+            ),
+        )
+        if accuracy_rate is None:
+            st.caption("승인된 Native V2 정확도 평가가 없습니다.")
+        else:
+            st.caption(
+                "정확성 검사만 반영 · "
+                f"{accuracy.get('passed', 0)}/{accuracy.get('case_count', 0)}문항"
+            )
 
-    st.markdown("#### Data integrity checks")
-    st.dataframe(
-        [{"check": key, **value} for key, value in integrity["checks"].items()],
-        use_container_width=True,
-        hide_index=True,
-    )
+
+def _render_global_monitoring(
+    summary: dict,
+    integrity: dict,
+    accuracy: dict,
+) -> None:
+    problem_checks = [
+        {
+            "항목": _V2_CHECK_LABELS.get(key, key),
+            "상태": value.get("status"),
+        }
+        for key, value in integrity["checks"].items()
+        if value.get("status") != "pass"
+    ]
+    st.markdown("#### 검색 자료 확인 필요")
+    if problem_checks:
+        st.dataframe(
+            problem_checks,
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.success("현재 검색 자료에서 확인이 필요한 문제가 없습니다.")
+
     failures = summary.get("recent_failures") or []
-    st.markdown("#### Recent failed responses")
+    st.markdown("#### 문제 응답")
     if failures:
-        st.dataframe(failures, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [
+                {
+                    "발생 시각": row.get("created_at"),
+                    "대화": row.get("thread_name"),
+                    "응답 시간": row.get("latency_seconds"),
+                    "오류": row.get("error"),
+                }
+                for row in failures
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
         st.caption("최근 실패 응답이 없습니다.")
+
+    st.markdown("#### 정확도 평가 확인")
+    if not accuracy.get("measured"):
+        st.caption("확인할 승인된 Native V2 정확도 평가가 없습니다.")
+    else:
+        failed_accuracy_cases = max(
+            int(accuracy.get("case_count") or 0)
+            - int(accuracy.get("passed") or 0),
+            0,
+        )
+        if failed_accuracy_cases:
+            st.warning(
+                f"정확성 검사를 통과하지 못한 평가 문항이 "
+                f"{failed_accuracy_cases}건 있습니다."
+            )
+        else:
+            st.success("최근 정확도 평가의 모든 문항이 통과했습니다.")
+
+
+def _render_v2_data_diagnostics(status: dict) -> None:
+    integrity = monitoring.summarize_v2_data_integrity(status)
+    if not monitoring.is_native_v2_status(status):
+        st.warning("Native V2 검색 데이터 상태를 사용할 수 없습니다.")
+        with st.expander("기술 세부정보", expanded=False):
+            st.dataframe(
+                [
+                    {
+                        "항목": _V2_CHECK_LABELS.get(key, key),
+                        "상태": value.get("status"),
+                        "세부": value.get("detail"),
+                    }
+                    for key, value in integrity["checks"].items()
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        return
+
+    db_status = status["db"]
+    retrieval_status = status.get("retrieval") or {}
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("검색 가능한 문서", f"{db_status['embedded_reports']}건")
+    col2.metric("아직 반영되지 않은 문서", f"{db_status['pending_reports']}건")
+    col3.metric("검색 자료 반영률", f"{status['search_coverage_ratio'] * 100:.1f}%")
+
+    pending_cleanup_count = int(
+        retrieval_status.get("pending_cleanup_file_count") or 0
+    )
+    if pending_cleanup_count:
+        cleanup_size = status_module.format_bytes(
+            int(retrieval_status.get("pending_cleanup_size_bytes") or 0)
+        )
+        cleanup_age = status_module.format_duration(
+            int(
+                retrieval_status.get(
+                    "oldest_pending_cleanup_age_seconds"
+                )
+                or 0
+            )
+        )
+        st.warning(
+            "검색 데이터 정리 대기: "
+            f"{pending_cleanup_count}개 파일 · "
+            f"{cleanup_size} · 최장 {cleanup_age}"
+        )
+
+    with st.expander("기술 세부정보", expanded=False):
+        st.dataframe(
+            [
+                {
+                    "항목": _V2_CHECK_LABELS.get(key, key),
+                    "상태": value.get("status"),
+                    "세부": value.get("detail"),
+                }
+                for key, value in integrity["checks"].items()
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    data_views.render_unembedded_reports(status)
 
 
 def _rerun_candidate_action(
@@ -569,27 +582,6 @@ def _write_and_record_candidate_handoff(
     return monitoring.record_candidate_handoff(
         candidate["json_path"],
         handoff=written,
-        expected_record_revision=candidate["record_revision"],
-        expected_contract_revision=candidate["contract_revision"],
-        expected_candidate_hash=candidate["candidate_hash"],
-    )
-
-
-def _run_and_record_candidate_snapshot(
-    candidate: dict,
-    *,
-    run_kind: str,
-    latency_threshold_seconds: float,
-) -> dict:
-    run = _run_candidate_snapshot_evaluation(
-        candidate,
-        run_kind=run_kind,
-        latency_threshold_seconds=latency_threshold_seconds,
-    )
-    return monitoring.record_candidate_run(
-        candidate["json_path"],
-        run=run,
-        run_kind=run_kind,
         expected_record_revision=candidate["record_revision"],
         expected_contract_revision=candidate["contract_revision"],
         expected_candidate_hash=candidate["candidate_hash"],
@@ -1440,7 +1432,6 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             )
 
     elif status in {"ready", "fixing"}:
-        run_kind = "baseline" if status == "ready" else "verification"
         automatic_action_key = (
             "run_baseline"
             if status == "ready"
@@ -1452,61 +1443,11 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             else "record_manual_verification"
         )
         if actions[automatic_action_key]["enabled"]:
-            snapshot_assets_present = _fixed_snapshot_assets_present()
-            if snapshot_assets_present:
-                st.info(
-                    "후보 실행은 별도 프로세스에서 승인된 고정 DB·벡터 "
-                    "스냅샷만 사용합니다. 현재 데이터 경로는 사용하지 "
-                    "않습니다."
-                )
-            else:
-                st.info(
-                    "현재 정식 evaluation dataset과 fixed snapshot이 없어 "
-                    "자동 재현·검증 실행은 비활성화됩니다. 데이터 준비 후 "
-                    "docs/EVALUATION_DATASET.md의 절차를 완료해야 합니다."
-                )
-            snapshot_confirmed = st.checkbox(
-                "정식 evaluation dataset과 fixed snapshot의 검토가 끝났습니다.",
-                key=(
-                    f"candidate_snapshot_confirm_{status}_"
-                    f"{candidate['id']}"
-                ),
-                disabled=not snapshot_assets_present,
+            st.info(
+                "자동 재현·검증은 Native V2 revision을 고정한 실행 결과만 "
+                "증거로 사용합니다. 준비된 실행 결과가 있으면 이 화면의 "
+                "미연결 실행 목록에서 후보에 연결하세요."
             )
-            latency_threshold = st.number_input(
-                "허용 지연 시간(초)",
-                min_value=1.0,
-                max_value=300.0,
-                value=30.0,
-                step=1.0,
-                key=(
-                    f"candidate_latency_threshold_{status}_"
-                    f"{candidate['id']}"
-                ),
-            )
-            action_label = (
-                "수정 전 오류 재현 실행"
-                if status == "ready"
-                else "수정 후 검증 실행"
-            )
-            if st.button(
-                action_label,
-                key=f"candidate_run_{run_kind}_{candidate['id']}",
-                use_container_width=True,
-                disabled=(
-                    not actions[automatic_action_key]["enabled"]
-                    or not snapshot_assets_present
-                    or not snapshot_confirmed
-                ),
-                help=actions[automatic_action_key]["reason"],
-            ):
-                _rerun_candidate_action(
-                    lambda: _run_and_record_candidate_snapshot(
-                        candidate,
-                        run_kind=run_kind,
-                        latency_threshold_seconds=float(latency_threshold),
-                    )
-                )
         if actions[manual_action_key]["enabled"]:
             assertions = (
                 candidate.get("expected") or {}
@@ -1750,7 +1691,7 @@ def _render_issue_report_monitoring() -> None:
             st.success(f"Imported issue report: {imported_report['id']}")
             st.code(imported_report["file_path"], language="text")
 
-    report_artifacts = issue_report_store.list_issue_report_artifacts()
+    report_artifacts = issue_report_store.list_v2_issue_report_artifacts()
     reports = report_artifacts["items"]
     if report_artifacts["warnings"]:
         st.warning("일부 신고 파일이 누락되었거나 손상되었습니다.")
@@ -1824,7 +1765,7 @@ def _render_issue_report_monitoring() -> None:
         st.caption("저장된 issue report가 없습니다.")
 
     st.markdown("#### Regression candidates")
-    candidate_artifacts = monitoring.list_regression_candidate_artifacts(
+    candidate_artifacts = monitoring.list_v2_regression_candidate_artifacts(
         MONITORING_REGRESSION_CANDIDATE_DIR
     )
     candidates = candidate_artifacts["items"]
@@ -1878,7 +1819,7 @@ def _render_issue_report_monitoring() -> None:
             ),
             candidate_id,
         ),
-        help="정식 fixture 반영 전, 선택한 candidate draft만 current data 기준으로 재현 실행합니다.",
+        help="정식 fixture 반영 전, 선택한 candidate draft만 현재 Native V2 데이터로 진단 실행합니다.",
     )
     selected_dataset = monitoring.build_regression_candidate_dataset(draft_candidates, selected_candidate_ids)
     st.caption(f"선택된 draft: {len(selected_dataset['cases'])}개")
@@ -1888,17 +1829,19 @@ def _render_issue_report_monitoring() -> None:
     if st.button("Run selected regression candidates", use_container_width=True, disabled=not selected_dataset["cases"]):
         with st.spinner("Regression candidate draft 실행 중..."):
             try:
+                candidate_data_source = (
+                    monitoring.build_native_v2_evaluation_data_source(
+                        status_module.get_native_v2_data_status(),
+                        candidate_ids=selected_candidate_ids,
+                    )
+                )
                 run = monitoring.run_evaluation_dataset(
                     selected_dataset,
                     search_engine.invoke_graph,
                     output_dir=MONITORING_EVAL_RUN_DIR,
                     selected_case_ids=[case.get("id") for case in selected_dataset["cases"]],
-                    execution_mode="regression_candidate_current_data",
-                    data_source={
-                        "db_path": "data/reports.db",
-                        "faiss_dir": "data/vector_db",
-                        "candidate_ids": selected_candidate_ids,
-                    },
+                    execution_mode="regression_candidate_native_v2",
+                    data_source=candidate_data_source,
                 )
             except Exception as exc:
                 st.error(f"Regression candidate run failed: {exc}")
@@ -1914,244 +1857,234 @@ def _render_issue_report_monitoring() -> None:
         st.dataframe(latest_candidate_run.get("results") or [], use_container_width=True, hide_index=True)
 
 
-def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
-    """Render metrics for the currently selected chat only."""
-    st.header("Chat Monitoring")
-    st.caption(f"현재 선택된 chat: {current_thread['name']}")
-    messages = conversation_store.list_messages(current_id)
-    summary = monitoring.summarize_chat_messages(messages)
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Messages", summary["message_count"])
-    col2.metric("Assistant", summary["assistant_message_count"])
-    col3.metric("Avg sources", f"{summary['avg_rerank_source_count']:.1f}")
-    latency = summary["avg_latency_seconds"]
-    col4.metric("Avg latency", "-" if latency is None else f"{latency:.2f}s")
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Status counts")
-        st.json(summary["statuses"])
-    with right:
-        st.markdown("#### Route counts")
-        st.json(summary["routes"])
-
-    st.markdown("#### Assistant response rows")
+def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> None:
     rows = monitoring.build_message_monitoring_rows(messages)
     if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(
+            [
+                {
+                    "발생 시각": row.get("created_at"),
+                    "상태": row.get("status"),
+                    "응답 시간": row.get("latency_seconds"),
+                    "질문": row.get("user_question_preview"),
+                }
+                for row in rows
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
     else:
-        st.caption("아직 모니터링할 assistant 응답이 없습니다.")
+        st.caption("확인할 assistant 응답이 없습니다.")
+        return
 
-    st.markdown("#### 응답 선택 상세")
     selectable_rows = [row for row in rows if row.get("message_id") is not None]
-    if selectable_rows:
-        label_by_id = {row["message_id"]: row.get("label", str(row["message_id"])) for row in selectable_rows}
-        selected_message_id = st.selectbox(
-            "상세 볼 응답 선택",
-            [row["message_id"] for row in selectable_rows],
-            index=len(selectable_rows) - 1,
-            format_func=lambda message_id: label_by_id.get(message_id, str(message_id)),
-            key=f"chat_monitoring_selected_response_{current_id}",
-        )
-        selected_message = next(
-            (message for message in messages if message.get("id") == selected_message_id),
-            None,
-        )
-        if selected_message:
-            selected_user_question = monitoring.user_question_before_message(messages, selected_message_id)
-            previous_message = monitoring.previous_successful_assistant(messages, selected_message_id)
-            detail = monitoring.build_message_trace_detail(selected_message, user_question=selected_user_question)
-            diff = monitoring.build_response_diff(selected_message, previous_message)
-            hints = monitoring.build_chat_trace_debug_hints(
-                selected_message,
-                previous_message,
-                user_question=selected_user_question,
-            )
+    if not selectable_rows:
+        return
+    label_by_id = {
+        row["message_id"]: row.get("label", str(row["message_id"]))
+        for row in selectable_rows
+    }
+    selected_message_id = st.selectbox(
+        "원인을 확인할 응답",
+        [row["message_id"] for row in selectable_rows],
+        index=len(selectable_rows) - 1,
+        format_func=lambda message_id: label_by_id.get(message_id, str(message_id)),
+        key=f"chat_monitoring_selected_response_{current_id}",
+    )
+    selected_message = next(
+        (
+            message
+            for message in messages
+            if message.get("id") == selected_message_id
+        ),
+        None,
+    )
+    if not selected_message:
+        return
+    selected_user_question = monitoring.user_question_before_message(
+        messages,
+        selected_message_id,
+    )
+    previous_message = monitoring.previous_successful_assistant(
+        messages,
+        selected_message_id,
+    )
+    detail = monitoring.build_message_trace_detail(
+        selected_message,
+        user_question=selected_user_question,
+    )
+    diff = monitoring.build_response_diff(selected_message, previous_message)
+    hints = monitoring.build_chat_trace_debug_hints(
+        selected_message,
+        previous_message,
+        user_question=selected_user_question,
+    )
 
-            trace_summary = monitoring.build_message_trace_summary(detail, diff=diff, hints=hints)
-            trace_tabs = st.tabs([
-                "Trace summary",
-                "Scope / routing",
-                "Advanced diagnostics",
-            ])
-            with trace_tabs[0]:
-                st.json(trace_summary)
-                st.markdown("#### Debug hints")
-                if hints:
-                    for hint in hints:
-                        st.warning(hint)
-                else:
-                    st.success("현재 선택 응답에서 자동 감지된 흔한 RAG 실패 패턴은 없습니다.")
-
-                st.markdown("#### Previous vs selected diff")
-                if diff:
-                    st.json(diff)
-                else:
-                    st.caption("비교할 이전 성공 assistant 응답이 없습니다.")
-            with trace_tabs[1]:
-                st.markdown("##### Query rewrite / follow-up")
-                st.json(detail["query_rewrite"])
-                st.markdown("##### Scope / filters")
-                st.json(detail["scope"])
-                st.markdown("##### Routing")
-                st.json(detail["routing"])
-            with trace_tabs[2]:
-                with st.expander("State transitions", expanded=True):
-                    st.json(detail["state_transitions"])
-                with st.expander("Retrieval / rerank", expanded=False):
-                    st.json(detail["retrieval"])
-                with st.expander("Answer / citations", expanded=False):
-                    st.json(detail["answer"])
-
+    trace_summary = monitoring.build_message_trace_summary(
+        detail,
+        diff=diff,
+        hints=hints,
+    )
+    st.markdown("#### 자동 확인 결과")
+    if hints:
+        for hint in hints:
+            st.warning(hint)
     else:
-        st.caption("상세 trace를 표시할 assistant 응답이 없습니다.")
+        st.success("자동으로 감지된 흔한 검색·답변 문제는 없습니다.")
+
+    with st.expander("요약과 이전 응답 비교", expanded=True):
+        st.json(trace_summary)
+        if diff:
+            st.json(diff)
+        else:
+            st.caption("비교할 이전 성공 응답이 없습니다.")
+    with st.expander("검색어와 검색 범위", expanded=False):
+        st.json(detail["query_rewrite"])
+        st.json(detail["scope"])
+        st.json(detail["routing"])
+    with st.expander("참고 자료 선택과 출처 표시", expanded=False):
+        st.json(detail["retrieval"])
+        st.json(detail["answer"])
+    with st.expander("처리 흐름 기술 정보", expanded=False):
+        st.json(detail["state_transitions"])
+
+
+def _format_chat_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "측정 전"
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    return f"{seconds:.2f}초"
+
+
+def _render_chat_latency_table(messages: list[dict]) -> None:
+    rows = monitoring.build_chat_latency_rows(messages)
+    if not rows:
+        st.caption("아직 완료된 Native V2 답변의 시간 표본이 없습니다.")
+        return
+    route_labels = {"rdb": "RDB", "vectordb": "Vector DB"}
+    st.dataframe(
+        [
+            {
+                "완료 시각": row.get("created_at"),
+                "경로": route_labels.get(row.get("route"), row.get("route") or "-"),
+                "전체 응답": _format_chat_duration(row.get("response_seconds")),
+                "RDB 조회": _format_chat_duration(row.get("rdb_seconds")),
+                "Vector DB 검색": _format_chat_duration(row.get("vector_seconds")),
+            }
+            for row in reversed(rows)
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
+    """Render current-thread Native V2 latency metrics only."""
+    st.header("답변 모니터링")
+    st.caption(f"현재 대화: {current_thread['name']} · 성공한 Native V2 응답만 집계")
+    messages = conversation_store.list_messages(current_id)
+    summary = monitoring.summarize_chat_latency_metrics(messages)
+    columns = st.columns(4)
+    metric_specs = (
+        (
+            "최근 답변 총시간",
+            summary.get("latest_response_seconds"),
+            "가장 최근 성공 응답",
+        ),
+        (
+            "현재 대화 평균",
+            summary.get("avg_response_seconds"),
+            f"표본 {int(summary.get('response_sample_count') or 0)}건",
+        ),
+        (
+            "RDB 평균 조회시간",
+            summary.get("avg_rdb_seconds"),
+            f"표본 {int(summary.get('rdb_sample_count') or 0)}건",
+        ),
+        (
+            "Vector DB 평균 검색시간",
+            summary.get("avg_vector_seconds"),
+            f"표본 {int(summary.get('vector_sample_count') or 0)}건",
+        ),
+    )
+    for column, (label, value, caption) in zip(columns, metric_specs, strict=True):
+        with column:
+            st.metric(label, _format_chat_duration(value))
+            st.caption(caption)
+
+    st.markdown("#### 응답별 시간")
+    _render_chat_latency_table(messages)
 
 
 def render_global_monitoring_page() -> None:
-    """Render global Monitoring Mode pages that do not depend on a selected chat."""
-    st.header("Monitoring Mode")
+    """Render the V2-only speed/accuracy dashboard and problem tools."""
+    st.header("답변 모니터링")
     st.caption(
-        "성능개선을 위한 지표 모니터링 화면입니다. parsing, chunking, retrieval/rerank, "
-        "모델 변경에 따른 답변 안정성, latency/비용을 같은 기준선으로 비교하기 위한 정보를 모읍니다."
+        "평소에는 답변 속도와 정확도만 확인합니다. 나머지 정보는 "
+        "문제가 있을 때 필요한 진단 도구에서 확인합니다."
     )
 
-    status = status_module.get_data_status()
-    db_status = status["db"]
-    vector_status = status["vector_db"]
-    config = status["config"]
-    category_labels = [label for label in monitoring.build_monitoring_tab_labels() if label != "Chat Monitoring"]
-    category = st.radio(
-        "Monitoring category",
-        category_labels,
-        horizontal=True,
-        key="global_monitoring_category",
+    status = status_module.get_native_v2_data_status()
+    thread_messages = _all_thread_messages()
+    summary = monitoring.summarize_all_chat_threads(thread_messages)
+    integrity = monitoring.summarize_v2_data_integrity(status)
+    accuracy = monitoring.summarize_evaluation_accuracy(
+        _latest_v2_accuracy_run()
     )
-    section_labels = monitoring.build_global_monitoring_section_labels(category)
+    _render_answer_metrics(summary, accuracy)
 
-    if category == "운영 상태":
-        data_tab, unembedded_tab, global_monitoring_tab = st.tabs(section_labels)
-
-        with data_tab:
-            st.subheader("데이터 준비 상태")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("리포트", f"{db_status['total_reports']}건")
-            col2.metric("임베딩 완료", f"{db_status['embedded_reports']}건")
-            col3.metric("미완료", f"{db_status['pending_reports']}건")
-            col4.metric("검색 커버리지", f"{status['search_coverage_ratio'] * 100:.1f}%")
-
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("FAISS", "있음" if vector_status["has_faiss_index"] else "없음")
-            col2.metric("Vector files", f"{vector_status['file_count']}개")
-            col3.metric("Parent chunks", f"{db_status['parent_chunks']}건")
-            col4.metric("PDF", f"{status['downloaded_pdfs']}개")
-
-            st.subheader("현재 파이프라인 설정")
-            st.json(
-                {
-                    "generation_model": config["generation_model"],
-                    "embedding_model": config["embedding_model"],
-                    "extraction_engine": config["extraction_engine"],
-                    "unembedded_extraction_engine": config.get("unembedded_extraction_engine"),
-                    "use_parent_child": config["use_parent_child"],
-                    "use_reranker": config["use_reranker"],
-                    "search_top_k": config["search_top_k"],
-                    "test_limit": config["test_limit"],
-                }
-            )
-
-            st.subheader("날짜별 데이터 캘린더 원천")
-            date_counts = [
-                {
-                    "report_date": report_date,
-                    "embedded_count": count,
-                    **(db_status.get("report_date_type_counts") or {}).get(report_date, {}),
-                }
-                for report_date, count in (db_status.get("report_date_counts") or {}).items()
-            ]
-            st.dataframe(date_counts, use_container_width=True, hide_index=True)
-
-        with unembedded_tab:
-            data_views.render_unembedded_reports(status)
-
-        with global_monitoring_tab:
-            _render_global_monitoring(status)
-        return
-
-    if category == "평가/실험":
-        eval_tab, experiment_tab, parsing_tab = st.tabs(section_labels)
-
-        with eval_tab:
-            st.subheader("고정 평가 테스트셋")
-            try:
-                dataset = monitoring.load_evaluation_dataset()
-                summary = monitoring.summarize_evaluation_dataset(dataset)
-            except FileNotFoundError:
-                st.info(
-                    "현재 정식 evaluation dataset과 fixed snapshot은 "
-                    "없습니다. 생성 TODO는 docs/EVALUATION_DATASET.md에 "
-                    "기록되어 있습니다."
-                )
+    failed_count = int(summary.get("statuses", {}).get("failed") or 0)
+    accuracy_failure_count = max(
+        int(accuracy.get("case_count") or 0)
+        - int(accuracy.get("passed") or 0),
+        0,
+    )
+    problem_count = (
+        failed_count
+        + accuracy_failure_count
+        + int(integrity.get("warning_count") or 0)
+        + int(integrity.get("fail_count") or 0)
+    )
+    with st.expander(
+        f"문제 상황 자세히 보기 · 확인 필요 {problem_count}건",
+        expanded=problem_count > 0,
+    ):
+        problem_area = st.selectbox(
+            "확인할 내용",
+            options=list(_PROBLEM_AREA_LABELS),
+            format_func=_PROBLEM_AREA_LABELS.__getitem__,
+            key="monitoring_problem_area",
+        )
+        if problem_area == "summary":
+            _render_global_monitoring(summary, integrity, accuracy)
+        elif problem_area == "response":
+            if not thread_messages:
+                st.caption("확인할 대화가 없습니다.")
             else:
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Version", summary["version"])
-                col2.metric("Cases", summary["case_count"])
-                col3.metric(
-                    "Expected sources",
-                    summary["expected_source_count"],
+                thread_by_id = {
+                    str(entry["thread"]["id"]): entry
+                    for entry in thread_messages
+                }
+                selected_thread_id = st.selectbox(
+                    "확인할 대화",
+                    options=list(thread_by_id),
+                    format_func=lambda thread_id: thread_by_id[thread_id][
+                        "thread"
+                    ]["name"],
+                    key="monitoring_diagnostic_thread",
                 )
-                col4.metric("Snapshot", summary["snapshot_date"] or "-")
-
-                stability_policy = summary.get("stability_policy") or {}
-                st.info(
-                    "테스트셋은 변경 사유가 생기기 전까지 고정합니다. "
-                    f"정책: `{stability_policy.get('policy', '-')}`"
+                selected_entry = thread_by_id[selected_thread_id]
+                _render_global_chat_diagnostics(
+                    selected_thread_id,
+                    selected_entry["messages"],
                 )
-
-                left, right = st.columns(2)
-                with left:
-                    st.markdown("#### Route case coverage")
-                    st.dataframe(
-                        _case_type_rows(summary),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-                with right:
-                    st.markdown("#### Monitoring dimensions")
-                    st.dataframe(
-                        _dimension_rows(summary),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                with st.expander("변경 허용 사유"):
-                    st.write(
-                        stability_policy.get("allowed_change_reasons") or []
-                    )
-                with st.expander("평가 케이스 목록"):
-                    st.dataframe(
-                        [
-                            {
-                                "id": case.get("id"),
-                                "type": case.get("type"),
-                                "route": case.get("expected_route"),
-                                "dimensions": ", ".join(
-                                    case.get("monitoring_dimensions", [])
-                                ),
-                                "question": case.get("question"),
-                            }
-                            for case in dataset.get("cases", [])
-                        ],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-        with experiment_tab:
+        elif problem_area == "search_data":
+            _render_v2_data_diagnostics(status)
+        elif problem_area == "evaluation":
             _render_experiment_monitoring()
-
-        with parsing_tab:
+        elif problem_area == "parsing":
             _render_parsing_engine_evaluation()
-        return
-
-    _render_issue_report_monitoring()
+        else:
+            _render_issue_report_monitoring()
 

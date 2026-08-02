@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from src.configs import config
@@ -19,6 +20,7 @@ from src.retrieval.bootstrap import (
     inspect_runtime,
     retrieval_paths,
 )
+from src.retrieval.delta_schema import delta_schema_installed
 
 DB_PATH = config.DB_PATH
 EMBEDDING_MODEL = config.EMBEDDING_MODEL
@@ -198,6 +200,7 @@ def _safe_native_info(
             db_path,
             data_root=data_root,
             validate_snapshot=False,
+            catalog_validation="read",
         )
     except Exception as exc:
         return _unavailable_native_info(paths, exc)
@@ -265,6 +268,11 @@ def _safe_native_info(
         connection = sqlite3.connect(paths.catalog)
         connection.row_factory = sqlite3.Row
         try:
+            has_delta_schema = delta_schema_installed(connection)
+            if has_delta_schema:
+                retrieval.update(
+                    _pending_cleanup_summary(connection, paths.data_root)
+                )
             runtime = connection.execute(
                 "SELECT schema_version FROM retrieval_runtime WHERE runtime_id = 1"
             ).fetchone()
@@ -298,16 +306,27 @@ def _safe_native_info(
                     "max_report_date": summary["max_report_date"],
                 }
             )
+            membership_source = (
+                "active_vector_membership"
+                if has_delta_schema
+                else "snapshot_membership"
+            )
+            membership_filter = (
+                "" if has_delta_schema else "WHERE membership.snapshot_id = ?"
+            )
+            membership_parameters = (
+                () if has_delta_schema else (selection.active_snapshot_id,)
+            )
             db["parent_chunks"] = int(
                 connection.execute(
-                    """
+                    f"""
                     SELECT COUNT(DISTINCT parent.parent_uid)
-                    FROM snapshot_membership AS membership
+                    FROM {membership_source} AS membership
                     JOIN retrieval_chunks AS chunk ON chunk.chunk_uid = membership.chunk_uid
                     JOIN retrieval_parents AS parent ON parent.parent_uid = chunk.parent_uid
-                    WHERE membership.snapshot_id = ?
+                    {membership_filter}
                     """,
-                    (selection.active_snapshot_id,),
+                    membership_parameters,
                 ).fetchone()[0]
             )
             type_rows = connection.execute(
@@ -375,6 +394,68 @@ def _safe_native_info(
                         "ntotal": int(snapshot["ntotal"]),
                     }
                 )
+                if has_delta_schema:
+                    delta_summary = connection.execute(
+                        """
+                        SELECT COALESCE(MAX(sequence), 0) AS generation,
+                               COUNT(*) AS segment_count
+                        FROM retrieval_delta_segments
+                        WHERE base_snapshot_id = ?
+                          AND base_publication_generation = ?
+                          AND state = 'ready'
+                        """,
+                        (
+                            selection.active_snapshot_id,
+                            selection.publication_generation,
+                        ),
+                    ).fetchone()
+                    active_membership_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM active_vector_membership"
+                        ).fetchone()[0]
+                    )
+                    retrieval.update(
+                        {
+                            "delta_generation": int(delta_summary["generation"]),
+                            "delta_segment_count": int(delta_summary["segment_count"]),
+                            "membership_count": active_membership_count,
+                        }
+                    )
+                    vector_db["ntotal"] = active_membership_count
+                    delta_artifacts = connection.execute(
+                        """
+                        SELECT segment.relative_path
+                        FROM retrieval_delta_segments AS segment
+                        WHERE segment.base_snapshot_id = ?
+                          AND segment.base_publication_generation = ?
+                          AND segment.state = 'ready'
+                          AND segment.relative_path IS NOT NULL
+                          AND EXISTS (
+                              SELECT 1
+                              FROM active_vector_membership AS membership
+                              WHERE membership.artifact_kind = 'delta'
+                                AND membership.artifact_id = segment.segment_id
+                          )
+                        ORDER BY segment.sequence, segment.segment_id
+                        """,
+                        (
+                            selection.active_snapshot_id,
+                            selection.publication_generation,
+                        ),
+                    ).fetchall()
+                    for artifact in delta_artifacts:
+                        artifact_path = paths.data_root.joinpath(
+                            *str(artifact["relative_path"]).split("/")
+                        )
+                        artifact_size = (
+                            artifact_path.stat().st_size if artifact_path.is_file() else 0
+                        )
+                        if artifact_path.is_file():
+                            vector_db["files"].append(
+                                {"name": artifact_path.name, "size_bytes": artifact_size}
+                            )
+                            vector_db["file_count"] += 1
+                            vector_db["total_size_bytes"] += artifact_size
             if selection.mode == "epoch_zero_compatibility":
                 bundle = (
                     paths.data_root
@@ -407,6 +488,100 @@ def _safe_native_info(
         db["error"] = message
         retrieval["error"] = message
     return db, vector_db, retrieval
+
+
+def _pending_cleanup_summary(
+    connection: sqlite3.Connection,
+    data_root: Path,
+) -> dict[str, Any]:
+    has_gc_ledger = connection.execute(
+        """
+        SELECT 1 FROM sqlite_schema
+        WHERE type = 'table' AND name = 'retrieval_delta_artifact_gc'
+        """
+    ).fetchone() is not None
+    gc_join = (
+        "LEFT JOIN retrieval_delta_artifact_gc AS artifact_gc "
+        "ON artifact_gc.segment_id = segment.segment_id"
+        if has_gc_ledger
+        else ""
+    )
+    gc_filter = "AND artifact_gc.segment_id IS NULL" if has_gc_ledger else ""
+    rows = connection.execute(
+        f"""
+        SELECT segment.relative_path, segment.state_changed_at,
+               CAST(
+                   MAX(
+                       0.0,
+                       (julianday('now') - julianday(segment.state_changed_at))
+                           * 86400.0
+                   ) AS INTEGER
+               ) AS age_seconds
+        FROM retrieval_delta_segments AS segment
+        {gc_join}
+        WHERE segment.relative_path IS NOT NULL
+          AND (
+              segment.state = 'compacted'
+              OR (
+                  segment.state IN ('ready', 'failed')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM retrieval_runtime AS runtime
+                      WHERE runtime.runtime_id = 1
+                        AND runtime.active_snapshot_id = segment.base_snapshot_id
+                        AND runtime.publication_generation =
+                            segment.base_publication_generation
+                  )
+              )
+          )
+          {gc_filter}
+        ORDER BY segment.state_changed_at, segment.segment_id
+        """
+    ).fetchall()
+    root = Path(data_root).resolve(strict=True)
+    pending: list[tuple[str, int, int]] = []
+    for row in rows:
+        relative_text = str(row["relative_path"])
+        relative = PurePosixPath(relative_text)
+        if (
+            relative.is_absolute()
+            or relative.as_posix() != relative_text
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or (relative.parts and ":" in relative.parts[0])
+        ):
+            raise ValueError("pending cleanup artifact path is not canonical")
+        lexical_path = root.joinpath(*relative.parts)
+        try:
+            file_stat = lexical_path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(file_stat.st_mode):
+            raise ValueError("pending cleanup artifact path is a symbolic link")
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError("pending cleanup artifact is not a regular file")
+        try:
+            artifact_path = lexical_path.resolve(strict=True)
+        except FileNotFoundError:
+            continue
+        try:
+            artifact_path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("pending cleanup artifact escapes the data root") from exc
+        pending.append(
+            (
+                str(row["state_changed_at"]),
+                int(row["age_seconds"] or 0),
+                int(file_stat.st_size),
+            )
+        )
+    return {
+        "pending_cleanup_file_count": len(pending),
+        "pending_cleanup_size_bytes": sum(item[2] for item in pending),
+        "oldest_pending_cleanup_at": pending[0][0] if pending else None,
+        "oldest_pending_cleanup_age_seconds": (
+            max(item[1] for item in pending) if pending else 0
+        ),
+    }
 
 
 def _unavailable_native_info(
@@ -473,6 +648,7 @@ def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list
             db_path,
             data_root=data_root,
             validate_snapshot=False,
+            catalog_validation="read",
         )
     except RetrievalBootstrapError:
         return []
@@ -481,51 +657,111 @@ def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list
         connection = sqlite3.connect(native_paths.catalog)
         connection.row_factory = sqlite3.Row
         try:
-            rows = connection.execute(
-                """
-                SELECT report.report_id AS id, report.report_date, report.report_type,
-                       report.target_name, report.title, report.broker,
-                       report.canonical_relative_path,
-                       CASE
-                           WHEN json_extract(decision.value, '$.reason_code')
-                                = 'source-extraction-failed'
-                           THEN profile.extractor
-                           ELSE NULL
-                       END AS embedding_extraction_engine,
-                       CASE
-                           WHEN json_extract(decision.value, '$.reason_code')
-                                = 'source-extraction-failed'
-                           THEN 'NativeSourceExtractionError: primary and fallback extraction failed'
-                           ELSE NULL
-                       END AS embedding_last_error,
-                       CASE
-                           WHEN json_extract(decision.value, '$.reason_code')
-                                = 'source-extraction-failed'
-                           THEN build.created_at
-                           ELSE NULL
-                       END AS embedding_last_attempt_at
-                FROM retrieval_runtime AS runtime
-                JOIN retrieval_builds AS build
-                  ON build.build_id = runtime.active_build_id
-                JOIN embedding_profiles AS profile
-                  ON profile.profile_id = build.profile_id
-                JOIN json_each(build.source_manifest_json, '$.reports') AS decision
-                JOIN reports AS report
-                  ON report.report_uid
-                     = json_extract(decision.value, '$.report_uid')
-                LEFT JOIN active_reports AS active ON active.report_uid = report.report_uid
-                WHERE runtime.runtime_id = 1
-                  AND active.report_uid IS NULL
-                  AND json_extract(decision.value, '$.status') = 'excluded'
-                  AND json_extract(decision.value, '$.reason_code') IN (
-                      'legacy_not_vectorized',
-                      'source-extraction-failed'
-                  )
-                ORDER BY report.report_date DESC, report.report_id DESC
-                LIMIT ?
-                """,
-                (safe_limit,),
-            ).fetchall()
+            rows = list(
+                connection.execute(
+                    """
+                    SELECT report.report_id AS id, report.report_date, report.report_type,
+                           report.target_name, report.title, report.broker,
+                           report.canonical_relative_path,
+                           CASE
+                               WHEN json_extract(decision.value, '$.reason_code')
+                                    = 'source-extraction-failed'
+                               THEN profile.extractor
+                               ELSE NULL
+                           END AS embedding_extraction_engine,
+                           CASE
+                               WHEN json_extract(decision.value, '$.reason_code')
+                                    = 'source-extraction-failed'
+                               THEN 'NativeSourceExtractionError: primary and fallback extraction failed'
+                               ELSE NULL
+                           END AS embedding_last_error,
+                           CASE
+                               WHEN json_extract(decision.value, '$.reason_code')
+                                    = 'source-extraction-failed'
+                               THEN build.created_at
+                               ELSE NULL
+                           END AS embedding_last_attempt_at
+                    FROM retrieval_runtime AS runtime
+                    JOIN retrieval_builds AS build
+                      ON build.build_id = runtime.active_build_id
+                    JOIN embedding_profiles AS profile
+                      ON profile.profile_id = build.profile_id
+                    JOIN json_each(build.source_manifest_json, '$.reports') AS decision
+                    JOIN reports AS report
+                      ON report.report_uid
+                         = json_extract(decision.value, '$.report_uid')
+                    LEFT JOIN active_reports AS active ON active.report_uid = report.report_uid
+                    WHERE runtime.runtime_id = 1
+                      AND active.report_uid IS NULL
+                      AND json_extract(decision.value, '$.status') = 'excluded'
+                      AND json_extract(decision.value, '$.reason_code') IN (
+                          'legacy_not_vectorized',
+                          'source-extraction-failed'
+                      )
+                    ORDER BY report.report_date DESC, report.report_id DESC
+                    LIMIT ?
+                    """,
+                    (safe_limit,),
+                ).fetchall()
+            )
+            if delta_schema_installed(connection):
+                delta_rows = connection.execute(
+                    """
+                    WITH ranked_failures AS (
+                        SELECT action.action, action.report_uid, action.reason_code,
+                               segment.created_at,
+                               row_number() OVER (
+                                   PARTITION BY action.canonical_relative_path
+                                   ORDER BY segment.sequence DESC, segment.segment_id DESC
+                               ) AS position
+                        FROM retrieval_runtime AS runtime
+                        JOIN retrieval_delta_segments AS segment
+                          ON segment.base_snapshot_id = runtime.active_snapshot_id
+                         AND segment.base_publication_generation = runtime.publication_generation
+                         AND segment.state = 'ready'
+                        JOIN retrieval_delta_reports AS action
+                          ON action.segment_id = segment.segment_id
+                        WHERE runtime.runtime_id = 1
+                    )
+                    SELECT report.report_id AS id, report.report_date, report.report_type,
+                           report.target_name, report.title, report.broker,
+                           report.canonical_relative_path,
+                           profile.extractor AS embedding_extraction_engine,
+                           CASE
+                               WHEN failure.reason_code = 'source-extraction-failed'
+                               THEN 'NativeSourceExtractionError: primary and fallback extraction failed'
+                               ELSE 'NativeUpdateError: ' || failure.reason_code
+                           END AS embedding_last_error,
+                           failure.created_at AS embedding_last_attempt_at
+                    FROM ranked_failures AS failure
+                    JOIN reports AS report ON report.report_uid = failure.report_uid
+                    JOIN retrieval_runtime AS runtime ON runtime.runtime_id = 1
+                    JOIN retrieval_builds AS build
+                      ON build.build_id = runtime.active_build_id
+                    JOIN embedding_profiles AS profile
+                      ON profile.profile_id = build.profile_id
+                    LEFT JOIN active_reports AS active
+                      ON active.report_uid = report.report_uid
+                    WHERE failure.position = 1
+                      AND failure.action = 'failed'
+                      AND active.report_uid IS NULL
+                    ORDER BY report.report_date DESC, report.report_id DESC
+                    """
+                ).fetchall()
+                by_path = {
+                    str(row["canonical_relative_path"]): row for row in rows
+                }
+                by_path.update(
+                    {
+                        str(row["canonical_relative_path"]): row
+                        for row in delta_rows
+                    }
+                )
+                rows = sorted(
+                    by_path.values(),
+                    key=lambda row: (str(row["report_date"]), int(row["id"])),
+                    reverse=True,
+                )[:safe_limit]
         finally:
             connection.close()
         return [
@@ -599,15 +835,25 @@ def get_data_status(
     save_dir: str = SAVE_DIR,
     db_path: str = DB_PATH,
     faiss_dir: str = FAISS_DIR,
+    _native_only: bool = False,
 ) -> dict[str, Any]:
     """Return a read-only snapshot of local data, index, and config state."""
     native = _safe_native_info(db_path)
     if native is None:
-        db = _safe_db_info(db_path)
-        vector_db = _safe_vector_info(faiss_dir)
-        retrieval = {"mode": "legacy_v1"}
-        effective_db_path = db_path
-        effective_faiss_dir = faiss_dir
+        if _native_only:
+            paths, _ = _status_retrieval_paths(db_path)
+            db, vector_db, retrieval = _unavailable_native_info(
+                paths,
+                RuntimeError("Native V2 retrieval status is unavailable"),
+            )
+            effective_db_path = str(paths.catalog)
+            effective_faiss_dir = str(paths.v2_root / "snapshots")
+        else:
+            db = _safe_db_info(db_path)
+            vector_db = _safe_vector_info(faiss_dir)
+            retrieval = {"mode": "legacy_v1"}
+            effective_db_path = db_path
+            effective_faiss_dir = faiss_dir
     else:
         db, vector_db, retrieval = native
         paths, _ = _status_retrieval_paths(db_path)
@@ -647,6 +893,20 @@ def get_data_status(
     }
 
 
+def get_native_v2_data_status(
+    *,
+    save_dir: str = SAVE_DIR,
+    db_path: str = DB_PATH,
+) -> dict[str, Any]:
+    """Return Monitoring status without reading legacy DB/vector artifacts."""
+
+    return get_data_status(
+        save_dir=save_dir,
+        db_path=db_path,
+        _native_only=True,
+    )
+
+
 def format_bytes(size: int) -> str:
     """Format bytes using compact binary units."""
     value = float(size)
@@ -655,6 +915,23 @@ def format_bytes(size: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} {unit}"
         value /= 1024
     return f"{value:.1f} GB"
+
+
+def format_duration(seconds: int) -> str:
+    """Format a non-negative duration for operator-facing status output."""
+
+    value = max(int(seconds), 0)
+    if value < 60:
+        return f"{value}초"
+    minutes = value // 60
+    if minutes < 60:
+        return f"{minutes}분"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}시간"
+    days = hours // 24
+    remaining_hours = hours % 24
+    return f"{days}일 {remaining_hours}시간" if remaining_hours else f"{days}일"
 
 
 def format_status_lines(status: dict[str, Any]) -> list[str]:
@@ -716,6 +993,17 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
             lines.append(
                 "Warning: sealed V1 compatibility bundle is serving the epoch-zero bridge; "
                 "native writes are blocked."
+            )
+        pending_cleanup_count = int(
+            retrieval.get("pending_cleanup_file_count") or 0
+        )
+        if pending_cleanup_count:
+            lines.append(
+                "검색 데이터 정리 대기: "
+                f"{pending_cleanup_count}개 파일, "
+                f"{format_bytes(int(retrieval.get('pending_cleanup_size_bytes') or 0))}, "
+                "최장 "
+                f"{format_duration(int(retrieval.get('oldest_pending_cleanup_age_seconds') or 0))}"
             )
 
     if db.get("error"):

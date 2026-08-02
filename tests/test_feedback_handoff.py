@@ -59,6 +59,7 @@ def _candidate_and_run(tmp_path: Path) -> tuple[dict, dict]:
         }
     )
     run = {
+        "schema_version": 2,
         "run_id": "20260726T001100Z_abcd1234",
         "run_kind": "baseline",
         "run_status": "completed",

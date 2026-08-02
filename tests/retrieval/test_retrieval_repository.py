@@ -23,7 +23,7 @@ from src.retrieval.repository import (
     compile_scope_filters,
 )
 from src.retrieval.schema import install_schema
-from src.retrieval.vector_index import SnapshotDescriptor, build_index
+from src.retrieval.vector_index import SnapshotDescriptor, build_index, load_index
 
 
 def _digest(value: str) -> str:
@@ -284,6 +284,33 @@ def test_request_releases_cache_lease_on_success_and_exception(tmp_path):
             assert cache.lease_count(session.revision) == 1
             raise RuntimeError('request failure')
     assert cache.lease_count(revision) == 0
+
+
+def test_request_evicts_stale_cache_before_materializing_current_index(
+    tmp_path,
+    monkeypatch,
+):
+    catalog_path, _ = _create_catalog(tmp_path)
+    events: list[str] = []
+
+    def load(path, descriptor):
+        events.append('load')
+        return load_index(path, descriptor)
+
+    cache = SnapshotCache(loader=load)
+    repository = CatalogRepository(catalog_path, data_root=tmp_path, cache=cache)
+    original_evict = repository._evict_stale_cached_revisions
+
+    def record_evict(pinned):
+        events.append('evict')
+        original_evict(pinned)
+
+    monkeypatch.setattr(repository, '_evict_stale_cached_revisions', record_evict)
+
+    with repository.request():
+        pass
+
+    assert events == ['evict', 'load']
 
 
 def test_request_reads_active_revision_exactly_once(tmp_path, monkeypatch):

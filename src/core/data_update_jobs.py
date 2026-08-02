@@ -473,17 +473,24 @@ def run_embedding_job(
 ) -> int:
     """Run an embedding-only job and persist progress status for the GUI."""
     try:
-        guard_before_retrieval_write(
+        runtime = guard_before_retrieval_write(
             config.DB_PATH,
             allow_degraded_forward_recovery=True,
         )
+        continuous_search = bool(getattr(runtime, "is_native", False))
         _write_status(
             {
                 "state": "running",
                 "phase": "embed",
                 "percent": 5,
-                "message": f"{label}: 미임베딩 문서 임베딩 중...",
+                "message": (
+                    f"{label}: 문서를 처리해 검색에 반영하는 중입니다. "
+                    "기존 검색은 계속 사용할 수 있습니다."
+                    if continuous_search
+                    else f"{label}: 미임베딩 문서 임베딩 중..."
+                ),
                 "label": label,
+                "search_available_during_update": continuous_search,
                 "embedding_limit": limit,
                 "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
@@ -505,6 +512,7 @@ def run_embedding_job(
                     "percent": min(98, 5 + int((current / total) * 90)),
                     "message": f"{label}: 처리 중 ({current}/{total}) {file_label}",
                     "label": label,
+                    "search_available_during_update": continuous_search,
                     "embedding_limit": limit,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
@@ -570,9 +578,9 @@ def run_embedding_job(
 
 
 def _processed_report_count(output: str) -> int:
-    matches = re.findall("(?:\ucc98\ub9ac\ub41c\s*\ub9ac\ud3ec\ud2b8|\ucc98\ub9ac\ub41c\s*\ub370\uc774\ud130):\s*(\d+)\uac74", output)
+    matches = re.findall("(?:\ucc98\ub9ac\ub41c\\s*\ub9ac\ud3ec\ud2b8|\ucc98\ub9ac\ub41c\\s*\ub370\uc774\ud130):\\s*(\\d+)\uac74", output)
     if not matches:
-        matches = re.findall("\ub370\uc774\ud130\s*(\d+)\uac74", output)
+        matches = re.findall("\ub370\uc774\ud130\\s*(\\d+)\uac74", output)
     return sum(int(match) for match in matches)
 
 
@@ -585,7 +593,7 @@ def embedding_file_progress_from_line(line: str) -> tuple[int, int, str] | None:
         return current, total, label
 
     native = re.search(
-        r"Native V2 batch publication complete: batch=(\d+).*"
+        r"Native V2 delta publication complete: batch=(\d+).*"
         r"processed=(\d+).*deferred=(\d+)",
         line.rstrip(),
     )
@@ -593,7 +601,9 @@ def embedding_file_progress_from_line(line: str) -> tuple[int, int, str] | None:
         batch = int(native.group(1))
         processed = int(native.group(2))
         deferred = int(native.group(3))
-        return processed, processed + deferred, f"V2 snapshot batch {batch}"
+        return processed, processed + deferred, f"처리 완료 문서 반영 · {batch}차"
+    if "Native V2 final compaction complete:" in line:
+        return 1, 1, "검색 데이터 정리"
     return None
 
 
@@ -621,6 +631,12 @@ def embedding_failure_message(exit_code: int, output: str) -> str:
 def embedding_extraction_failure_count(output: str) -> int:
     """Return the safe aggregate count emitted by V1 or V2 extraction handling."""
 
+    native_matches = re.findall(
+        r"Native V2 update complete:.*\bfailed=(\d+)",
+        output,
+    )
+    if native_matches:
+        return int(native_matches[-1])
     v1_matches = re.findall(
         r"Quick Start is continuing after\s+(\d+)\s+PDF parsing failure",
         output,
@@ -645,7 +661,7 @@ def run_update_job(
 ) -> int:
     """Run crawler then embedding pipeline, updating status as each phase completes."""
     try:
-        guard_before_retrieval_write(config.DB_PATH)
+        runtime = guard_before_retrieval_write(config.DB_PATH)
         normalized_dates = normalize_date_list(selected_dates)
         selected_categories = normalize_update_categories(categories)
         if normalized_dates:
@@ -691,7 +707,7 @@ def run_update_job(
                 raise RuntimeError(f"crawler failed with exit code {code}")
             processed_total += _processed_report_count(output)
 
-        if processed_total == 0:
+        if processed_total == 0 and not runtime.is_native:
             _write_status(
                 {
                     "state": "succeeded",
@@ -715,8 +731,14 @@ def run_update_job(
                 "state": "running",
                 "phase": "embed",
                 "percent": 70,
-                "message": f"{label}: 임베딩/검색 인덱스 생성 중...",
+                "message": (
+                    f"{label}: 문서를 처리해 검색에 반영하는 중입니다. "
+                    "기존 검색은 계속 사용할 수 있습니다."
+                    if runtime.is_native
+                    else f"{label}: 임베딩/검색 인덱스 생성 중..."
+                ),
                 "label": label,
+                "search_available_during_update": runtime.is_native,
                 "start_date": start_date,
                 "end_date": end_date,
                 "selected_dates": normalized_dates,
@@ -741,6 +763,7 @@ def run_update_job(
                     "percent": percent,
                     "message": f"{label}: 처리 중 ({current}/{total}) {file_label}",
                     "label": label,
+                    "search_available_during_update": runtime.is_native,
                     "start_date": start_date,
                     "end_date": end_date,
                     "selected_dates": normalized_dates,

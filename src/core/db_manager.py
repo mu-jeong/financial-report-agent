@@ -33,7 +33,7 @@ from datetime import datetime
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.configs.config import DB_PATH, SAVE_DIR, get_logger
-from src.retrieval.bootstrap import inspect_runtime, retrieval_paths
+from src.retrieval.bootstrap import retrieval_paths
 
 logger = get_logger(__name__)
 
@@ -48,10 +48,9 @@ EMBEDDING_FAILURE_COLUMNS = {
 def get_connection(db_path: str | None = None) -> sqlite3.Connection:
     """DB 커넥션 반환. Row를 dict처럼 접근 가능하도록 설정."""
     effective_db_path = db_path or DB_PATH
-    native = retrieval_paths(effective_db_path)
-    selection = inspect_runtime(effective_db_path, validate_snapshot=False)
-    if selection.mode != "legacy_v1":
-        db_uri = f"file:{native.catalog.resolve().as_posix()}?mode=ro"
+    dispatch = _resolve_retrieval_dispatch(effective_db_path)
+    if dispatch.mode != "legacy_v1":
+        db_uri = f"file:{dispatch.paths.catalog.resolve().as_posix()}?mode=ro"
         conn = sqlite3.connect(db_uri, uri=True)
         conn.create_function(
             "v2_basename",
@@ -76,7 +75,18 @@ def get_connection(db_path: str | None = None) -> sqlite3.Connection:
 
 
 def _native_catalog_exists() -> bool:
-    return inspect_runtime(DB_PATH, validate_snapshot=False).mode != "legacy_v1"
+    return _resolve_retrieval_dispatch(DB_PATH).mode != "legacy_v1"
+
+
+def _resolve_retrieval_dispatch(db_path: str):
+    """Reuse a process-validated native reader instead of rescanning per query."""
+
+    from src.retrieval.dispatch import resolve_retrieval_dispatch
+
+    return resolve_retrieval_dispatch(
+        db_path,
+        validate_snapshot=True,
+    )
 
 
 def init_db() -> None:

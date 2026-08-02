@@ -5,7 +5,7 @@ import pytest
 
 from src.core import embed_pipeline, pdf_extraction
 from src.core.pdf_extraction import ExtractionResult
-from src.retrieval import build_service
+from src.retrieval import build_service, continuous_update
 
 
 def test_run_pipeline_holds_cutover_fence_for_the_whole_update(
@@ -388,7 +388,7 @@ def test_native_source_extraction_error_cannot_be_hidden_as_quickstart_success(
             "source extraction failed for report.pdf"
         )
 
-    monkeypatch.setattr(build_service, "execute_incremental_update", fail_update)
+    monkeypatch.setattr(continuous_update, "execute_continuous_update", fail_update)
 
     assert embed_pipeline.run_pipeline() == 1
     assert embed_pipeline.run_pipeline(continue_on_extraction_error=True) == 1
@@ -423,12 +423,12 @@ def test_quickstart_mode_does_not_hide_native_profile_mismatch(
             "incremental extractor differs from the active embedding profile"
         )
 
-    monkeypatch.setattr(build_service, "execute_incremental_update", reject_profile)
+    monkeypatch.setattr(continuous_update, "execute_continuous_update", reject_profile)
 
     assert embed_pipeline.run_pipeline(continue_on_extraction_error=True) == 1
 
 
-def test_run_pipeline_routes_native_runtime_to_incremental_update(
+def test_run_pipeline_routes_native_runtime_to_continuous_update(
     tmp_path,
     monkeypatch,
 ):
@@ -442,14 +442,18 @@ def test_run_pipeline_routes_native_runtime_to_incremental_update(
         paths=SimpleNamespace(data_root=data_root),
     )
     embeddings = object()
-    result = SimpleNamespace(
+    candidate_result = SimpleNamespace(
         report_count=4,
-        indexed_report_count=4,
         chunk_count=12,
-        attempted_report_uids=("report-1",),
-        deferred_report_count=0,
     )
     outcome = SimpleNamespace(publication_generation=2, write_epoch=1)
+    completed = SimpleNamespace(
+        delta_publications=(),
+        candidate_result=candidate_result,
+        publication_outcome=outcome,
+        attempted_report_uids=("report-1",),
+        failed_report_uids=(),
+    )
 
     monkeypatch.setattr(
         embed_pipeline,
@@ -476,9 +480,9 @@ def test_run_pipeline_routes_native_runtime_to_incremental_update(
 
     def fake_execute(db_path, source_directory, **kwargs):
         calls.append((db_path, source_directory, kwargs))
-        return result, outcome
+        return completed
 
-    monkeypatch.setattr(build_service, "execute_incremental_update", fake_execute)
+    monkeypatch.setattr(continuous_update, "execute_continuous_update", fake_execute)
 
     assert embed_pipeline.run_pipeline(
         test_limit=1,
@@ -494,15 +498,23 @@ def test_run_pipeline_routes_native_runtime_to_incremental_update(
     assert calls[0][2]["retry_extraction_failures"] is True
     assert calls[0][2]["use_parent_child"] is False
     assert calls[0][2]["single_chunk_size"] == 777
-    assert calls[0][2]["max_changed_reports"] == 100
-    assert calls[0][2]["skip_report_uids"] == set()
+    assert (
+        calls[0][2]["batch_size"]
+        == continuous_update.DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE
+    )
+    assert callable(calls[0][2]["progress_callback"])
+    assert "max_changed_reports" not in calls[0][2]
+    assert "skip_report_uids" not in calls[0][2]
 
 
-def test_run_pipeline_publishes_full_batches_then_the_final_partial_batch(
+def test_run_pipeline_reports_delta_batches_then_one_final_compaction(
     tmp_path,
     monkeypatch,
+    caplog,
 ):
     calls = []
+    batch_size = continuous_update.DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE
+    total_reports = batch_size * 2 + batch_size // 2
     data_root = tmp_path / "native"
     source_root = tmp_path / "pdfs"
     data_root.mkdir()
@@ -512,26 +524,38 @@ def test_run_pipeline_publishes_full_batches_then_the_final_partial_batch(
         paths=SimpleNamespace(data_root=data_root),
     )
     embeddings = object()
-    batches = [
+    deltas = [
         SimpleNamespace(
-            report_count=250,
-            indexed_report_count=100,
-            chunk_count=300,
-            attempted_report_uids=tuple(f"report-{index}" for index in range(100)),
-            deferred_report_count=150,
+            sequence=2,
+            attempted_report_uids=tuple(
+                f"report-{index}" for index in range(batch_size)
+            ),
+            published_report_uids=tuple(
+                f"report-{index}" for index in range(batch_size)
+            ),
+            failed_report_uids=(),
+            deferred_report_count=total_reports - batch_size,
         ),
         SimpleNamespace(
-            report_count=250,
-            indexed_report_count=200,
-            chunk_count=600,
-            attempted_report_uids=tuple(f"report-{index}" for index in range(100, 200)),
-            deferred_report_count=50,
+            sequence=3,
+            attempted_report_uids=tuple(
+                f"report-{index}" for index in range(batch_size, batch_size * 2)
+            ),
+            published_report_uids=tuple(
+                f"report-{index}" for index in range(batch_size, batch_size * 2)
+            ),
+            failed_report_uids=(),
+            deferred_report_count=total_reports - batch_size * 2,
         ),
         SimpleNamespace(
-            report_count=250,
-            indexed_report_count=250,
-            chunk_count=750,
-            attempted_report_uids=tuple(f"report-{index}" for index in range(200, 250)),
+            sequence=4,
+            attempted_report_uids=tuple(
+                f"report-{index}" for index in range(batch_size * 2, total_reports)
+            ),
+            published_report_uids=tuple(
+                f"report-{index}" for index in range(batch_size * 2, total_reports)
+            ),
+            failed_report_uids=(),
             deferred_report_count=0,
         ),
     ]
@@ -546,24 +570,63 @@ def test_run_pipeline_publishes_full_batches_then_the_final_partial_batch(
     monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setattr(embed_pipeline.config, "USE_PARENT_CHILD", True)
     monkeypatch.setattr(embed_pipeline, "build_embeddings_fn", lambda: embeddings)
+    monkeypatch.setattr(
+        embed_pipeline,
+        "init_db",
+        lambda: (_ for _ in ()).throw(AssertionError("legacy DB init is unreachable")),
+    )
 
     def fake_execute(_db_path, _source_directory, **kwargs):
         calls.append(kwargs)
-        result = batches[len(calls) - 1]
-        return result, SimpleNamespace(
-            publication_generation=len(calls) + 1,
-            write_epoch=len(calls),
+        for delta in deltas:
+            kwargs["progress_callback"](delta)
+        return SimpleNamespace(
+            delta_publications=tuple(deltas),
+            candidate_result=SimpleNamespace(
+                report_count=total_reports,
+                chunk_count=total_reports * 3,
+            ),
+            publication_outcome=SimpleNamespace(
+                publication_generation=5,
+                write_epoch=4,
+            ),
+            attempted_report_uids=tuple(
+                f"report-{index}" for index in range(total_reports)
+            ),
+            failed_report_uids=(),
         )
 
-    monkeypatch.setattr(build_service, "execute_incremental_update", fake_execute)
+    monkeypatch.setattr(continuous_update, "execute_continuous_update", fake_execute)
 
+    caplog.set_level("INFO", logger="src.core.embed_pipeline")
     assert embed_pipeline.run_pipeline() == 0
-    assert len(calls) == 3
+    assert len(calls) == 1
     assert all(call["embeddings"] is embeddings for call in calls)
-    assert all(call["max_changed_reports"] == 100 for call in calls)
-    assert calls[0]["skip_report_uids"] == set()
-    assert len(calls[1]["skip_report_uids"]) == 100
-    assert len(calls[2]["skip_report_uids"]) == 200
+    assert calls[0]["batch_size"] == batch_size
+    assert "max_changed_reports" not in calls[0]
+    assert "skip_report_uids" not in calls[0]
+    delta_messages = [
+        record.message
+        for record in caplog.records
+        if "Native V2 delta publication complete" in record.message
+    ]
+    assert len(delta_messages) == 3
+    assert f"processed={batch_size}" in delta_messages[0]
+    assert f"processed={batch_size * 2}" in delta_messages[1]
+    assert f"processed={total_reports}" in delta_messages[2]
+    final_compaction_messages = [
+        record.message
+        for record in caplog.records
+        if "Native V2 final compaction complete" in record.message
+    ]
+    assert len(final_compaction_messages) == 1
+    compaction_messages = [
+        record.message
+        for record in caplog.records
+        if "Native V2 update complete" in record.message
+    ]
+    assert len(compaction_messages) == 1
+    assert "deltas=3 compactions=1" in compaction_messages[0]
 
 
 def test_run_pipeline_native_runtime_keeps_default_extractor_fallback_policy(
@@ -605,21 +668,22 @@ def test_run_pipeline_native_runtime_keeps_default_extractor_fallback_policy(
 
     def fake_execute(_db_path, _source_directory, **kwargs):
         captured.update(kwargs)
-        return (
-            SimpleNamespace(
-                report_count=1,
-                indexed_report_count=1,
-                chunk_count=1,
-                attempted_report_uids=("report-1",),
-                deferred_report_count=0,
-            ),
-            SimpleNamespace(publication_generation=2, write_epoch=1),
+        return SimpleNamespace(
+            delta_publications=(),
+            candidate_result=SimpleNamespace(report_count=1, chunk_count=1),
+            publication_outcome=SimpleNamespace(publication_generation=2, write_epoch=1),
+            attempted_report_uids=("report-1",),
+            failed_report_uids=(),
         )
 
-    monkeypatch.setattr(build_service, "execute_incremental_update", fake_execute)
+    monkeypatch.setattr(continuous_update, "execute_continuous_update", fake_execute)
 
     assert embed_pipeline.run_pipeline() == 0
     assert captured["extractor_name"] == "pymupdf"
     assert captured["allow_extraction_fallback"] is True
     assert captured["fallback_extractor_name"] == "opendataloader"
     assert captured["use_parent_child"] is True
+    assert (
+        captured["batch_size"]
+        == continuous_update.DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE
+    )

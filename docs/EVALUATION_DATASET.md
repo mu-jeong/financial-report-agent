@@ -3,16 +3,17 @@
 ## 현재 상태
 
 2026-07-30 기준으로 이 저장소에는 정식 evaluation fixture, multi-turn
-evaluation dataset, fixed snapshot이 없다. 기존 `tests/fixtures` 데이터와
-그 데이터에서 생성된 과거 evaluation run은 제거했다.
+evaluation dataset과 승인된 Native V2 평가 revision이 없다. 기존
+`tests/fixtures` 데이터와 그 데이터에서 생성된 과거 evaluation run은
+제거했다.
 
 따라서 현재 코드와 테스트는 다음 파일이 존재한다고 가정하면 안 된다.
 
 - `tests/fixtures/evaluation_dataset.json`
 - `tests/fixtures/multiturn_evaluation_dataset.json`
 - `tests/fixtures/eval_snapshot/manifest.json`
-- `tests/fixtures/eval_snapshot/reports.db`
-- `tests/fixtures/eval_snapshot/vector_db/*`
+- `tests/fixtures/eval_snapshot/retrieval/v2/catalog.sqlite3`
+- `tests/fixtures/eval_snapshot/retrieval/v2/snapshots/*`
 
 평가 실행기와 검증 코드는 미래 데이터에 사용할 계약으로만 유지한다.
 파일이 없으면 Monitoring UI는 평가 기능을 준비 중으로 표시하고, 데이터
@@ -32,8 +33,9 @@ baseline으로 간주해서는 안 된다.
    - route, filter, source, citation, RDB 집계 기대값을 검토한다.
    - 정확성 우선·균형·속도 우선 프로필별 대표 case를 포함한다.
    - 후속 질문과 이전 검색 범위 재사용 case도 별도 dataset으로 만든다.
-3. 동일한 데이터 revision으로 fixed snapshot을 만든다.
-   - DB, vector index, manifest를 한 번에 생성한다.
+3. 동일한 데이터 revision으로 Native V2 평가 bundle을 만든다.
+   - V2 catalog, immutable base snapshot, 필요한 delta segment와 manifest를
+     한 번에 고정한다.
    - manifest에는 data/index revision, 행 수, 날짜 범위, 모델·설정
      fingerprint와 파일 hash를 기록한다.
    - dataset과 snapshot 중 하나만 단독으로 갱신하지 않는다.
@@ -50,9 +52,10 @@ baseline으로 간주해서는 안 된다.
 
 ## 생성 시 주의사항
 
-현재 `scripts/build_evaluation_dataset.py`는 V1-compatible `reports` schema
-전용이다. 실제 기준 데이터가 V2 catalog라면 생성 전에 V2 adapter를
-구현하고 별도로 검증해야 한다.
+현재 `scripts/build_evaluation_dataset.py`와 과거 snapshot runner는 호환성
+검증용 `reports` schema를 전제로 하며 활성 Monitoring UI가 호출하지 않는다.
+정식 기준 데이터를 만들기 전에 Native V2 catalog adapter와 요청 단위
+revision pinning runner를 구현하고 별도로 검증해야 한다.
 
 PDF 본문, 전체 대화 원문, API 응답 전문은 evaluation fixture에 넣지
 않는다. 재현에 필요한 질문, 비식별 metadata, 기대 결과와 revision/hash만
@@ -63,11 +66,11 @@ PDF 본문, 전체 대화 원문, API 응답 전문은 evaluation fixture에 넣
 
 ## 완료 조건
 
-다음 조건을 모두 만족해야 “정식 fixture와 fixed snapshot이 준비됨”으로
-간주한다.
+다음 조건을 모두 만족해야 “정식 fixture와 Native V2 평가 revision이
+준비됨”으로 간주한다.
 
-- dataset과 snapshot이 동일한 승인된 data revision을 가리킨다.
-- 모든 기대 source가 snapshot에 존재한다.
+- dataset과 V2 bundle이 동일한 승인된 data/index revision을 가리킨다.
+- 모든 기대 source가 고정된 V2 composite revision에 존재한다.
 - 재현 manifest가 완전하고 파일 hash 검증을 통과한다.
 - 정확성·안전성 공통 하드 게이트가 모든 품질 프로필에 포함된다.
 - 반복 latency 측정과 p95 산정 조건이 기록되어 있다.

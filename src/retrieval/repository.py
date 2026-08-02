@@ -12,12 +12,18 @@ import sqlite3
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 from urllib.parse import quote
 
+from src.retrieval.composite_index import CompositeArtifact, CompositeVectorIndex
+from src.retrieval.delta_overlay import (
+    ActiveDeltaOverlay,
+    DeltaSegmentRecord,
+    read_active_delta_overlay,
+)
 from src.retrieval.vector_index import (
     RawVectorIndex,
     SearchResult,
@@ -118,10 +124,20 @@ class SnapshotRevision:
     profile_id: str
     snapshot_path: Path
     descriptor: SnapshotDescriptor
+    delta_generation: int = 0
+    delta_segment_count: int = 0
 
     @property
     def key(self) -> tuple[int, str]:
         return (self.publication_generation, self.snapshot_id)
+
+    @property
+    def view_key(self) -> tuple[int, str, int]:
+        return (
+            self.publication_generation,
+            self.snapshot_id,
+            self.delta_generation,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +148,7 @@ class RankedCandidate:
     publication_generation: int
     physical_id: int
     score: float
+    delta_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -592,6 +609,10 @@ class SnapshotSession:
         self._ensure_active()
         return self._snapshot_handle.index
 
+    @property
+    def total_count(self) -> int:
+        return self.revision.descriptor.ntotal
+
     def _release(self) -> None:
         self._released = True
 
@@ -862,6 +883,7 @@ class SnapshotSession:
                 publication_generation=self.revision.publication_generation,
                 physical_id=result.physical_id,
                 score=result.score,
+                delta_generation=self.revision.delta_generation,
             )
             for result in results
         )
@@ -875,10 +897,464 @@ class SnapshotSession:
                 candidate.snapshot_id != self.revision.snapshot_id
                 or candidate.publication_generation
                 != self.revision.publication_generation
+                or candidate.delta_generation != self.revision.delta_generation
             ):
                 raise CrossSnapshotMembershipError(
                     'ranked candidate belongs to a different snapshot revision'
                 )
+
+
+@dataclass(frozen=True, slots=True)
+class _CompositeSessionArtifact:
+    artifact_id: str
+    offset: int
+    sequence: int
+    revision: SnapshotRevision
+    handle: CachedSnapshotHandle
+    kind: str
+    visible_local_ids: frozenset[int] | None = None
+    hidden_local_ids: frozenset[int] = frozenset()
+
+    @property
+    def local_total(self) -> int:
+        return self.revision.descriptor.ntotal
+
+    def contains_virtual_id(self, physical_id: int) -> bool:
+        return self.offset < physical_id <= self.offset + self.local_total
+
+    def local_id(self, physical_id: int) -> int:
+        return physical_id - self.offset
+
+    def virtual_id(self, local_id: int) -> int:
+        return self.offset + local_id
+
+    def is_visible(self, local_id: int) -> bool:
+        if local_id in self.hidden_local_ids:
+            return False
+        return self.visible_local_ids is None or local_id in self.visible_local_ids
+
+
+class CompositeSnapshotSession(SnapshotSession):
+    '''One request pinned to a base snapshot and its committed sparse head.'''
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        revision: SnapshotRevision,
+        base_revision: SnapshotRevision,
+        base_handle: CachedSnapshotHandle,
+        overlay: ActiveDeltaOverlay,
+        delta_handles: tuple[
+            tuple[DeltaSegmentRecord, SnapshotRevision, CachedSnapshotHandle], ...
+        ],
+        query_batch_size: int,
+    ) -> None:
+        super().__init__(
+            connection,
+            revision,
+            base_handle,
+            query_batch_size,
+        )
+        self._overlay = overlay
+        head_by_path = overlay.head_by_path
+        hidden_base_ids: set[int] = set()
+        head_paths = tuple(sorted(head_by_path))
+        for path_batch in _batches(head_paths, query_batch_size):
+            placeholders = ','.join('?' for _ in path_batch)
+            rows = connection.execute(
+                f'''
+                SELECT membership.faiss_id
+                FROM {_ELIGIBILITY_FROM}
+                WHERE membership.snapshot_id = ?
+                  AND report.canonical_relative_path IN ({placeholders})
+                ''',
+                (base_revision.snapshot_id, *path_batch),
+            ).fetchall()
+            hidden_base_ids.update(int(row[0]) for row in rows)
+
+        artifacts: list[_CompositeSessionArtifact] = [
+            _CompositeSessionArtifact(
+                artifact_id=base_revision.snapshot_id,
+                offset=0,
+                sequence=0,
+                revision=base_revision,
+                handle=base_handle,
+                kind='base',
+                hidden_local_ids=frozenset(hidden_base_ids),
+            )
+        ]
+        offset = base_revision.descriptor.ntotal
+        for segment, artifact_revision, handle in delta_handles:
+            rows = connection.execute(
+                '''
+                SELECT membership.faiss_id, report.canonical_relative_path
+                FROM retrieval_delta_membership AS membership
+                JOIN retrieval_chunks AS chunk
+                  ON chunk.chunk_uid = membership.chunk_uid
+                JOIN retrieval_parents AS parent
+                  ON parent.parent_uid = chunk.parent_uid
+                 AND parent.profile_id = chunk.profile_id
+                JOIN reports AS report ON report.report_id = parent.report_id
+                WHERE membership.segment_id = ?
+                ORDER BY membership.faiss_id
+                ''',
+                (segment.segment_id,),
+            ).fetchall()
+            visible = frozenset(
+                int(row[0])
+                for row in rows
+                if (
+                    (head := head_by_path.get(str(row[1]))) is not None
+                    and head.action == 'upsert'
+                    and head.segment_id == segment.segment_id
+                )
+            )
+            artifacts.append(
+                _CompositeSessionArtifact(
+                    artifact_id=segment.segment_id,
+                    offset=offset,
+                    sequence=segment.sequence,
+                    revision=artifact_revision,
+                    handle=handle,
+                    kind='delta',
+                    visible_local_ids=visible,
+                )
+            )
+            offset += artifact_revision.descriptor.ntotal
+        self._artifacts = tuple(artifacts)
+        self._artifact_by_id = {
+            artifact.artifact_id: artifact for artifact in self._artifacts
+        }
+        self._logical_total = (
+            base_revision.descriptor.ntotal
+            - len(hidden_base_ids)
+            + sum(
+                len(artifact.visible_local_ids or ())
+                for artifact in self._artifacts
+                if artifact.kind == 'delta'
+            )
+        )
+        self._composite_index: CompositeVectorIndex | None = None
+
+    @property
+    def total_count(self) -> int:
+        return self._logical_total
+
+    @property
+    def index(self) -> CompositeVectorIndex:
+        self._ensure_active()
+        if self._composite_index is None:
+            self._composite_index = CompositeVectorIndex(
+                tuple(
+                    CompositeArtifact(
+                        artifact_id=artifact.artifact_id,
+                        offset=artifact.offset,
+                        index=artifact.handle.index,
+                        visible_local_ids=artifact.visible_local_ids,
+                        hidden_local_ids=artifact.hidden_local_ids,
+                    )
+                    for artifact in self._artifacts
+                )
+            )
+        return self._composite_index
+
+    def eligible_count(self, scope: CompiledScope) -> int:
+        self._ensure_active()
+        if scope.is_empty:
+            return 0
+        if scope.is_unfiltered:
+            return self.total_count
+        return sum(len(self._eligible_local_ids(artifact, scope)) for artifact in self._artifacts)
+
+    def eligible_physical_ids(
+        self,
+        scope: CompiledScope,
+        *,
+        expected_count: int | None = None,
+    ) -> tuple[int, ...]:
+        self._ensure_active()
+        if scope.is_empty:
+            return ()
+        if scope.is_unfiltered:
+            raise RepositoryError(
+                'universal scope must not materialize an N-sized allowed-ID set'
+            )
+        values = tuple(
+            artifact.virtual_id(local_id)
+            for artifact in self._artifacts
+            for local_id in self._eligible_local_ids(artifact, scope)
+        )
+        if expected_count is not None and len(values) != expected_count:
+            raise SnapshotValidationError(
+                'selector eligibility changed inside one request transaction'
+            )
+        return values
+
+    def filter_candidates(
+        self,
+        candidates: Sequence[RankedCandidate],
+        scope: CompiledScope,
+    ) -> tuple[RankedCandidate, ...]:
+        self._ensure_active()
+        self._validate_candidate_revisions(candidates)
+        if not candidates or scope.is_empty:
+            return ()
+        _reject_duplicate_physical_ids(candidates)
+        if scope.is_unfiltered:
+            return tuple(
+                candidate
+                for candidate in candidates
+                if self._artifact_for_virtual_id(candidate.physical_id).is_visible(
+                    self._artifact_for_virtual_id(candidate.physical_id).local_id(
+                        candidate.physical_id
+                    )
+                )
+            )
+        eligible_by_artifact: dict[str, set[int]] = {}
+        for artifact in self._artifacts:
+            local_candidates = {
+                artifact.local_id(candidate.physical_id)
+                for candidate in candidates
+                if artifact.contains_virtual_id(candidate.physical_id)
+                and artifact.is_visible(artifact.local_id(candidate.physical_id))
+            }
+            if not local_candidates:
+                continue
+            eligible_by_artifact[artifact.artifact_id] = self._matching_local_ids(
+                artifact,
+                tuple(sorted(local_candidates)),
+                scope,
+            )
+        return tuple(
+            candidate
+            for candidate in candidates
+            if (
+                (artifact := self._artifact_for_virtual_id(candidate.physical_id))
+                and artifact.local_id(candidate.physical_id)
+                in eligible_by_artifact.get(artifact.artifact_id, set())
+            )
+        )
+
+    def _hydrate_physical_results(
+        self,
+        physical_ids: Sequence[int],
+        scores: Sequence[float],
+        scope: CompiledScope | None,
+    ) -> tuple[RetrievedChunk, ...]:
+        if len(physical_ids) != len(scores):
+            raise SnapshotValidationError('ranked result columns have different lengths')
+        if len(physical_ids) == 0:
+            return ()
+        payloads: list[_HydrationPayload | None] = [None] * len(physical_ids)
+        remembered_by_artifact: dict[str, dict[int, _HydrationPayload]] = {}
+        for artifact in self._artifacts:
+            positions = [
+                index
+                for index, physical_id in enumerate(physical_ids)
+                if artifact.contains_virtual_id(int(physical_id))
+            ]
+            if not positions:
+                continue
+            local_ids = [artifact.local_id(int(physical_ids[index])) for index in positions]
+            if any(not artifact.is_visible(local_id) for local_id in local_ids):
+                raise CrossSnapshotMembershipError(
+                    'ranked candidate is hidden in the pinned composite revision'
+                )
+            cached = (
+                artifact.handle.hydration_payloads(local_ids)
+                if scope is None or scope.is_unfiltered
+                else [None] * len(local_ids)
+            )
+            for position, payload in zip(positions, cached, strict=True):
+                payloads[position] = payload
+            pending = [
+                (position, local_id)
+                for position, local_id, payload in zip(positions, local_ids, cached, strict=True)
+                if payload is None
+            ]
+            self.hydration_cache_hits += len(local_ids) - len(pending)
+            self.hydration_cache_misses += len(pending)
+            for pending_batch in _batches(pending, self._query_batch_size):
+                ids = tuple(local_id for _position, local_id in pending_batch)
+                rows = self._select_payload_rows(artifact, ids, scope)
+                self.hydration_sql_batches += 1
+                self.hydration_sql_rows += len(rows)
+                row_by_id = {int(row['faiss_id']): row for row in rows}
+                for position, local_id in pending_batch:
+                    row = row_by_id.get(local_id)
+                    if row is None:
+                        continue
+                    payload = _hydration_payload(row)
+                    payloads[position] = payload
+                    remembered_by_artifact.setdefault(artifact.artifact_id, {})[
+                        local_id
+                    ] = payload
+        for artifact_id, remembered in remembered_by_artifact.items():
+            self._artifact_by_id[artifact_id].handle.remember_hydration_rows(remembered)
+        missing = [
+            physical_ids[index]
+            for index, payload in enumerate(payloads)
+            if payload is None
+        ]
+        if missing:
+            raise CrossSnapshotMembershipError(
+                'ranked candidates are absent from the pinned composite scope: '
+                + ', '.join(str(value) for value in missing[:10])
+            )
+        return tuple(
+            RetrievedChunk(
+                rank,
+                float(score),
+                int(physical_id),
+                self.revision.snapshot_id,
+                self.revision.publication_generation,
+                payload,
+            )
+            for rank, (physical_id, score, payload) in enumerate(
+                zip(physical_ids, scores, payloads, strict=True),
+                1,
+            )
+        )
+
+    def _eligible_local_ids(
+        self,
+        artifact: _CompositeSessionArtifact,
+        scope: CompiledScope,
+    ) -> tuple[int, ...]:
+        rows = self._select_membership_rows(artifact, scope)
+        return tuple(
+            local_id
+            for row in rows
+            if artifact.is_visible(local_id := int(row[0]))
+        )
+
+    def _matching_local_ids(
+        self,
+        artifact: _CompositeSessionArtifact,
+        local_ids: Sequence[int],
+        scope: CompiledScope,
+    ) -> set[int]:
+        matched: set[int] = set()
+        for id_batch in _batches(local_ids, self._query_batch_size):
+            placeholders = ','.join('?' for _ in id_batch)
+            rows = self._connection.execute(
+                f'''
+                SELECT membership.faiss_id
+                FROM {self._eligibility_from(artifact)}
+                WHERE membership.{self._membership_key(artifact)} = ?
+                  AND membership.faiss_id IN ({placeholders})
+                  AND ({scope.predicate_sql})
+                ''',
+                (
+                    artifact.artifact_id,
+                    *id_batch,
+                    *scope.parameters,
+                ),
+            ).fetchall()
+            matched.update(int(row[0]) for row in rows)
+        return matched
+
+    def _select_membership_rows(
+        self,
+        artifact: _CompositeSessionArtifact,
+        scope: CompiledScope,
+    ) -> list[sqlite3.Row]:
+        return self._connection.execute(
+            f'''
+            SELECT membership.faiss_id
+            FROM {self._eligibility_from(artifact)}
+            WHERE membership.{self._membership_key(artifact)} = ?
+              AND ({scope.predicate_sql})
+            ORDER BY membership.faiss_id
+            ''',
+            (artifact.artifact_id, *scope.parameters),
+        ).fetchall()
+
+    def _select_payload_rows(
+        self,
+        artifact: _CompositeSessionArtifact,
+        local_ids: Sequence[int],
+        scope: CompiledScope | None,
+    ) -> list[sqlite3.Row]:
+        placeholders = ','.join('?' for _ in local_ids)
+        predicate = ''
+        scope_parameters: tuple[object, ...] = ()
+        if scope is not None and not scope.is_unfiltered:
+            if scope.is_empty:
+                return []
+            predicate = f' AND ({scope.predicate_sql})'
+            scope_parameters = scope.parameters
+        return self._connection.execute(
+            f'''
+            SELECT
+                membership.faiss_id,
+                chunk.chunk_uid,
+                chunk.parent_uid,
+                chunk.profile_id,
+                chunk.child_order,
+                chunk.span_start,
+                chunk.span_end,
+                parent.report_id,
+                substr(
+                    parent.content,
+                    chunk.span_start + 1,
+                    chunk.span_end - chunk.span_start
+                ) AS parent_slice,
+                report.report_uid,
+                report.canonical_relative_path,
+                report.source_sha256,
+                report.retrieval_metadata_sha256,
+                report.report_type,
+                report.report_date,
+                report.target_name,
+                report.title,
+                report.broker
+            FROM {self._eligibility_from(artifact)}
+            WHERE membership.{self._membership_key(artifact)} = ?
+              AND membership.faiss_id IN ({placeholders})
+              {predicate}
+            ''',
+            (
+                artifact.artifact_id,
+                *local_ids,
+                *scope_parameters,
+            ),
+        ).fetchall()
+
+    @staticmethod
+    def _membership_key(artifact: _CompositeSessionArtifact) -> str:
+        return 'snapshot_id' if artifact.kind == 'base' else 'segment_id'
+
+    @staticmethod
+    def _eligibility_from(artifact: _CompositeSessionArtifact) -> str:
+        if artifact.kind == 'base':
+            return _ELIGIBILITY_FROM
+        return '''
+            retrieval_delta_membership AS membership
+            JOIN retrieval_chunks AS chunk
+              ON chunk.chunk_uid = membership.chunk_uid
+            JOIN retrieval_parents AS parent
+              ON parent.parent_uid = chunk.parent_uid
+             AND parent.profile_id = chunk.profile_id
+            JOIN reports AS report
+              ON report.report_id = parent.report_id
+        '''
+
+    def _artifact_for_virtual_id(self, physical_id: int) -> _CompositeSessionArtifact:
+        for artifact in self._artifacts:
+            if artifact.contains_virtual_id(physical_id):
+                return artifact
+        raise CrossSnapshotMembershipError(
+            'physical ID is outside the pinned composite revision'
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _PinnedRevision:
+    revision: SnapshotRevision
+    base_revision: SnapshotRevision
+    overlay: ActiveDeltaOverlay
+    delta_revisions: tuple[tuple[DeltaSegmentRecord, SnapshotRevision], ...]
 
 
 class CatalogRepository:
@@ -918,23 +1394,72 @@ class CatalogRepository:
         self._closed = False
 
     @contextmanager
-    def request(self) -> Iterator[SnapshotSession]:
-        '''Acquire exactly one active generation for an entire read request.'''
+    def request(
+        self,
+        *,
+        materialize_indexes: bool = True,
+    ) -> Iterator[SnapshotSession]:
+        '''Acquire exactly one base-plus-delta generation for one read request.'''
 
         connection, persistent = self._acquire_request_connection()
         session: SnapshotSession | None = None
         try:
             connection.execute('BEGIN')
-            revision = self._read_active_revision(connection)
-            with self.cache.lease(
-                revision,
-                validate=lambda: self._validate_revision(connection, revision),
-            ) as snapshot_handle:
-                session = SnapshotSession(
-                    connection,
-                    revision,
-                    snapshot_handle,
-                    self.query_batch_size,
+            pinned = self._read_active_view(connection)
+            with ExitStack() as stack:
+                base_handle = stack.enter_context(
+                    self.cache.lease(
+                        pinned.base_revision,
+                        validate=lambda: self._validate_revision(
+                            connection,
+                            pinned.base_revision,
+                        ),
+                    )
+                )
+                delta_handles = tuple(
+                    (
+                        segment,
+                        artifact_revision,
+                        stack.enter_context(
+                            self.cache.lease(
+                                artifact_revision,
+                                validate=lambda segment=segment,
+                                artifact_revision=artifact_revision: self._validate_delta_revision(
+                                    connection,
+                                    segment,
+                                    artifact_revision,
+                                ),
+                            )
+                        ),
+                    )
+                    for segment, artifact_revision in pinned.delta_revisions
+                )
+                self._evict_stale_cached_revisions(pinned)
+                if materialize_indexes:
+                    # A search-capable request can outlive two publications in
+                    # a different process. Materialize every pinned artifact
+                    # now so later base-GC unlink cannot break its first FAISS
+                    # call. Provably empty scopes opt out in the reader.
+                    _ = base_handle.index
+                    for _segment, _revision, handle in delta_handles:
+                        _ = handle.index
+                session = (
+                    SnapshotSession(
+                        connection,
+                        pinned.revision,
+                        base_handle,
+                        self.query_batch_size,
+                    )
+                    if not pinned.overlay.heads
+                    else CompositeSnapshotSession(
+                        connection,
+                        pinned.revision,
+                        pinned.base_revision,
+                        base_handle,
+                        pinned.overlay,
+                        delta_handles,
+                        self.query_batch_size,
+                    )
                 )
                 try:
                     yield session
@@ -949,6 +1474,24 @@ class CatalogRepository:
         '''Compatibility name for ``request()`` returning the context manager.'''
 
         return self.request()
+
+    def _evict_stale_cached_revisions(self, pinned: _PinnedRevision) -> None:
+        active_artifact_ids = {
+            pinned.base_revision.snapshot_id,
+            *(
+                revision.snapshot_id
+                for _segment, revision in pinned.delta_revisions
+            ),
+        }
+        for revision in self.cache.cached_revisions():
+            if revision.snapshot_id in active_artifact_ids:
+                continue
+            try:
+                self.cache.evict(revision)
+            except SnapshotInUseError:
+                # A request that pinned the previous composite revision still
+                # owns this handle.  A later request retries after it releases.
+                continue
 
     def close(self) -> None:
         '''Close idle read connections owned by this repository instance.'''
@@ -1141,6 +1684,80 @@ class CatalogRepository:
                 self._revision_cache.pop(next(iter(self._revision_cache)))
         return revision
 
+    def _read_active_view(self, connection: sqlite3.Connection) -> _PinnedRevision:
+        base_revision = self._read_active_revision(connection)
+        overlay = read_active_delta_overlay(
+            connection,
+            base_snapshot_id=base_revision.snapshot_id,
+            base_publication_generation=base_revision.publication_generation,
+        )
+        if not overlay.heads:
+            return _PinnedRevision(
+                base_revision,
+                base_revision,
+                overlay,
+                (),
+            )
+        active_segment_ids = {
+            head.segment_id
+            for head in overlay.heads
+            if head.action == 'upsert'
+        }
+        delta_revisions: list[tuple[DeltaSegmentRecord, SnapshotRevision]] = []
+        for segment in overlay.segments:
+            if segment.segment_id not in active_segment_ids or segment.descriptor.ntotal == 0:
+                continue
+            if (
+                segment.descriptor.dimension != base_revision.descriptor.dimension
+                or segment.descriptor.metric != base_revision.descriptor.metric
+            ):
+                raise SnapshotValidationError(
+                    'delta segment descriptor does not match the active base profile'
+                )
+            if segment.relative_path is None:
+                raise SnapshotValidationError(
+                    'non-empty delta segment is missing its artifact path'
+                )
+            relative_path = PurePosixPath(segment.relative_path)
+            artifact_path = self.data_root.joinpath(*relative_path.parts).resolve()
+            try:
+                artifact_path.relative_to(self.data_root)
+            except ValueError as exc:
+                raise SnapshotValidationError(
+                    'delta segment path escapes the selected data root'
+                ) from exc
+            delta_revisions.append(
+                (
+                    segment,
+                    SnapshotRevision(
+                        catalog_path=self.catalog_path,
+                        publication_generation=base_revision.publication_generation,
+                        snapshot_id=segment.segment_id,
+                        build_id=base_revision.build_id,
+                        profile_id=base_revision.profile_id,
+                        snapshot_path=artifact_path,
+                        descriptor=segment.descriptor,
+                    ),
+                )
+            )
+        revision = SnapshotRevision(
+            catalog_path=base_revision.catalog_path,
+            publication_generation=base_revision.publication_generation,
+            snapshot_id=base_revision.snapshot_id,
+            build_id=base_revision.build_id,
+            profile_id=base_revision.profile_id,
+            snapshot_path=base_revision.snapshot_path,
+            descriptor=base_revision.descriptor,
+            delta_generation=overlay.generation,
+            delta_segment_count=len(overlay.segments),
+        )
+        return _PinnedRevision(
+            revision,
+            base_revision,
+            overlay,
+            tuple(delta_revisions),
+        )
+
     def _validate_membership(
         self,
         connection: sqlite3.Connection,
@@ -1208,6 +1825,60 @@ class CatalogRepository:
     ) -> None:
         self._validate_snapshot_file(revision)
         self._validate_membership(connection, revision)
+
+    def _validate_delta_revision(
+        self,
+        connection: sqlite3.Connection,
+        segment: DeltaSegmentRecord,
+        revision: SnapshotRevision,
+    ) -> None:
+        row = connection.execute(
+            '''
+            SELECT base_snapshot_id, base_publication_generation, sequence,
+                   relative_path, file_sha256, size_bytes, dimension, metric,
+                   ntotal, state
+            FROM retrieval_delta_segments
+            WHERE segment_id = ?
+            ''',
+            (segment.segment_id,),
+        ).fetchone()
+        expected = (
+            self._read_active_revision(connection).snapshot_id,
+            revision.publication_generation,
+            segment.sequence,
+            segment.relative_path,
+            segment.descriptor.sha256,
+            segment.descriptor.size_bytes,
+            segment.descriptor.dimension,
+            segment.descriptor.metric,
+            segment.descriptor.ntotal,
+            'ready',
+        )
+        if row is None or tuple(row) != expected:
+            raise SnapshotValidationError(
+                'delta segment changed inside the pinned request transaction'
+            )
+        self._validate_snapshot_file(revision)
+        counts = connection.execute(
+            '''
+            SELECT count(*), count(DISTINCT faiss_id), count(DISTINCT chunk_uid),
+                   min(faiss_id), max(faiss_id)
+            FROM retrieval_delta_membership
+            WHERE segment_id = ?
+            ''',
+            (segment.segment_id,),
+        ).fetchone()
+        expected_total = revision.descriptor.ntotal
+        if tuple(counts) != (
+            expected_total,
+            expected_total,
+            expected_total,
+            1,
+            expected_total,
+        ):
+            raise SnapshotValidationError(
+                'delta membership does not match its artifact descriptor'
+            )
 
     @staticmethod
     def _validate_snapshot_file(revision: SnapshotRevision) -> None:

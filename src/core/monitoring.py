@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
 import time
 import uuid
@@ -45,6 +46,17 @@ _PERFORMANCE_CHECK = "performance_p95_pass"
 _CORRECTNESS_CHECKS = (
     _AUTOMATIC_CHECKS - {"latency_pass"}
 ) | {_MANUAL_CHECK}
+_NATIVE_V2_DATA_SOURCE_FIELDS = {
+    "backend_mode",
+    "runtime_mode",
+    "snapshot_id",
+    "build_id",
+    "profile_hash",
+    "publication_generation",
+    "write_epoch",
+    "v1_fallback_open",
+    "degraded",
+}
 _ALL_HARD_CHECKS = _AUTOMATIC_CHECKS | {
     _MANUAL_CHECK,
     _PERFORMANCE_CHECK,
@@ -311,6 +323,32 @@ def summarize_evaluation_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _message_has_native_v2_provenance(message: Mapping[str, Any]) -> bool:
+    metadata = message.get("metadata")
+    runtime = (
+        metadata.get("retrieval_runtime")
+        if isinstance(metadata, Mapping)
+        else None
+    )
+    if not isinstance(runtime, Mapping):
+        return False
+    generation = runtime.get("publication_generation")
+    write_epoch = runtime.get("write_epoch")
+    return (
+        runtime.get("mode") == "native"
+        and isinstance(runtime.get("active_snapshot_id"), str)
+        and bool(runtime.get("active_snapshot_id"))
+        and isinstance(generation, int)
+        and not isinstance(generation, bool)
+        and generation > 0
+        and isinstance(write_epoch, int)
+        and not isinstance(write_epoch, bool)
+        and write_epoch > 0
+        and runtime.get("v1_fallback_open") is False
+        and runtime.get("degraded") is False
+    )
+
+
 def summarize_chat_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """본문 전체를 노출하지 않고 chat metadata를 요약합니다."""
     assistant_messages = [
@@ -335,8 +373,15 @@ def summarize_chat_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     latencies = [
         float((message.get("metadata") or {}).get("latency_seconds"))
         for message in assistant_messages
-        if isinstance((message.get("metadata") or {}).get("latency_seconds"), (int, float))
+        if (
+            _message_has_native_v2_provenance(message)
+            and isinstance(
+                (message.get("metadata") or {}).get("latency_seconds"),
+                (int, float),
+            )
+        )
     ]
+    latencies.sort()
 
     return {
         "message_count": len(messages),
@@ -358,6 +403,108 @@ def summarize_chat_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
             if latencies
             else None
         ),
+        "p95_latency_seconds": (
+            _percentile(latencies, 0.95) if latencies else None
+        ),
+        "latency_sample_count": len(latencies),
+    }
+
+
+def _duration_seconds(value: Any) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    duration = float(value)
+    if not math.isfinite(duration) or duration < 0:
+        return None
+    return duration
+
+
+def _duration_seconds_from_ns(value: Any) -> float | None:
+    duration_ns = _duration_seconds(value)
+    return None if duration_ns is None else duration_ns / 1_000_000_000
+
+
+def build_chat_latency_rows(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return successful Native V2 response timings for one conversation."""
+
+    rows: list[dict[str, Any]] = []
+    for message in messages:
+        if (
+            message.get("role") != "assistant"
+            or not _message_has_native_v2_provenance(message)
+        ):
+            continue
+        metadata = message.get("metadata") or {}
+        if metadata.get("status") != "succeeded":
+            continue
+        route = metadata.get("route")
+        monitoring = metadata.get("monitoring") or {}
+        rdb = monitoring.get("rdb") or {}
+        retrieval = monitoring.get("retrieval") or {}
+        response_seconds = _duration_seconds(metadata.get("latency_seconds"))
+        rdb_seconds = (
+            _duration_seconds_from_ns(rdb.get("query_ns"))
+            if route == "rdb"
+            else None
+        )
+        vector_seconds = (
+            _duration_seconds_from_ns(retrieval.get("native_total_ns"))
+            if route == "vectordb"
+            else None
+        )
+        if response_seconds is None and rdb_seconds is None and vector_seconds is None:
+            continue
+        rows.append(
+            {
+                "created_at": message.get("created_at"),
+                "route": route,
+                "response_seconds": response_seconds,
+                "rdb_seconds": rdb_seconds,
+                "vector_seconds": vector_seconds,
+            }
+        )
+    return rows
+
+
+def summarize_chat_latency_metrics(
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize current-thread response and backend durations."""
+
+    rows = build_chat_latency_rows(messages)
+    response_values = [
+        row["response_seconds"]
+        for row in rows
+        if row["response_seconds"] is not None
+    ]
+    rdb_values = [
+        row["rdb_seconds"] for row in rows if row["rdb_seconds"] is not None
+    ]
+    vector_values = [
+        row["vector_seconds"]
+        for row in rows
+        if row["vector_seconds"] is not None
+    ]
+    return {
+        "latest_response_seconds": (
+            response_values[-1] if response_values else None
+        ),
+        "avg_response_seconds": (
+            sum(response_values) / len(response_values)
+            if response_values
+            else None
+        ),
+        "response_sample_count": len(response_values),
+        "avg_rdb_seconds": (
+            sum(rdb_values) / len(rdb_values) if rdb_values else None
+        ),
+        "rdb_sample_count": len(rdb_values),
+        "avg_vector_seconds": (
+            sum(vector_values) / len(vector_values)
+            if vector_values
+            else None
+        ),
+        "vector_sample_count": len(vector_values),
     }
 
 
@@ -982,6 +1129,7 @@ def run_multiturn_evaluation_dataset(
             }
         )
     run = {
+        "schema_version": 2,
         "run_id": run_id,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "dataset_name": dataset.get("name"),
@@ -996,9 +1144,8 @@ def run_multiturn_evaluation_dataset(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     json_path = output_path / f"multiturn_evaluation_run_{run_id}.json"
-    artifact_io.atomic_write_json(json_path, run)
-    run["json_path"] = str(json_path)
-    return run
+    run["run_hash"] = compute_evaluation_run_hash(run)
+    return _persist_evaluation_run(json_path, run)
 
 
 def _source_names(items: list[dict[str, Any]]) -> set[str]:
@@ -1122,6 +1269,14 @@ def evaluate_dataset_case_result(
     failed_checks = [
         check for check in active_checks if check_results.get(check) is not True
     ]
+    correctness_checks = [
+        check for check in active_checks if check in _CORRECTNESS_CHECKS
+    ]
+    accuracy_pass = (
+        all(check_results.get(check) is True for check in correctness_checks)
+        if correctness_checks
+        else None
+    )
     passed = not failed_checks
     return {
         "case_id": case.get("id"),
@@ -1130,6 +1285,7 @@ def evaluate_dataset_case_result(
         "active_checks": active_checks,
         "check_results": check_results,
         "failed_checks": failed_checks,
+        "accuracy_pass": accuracy_pass,
         "actual_route": final_state.get("route"),
         "expected_route": case.get("expected_route"),
         "route_pass": route_pass,
@@ -1147,11 +1303,169 @@ def evaluate_dataset_case_result(
     }
 
 
+def _summarize_correctness_results(
+    results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    unavailable = {
+        "accuracy_rate": None,
+        "passed": 0,
+        "case_count": 0,
+        "measured": False,
+    }
+    outcomes: list[bool] = []
+    for result in results:
+        if not isinstance(result, Mapping):
+            continue
+        accuracy_checks = [
+            str(check)
+            for check in result.get("active_checks") or []
+            if str(check) in _CORRECTNESS_CHECKS
+        ]
+        if not accuracy_checks:
+            continue
+        stored_outcome = result.get("accuracy_pass")
+        if isinstance(stored_outcome, bool):
+            outcomes.append(stored_outcome)
+            continue
+        check_results = result.get("check_results")
+        check_results = (
+            check_results if isinstance(check_results, Mapping) else result
+        )
+        outcomes.append(
+            all(check_results.get(check) is True for check in accuracy_checks)
+        )
+
+    if not outcomes:
+        return unavailable
+    passed = sum(outcomes)
+    return {
+        "accuracy_rate": passed / len(outcomes),
+        "passed": passed,
+        "case_count": len(outcomes),
+        "measured": True,
+    }
+
+
+def is_native_v2_evaluation_data_source(value: Any) -> bool:
+    """Return whether run provenance identifies one successor V2 revision."""
+
+    if not isinstance(value, Mapping):
+        return False
+    if not _NATIVE_V2_DATA_SOURCE_FIELDS.issubset(value):
+        return False
+    generation = value.get("publication_generation")
+    write_epoch = value.get("write_epoch")
+    return (
+        value.get("backend_mode") == "native_v2"
+        and value.get("runtime_mode") == "native"
+        and isinstance(value.get("snapshot_id"), str)
+        and bool(value.get("snapshot_id"))
+        and isinstance(value.get("build_id"), str)
+        and bool(value.get("build_id"))
+        and isinstance(value.get("profile_hash"), str)
+        and bool(value.get("profile_hash"))
+        and isinstance(generation, int)
+        and not isinstance(generation, bool)
+        and generation > 0
+        and isinstance(write_epoch, int)
+        and not isinstance(write_epoch, bool)
+        and write_epoch > 0
+        and value.get("v1_fallback_open") is False
+        and value.get("degraded") is False
+    )
+
+
+def build_native_v2_evaluation_data_source(
+    status: Mapping[str, Any],
+    **extra: Any,
+) -> dict[str, Any]:
+    """Pin authoritative successor-V2 identity for an evaluation run."""
+
+    retrieval = status.get("retrieval")
+    if not isinstance(retrieval, Mapping):
+        raise CandidateValidationError("Native V2 runtime status is unavailable")
+    source = {
+        "backend_mode": "native_v2",
+        "runtime_mode": retrieval.get("mode"),
+        "snapshot_id": retrieval.get("active_snapshot_id"),
+        "build_id": retrieval.get("active_build_id"),
+        "profile_hash": retrieval.get("profile_hash"),
+        "publication_generation": retrieval.get("publication_generation"),
+        "write_epoch": retrieval.get("write_epoch"),
+        "v1_fallback_open": retrieval.get("v1_fallback_open"),
+        "degraded": retrieval.get("degraded"),
+        **extra,
+    }
+    if not is_native_v2_evaluation_data_source(source):
+        raise CandidateValidationError(
+            "evaluation requires an active successor Native V2 revision"
+        )
+    return source
+
+
+def _native_v2_result_matches_data_source(
+    final_state: Mapping[str, Any],
+    data_source: Mapping[str, Any],
+) -> bool:
+    monitoring_metrics = final_state.get("monitoring_metrics")
+    retrieval = (
+        monitoring_metrics.get("retrieval")
+        if isinstance(monitoring_metrics, Mapping)
+        else None
+    )
+    if not isinstance(retrieval, Mapping):
+        return False
+    generation = retrieval.get("publication_generation")
+    return (
+        retrieval.get("runtime_mode") == "native"
+        and retrieval.get("snapshot_id") == data_source.get("snapshot_id")
+        and generation == data_source.get("publication_generation")
+    )
+
+
+def is_verified_native_v2_evaluation_run(run: Any) -> bool:
+    """Verify hash, mode, and authoritative Native V2 provenance together."""
+
+    if not isinstance(run, Mapping):
+        return False
+    if (
+        run.get("schema_version") != 2
+        or run.get("execution_mode") != "native_v2"
+        or run.get("integrity_status") != "valid"
+        or not is_native_v2_evaluation_data_source(run.get("data_source"))
+    ):
+        return False
+    try:
+        return run.get("run_hash") == compute_evaluation_run_hash(run)
+    except CandidateValidationError:
+        return False
+
+
+def summarize_evaluation_accuracy(
+    run: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Summarize correctness only from an attested successor-V2 run."""
+
+    unavailable = {
+        "accuracy_rate": None,
+        "passed": 0,
+        "case_count": 0,
+        "measured": False,
+    }
+    if not is_verified_native_v2_evaluation_run(run):
+        return unavailable
+    assert isinstance(run, Mapping)
+    results = run.get("results")
+    if not isinstance(results, Sequence):
+        return unavailable
+    return _summarize_correctness_results(results)
+
+
 def _summarize_eval_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     case_count = len(results)
     passed = sum(1 for result in results if result.get("status") == "pass")
     latencies = [float(result["latency_seconds"]) for result in results if isinstance(result.get("latency_seconds"), (int, float))]
-    return {
+    summary = {
         "case_count": case_count,
         "passed": passed,
         "failed": case_count - passed,
@@ -1163,6 +1477,15 @@ def _summarize_eval_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         "no_result_rate": sum(1 for result in results if result.get("no_result")) / case_count if case_count else 0.0,
         "avg_latency_seconds": sum(latencies) / len(latencies) if latencies else None,
     }
+    accuracy = _summarize_correctness_results(results)
+    summary.update(
+        {
+            "accuracy_rate": accuracy["accuracy_rate"],
+            "accuracy_passed": accuracy["passed"],
+            "accuracy_case_count": accuracy["case_count"],
+        }
+    )
+    return summary
 
 
 
@@ -1190,6 +1513,13 @@ def run_evaluation_dataset(
     data_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """고정 dataset을 graph로 실행하고 JSON experiment run을 저장합니다."""
+    requires_native_v2 = execution_mode == "native_v2" or execution_mode.endswith(
+        "_native_v2"
+    )
+    if requires_native_v2 and not is_native_v2_evaluation_data_source(data_source):
+        raise CandidateValidationError(
+            "Native V2 evaluation provenance is missing or unavailable"
+        )
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:8]
     cases = select_evaluation_cases(dataset, selected_case_ids)
     if limit:
@@ -1211,7 +1541,15 @@ def run_evaluation_dataset(
                 evaluation_profile=evaluation_profile,
             )
         )
+        if requires_native_v2 and not _native_v2_result_matches_data_source(
+            final_state,
+            data_source or {},
+        ):
+            raise CandidateValidationError(
+                "evaluation result does not match the pinned Native V2 revision"
+            )
     run = {
+        "schema_version": 2,
         "run_id": run_id,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "dataset_name": dataset.get("name"),
@@ -1226,9 +1564,8 @@ def run_evaluation_dataset(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     json_path = output_path / f"evaluation_run_{run_id}.json"
-    artifact_io.atomic_write_json(json_path, run)
-    run["json_path"] = str(json_path)
-    return run
+    run["run_hash"] = compute_evaluation_run_hash(run)
+    return _persist_evaluation_run(json_path, run)
 
 
 def build_evaluation_failure_actions(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1356,13 +1693,23 @@ def summarize_all_chat_threads(thread_messages: list[dict[str, Any]]) -> dict[st
                 "latency_seconds": metadata.get("latency_seconds"),
                 "no_vector_results": bool(metadata.get("no_vector_results")),
                 "error": metadata.get("error"),
+                "native_v2_provenance": _message_has_native_v2_provenance(
+                    message
+                ),
             }
             assistant_rows.append(row)
             if row["status"] == "failed":
                 recent_failures.append(row)
     statuses = Counter(row["status"] for row in assistant_rows)
     routes = Counter(row["route"] for row in assistant_rows if row["status"] == "succeeded" and row.get("route"))
-    latencies = sorted(float(row["latency_seconds"]) for row in assistant_rows if isinstance(row.get("latency_seconds"), (int, float)))
+    latencies = sorted(
+        float(row["latency_seconds"])
+        for row in assistant_rows
+        if (
+            row.get("native_v2_provenance") is True
+            and isinstance(row.get("latency_seconds"), (int, float))
+        )
+    )
     succeeded_count = statuses.get("succeeded", 0)
     no_result_count = sum(1 for row in assistant_rows if row["status"] == "succeeded" and row.get("no_vector_results"))
     total = len(assistant_rows)
@@ -1375,6 +1722,7 @@ def summarize_all_chat_threads(thread_messages: list[dict[str, Any]]) -> dict[st
         "no_result_rate": no_result_count / succeeded_count if succeeded_count else 0.0,
         "avg_latency_seconds": sum(latencies) / len(latencies) if latencies else None,
         "p95_latency_seconds": _percentile(latencies, 0.95) if latencies else None,
+        "latency_sample_count": len(latencies),
         "failure_evidence": summarize_incident_metric(
             incident_count=statuses.get("failed", 0),
             sample_count=total,
@@ -2353,6 +2701,65 @@ def list_regression_candidate_artifacts(
             else:
                 code = "malformed_json"
             warnings.append({"code": code, "path": str(path), "blocking": True})
+            continue
+        if not candidate.get("source_refs"):
+            warnings.append(
+                {"code": "missing_source", "path": str(path), "blocking": False}
+            )
+        candidates.append(candidate)
+    return {
+        "items": sorted(
+            candidates,
+            key=lambda candidate: (
+                str(candidate.get("created_at") or ""),
+                str(candidate.get("id") or ""),
+            ),
+            reverse=True,
+        ),
+        "warnings": warnings,
+    }
+
+
+def list_v2_regression_candidate_artifacts(
+    candidate_dir: str | Path,
+) -> dict[str, Any]:
+    """List only schema-v2/contract-v2 candidates for active monitoring."""
+
+    root = Path(candidate_dir)
+    if not root.exists():
+        return {"items": [], "warnings": []}
+    candidates: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    for path in root.glob("*.json"):
+        try:
+            payload = strict_json_loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, ValueError):
+            warnings.append(
+                {"code": "malformed_json", "path": str(path), "blocking": True}
+            )
+            continue
+        if not isinstance(payload, Mapping):
+            warnings.append(
+                {"code": "malformed_json", "path": str(path), "blocking": True}
+            )
+            continue
+        if (
+            payload.get("schema_version") != 2
+            or payload.get("contract_schema_version") != 2
+        ):
+            continue
+        try:
+            candidate = load_regression_candidate(path)
+        except CandidateLoadError as exc:
+            if "candidate_hash_mismatch" in str(exc):
+                code = "candidate_hash_mismatch"
+            elif "candidate_hash_missing" in str(exc):
+                code = "candidate_hash_missing"
+            else:
+                code = "malformed_json"
+            warnings.append(
+                {"code": code, "path": str(path), "blocking": True}
+            )
             continue
         if not candidate.get("source_refs"):
             warnings.append(
@@ -4374,6 +4781,7 @@ def run_candidate_evaluation(
     )
     evaluation_checks = _candidate_automatic_checks(canonical)
     run: dict[str, Any] = {
+        "schema_version": 2,
         "run_id": run_id,
         "run_kind": run_kind,
         "run_status": "blocked" if blocked_reason else "running",
@@ -4501,7 +4909,7 @@ def run_candidate_evaluation(
 
 
 def load_evaluation_run(path: str | Path) -> dict[str, Any]:
-    """Load an evaluation run and verify its persisted hash."""
+    """Load a schema-v2 evaluation run and verify its persisted hash."""
     run_path = Path(path)
     try:
         payload = strict_json_loads(run_path.read_text(encoding="utf-8-sig"))
@@ -4509,12 +4917,11 @@ def load_evaluation_run(path: str | Path) -> dict[str, Any]:
         raise CandidateLoadError(f"cannot load evaluation run: {run_path}") from exc
     if not isinstance(payload, Mapping):
         raise CandidateLoadError("evaluation run JSON root must be an object")
+    if payload.get("schema_version") != 2:
+        raise CandidateLoadError("unsupported_monitoring_schema")
     persisted_hash = payload.get("run_hash")
     if not persisted_hash:
-        result = dict(payload)
-        result["json_path"] = str(run_path)
-        result["integrity_status"] = "legacy_unverified"
-        return result
+        raise CandidateLoadError("run_hash_missing")
     expected_hash = compute_evaluation_run_hash(payload)
     if persisted_hash != expected_hash:
         raise CandidateLoadError("run_hash_mismatch")
@@ -4607,7 +5014,7 @@ def discover_candidate_orphan_runs(
 
 
 def list_regression_candidates(candidate_dir: str | Path) -> list[dict[str, Any]]:
-    """Compatibility wrapper returning valid canonical candidates."""
+    """Return valid schema-v2 candidates."""
     return list_regression_candidate_artifacts(candidate_dir)["items"]
 
 
@@ -4863,22 +5270,36 @@ def _promote_issue_report_to_eval_candidate_locked(
     return _persist_candidate(json_path, candidate)
 
 
-def summarize_data_integrity(status: dict[str, Any]) -> dict[str, Any]:
-    db = status.get("db") or {}
-    vector = status.get("vector_db") or {}
-    retrieval = status.get("retrieval") or {"mode": "legacy_v1"}
-    total = int(db.get("total_reports") or 0)
-    embedded = int(db.get("embedded_reports") or 0)
-    pending = int(db.get("pending_reports") or 0)
-    downloaded = int(status.get("downloaded_pdfs") or 0)
-    if retrieval.get("mode") == "legacy_v1":
+def is_native_v2_status(status: Mapping[str, Any]) -> bool:
+    """Return whether status was sourced from the native retrieval catalog."""
+
+    retrieval = status.get("retrieval")
+    return (
+        isinstance(retrieval, Mapping)
+        and retrieval.get("mode") == "native"
+    )
+
+
+def summarize_v2_data_integrity(
+    status: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return V2-only problem signals for the monitoring diagnostics UI."""
+
+    retrieval = status.get("retrieval")
+    if not is_native_v2_status(status):
         checks = {
-            "faiss_index": {"status": "pass" if vector.get("has_faiss_index") else "fail", "detail": "FAISS index present" if vector.get("has_faiss_index") else "FAISS index missing"},
-            "embedding_backlog": {"status": "pass" if pending == 0 else "warning", "detail": f"{pending} pending reports"},
-            "pdf_vs_db": {"status": "pass" if downloaded >= embedded else "warning", "detail": f"{downloaded} PDFs for {embedded} embedded reports"},
-            "search_coverage": {"status": "pass" if total == 0 or embedded / total >= 0.95 else "warning", "detail": f"{embedded}/{total} reports embedded"},
+            "v2_runtime": {
+                "status": "fail",
+                "detail": "V2 retrieval status is unavailable",
+            }
         }
     else:
+        db = status.get("db") or {}
+        vector = status.get("vector_db") or {}
+        total = int(db.get("total_reports") or 0)
+        embedded = int(db.get("embedded_reports") or 0)
+        pending = int(db.get("pending_reports") or 0)
+        downloaded = int(status.get("downloaded_pdfs") or 0)
         membership = int(retrieval.get("membership_count") or 0)
         ntotal = int(vector.get("ntotal") or 0)
         snapshot_ready = retrieval.get("snapshot_state") == "ready"
@@ -4886,6 +5307,9 @@ def summarize_data_integrity(status: dict[str, Any]) -> dict[str, Any]:
             "committed_pending_checkpoint",
             "fully_complete",
         }
+        cleanup_count = int(
+            retrieval.get("pending_cleanup_file_count") or 0
+        )
         checks = {
             "native_snapshot": {
                 "status": "pass" if snapshot_ready and build_ready else "fail",
@@ -4918,32 +5342,28 @@ def summarize_data_integrity(status: dict[str, Any]) -> dict[str, Any]:
                     f"write_enabled={retrieval.get('write_enabled')}"
                 ),
             },
+            "cleanup_backlog": {
+                "status": "warning" if cleanup_count else "pass",
+                "detail": f"{cleanup_count} files waiting for cleanup",
+            },
         }
-    return {"checks": checks, "pass_count": sum(1 for check in checks.values() if check["status"] == "pass"), "warning_count": sum(1 for check in checks.values() if check["status"] == "warning"), "fail_count": sum(1 for check in checks.values() if check["status"] == "fail")}
-
-
-def build_monitoring_tab_labels() -> list[str]:
-    return [
-        "운영 상태",
-        "평가/실험",
-        "이슈/회귀",
-        "Chat Monitoring",
-    ]
-
-
-def build_global_monitoring_section_labels(category: str) -> list[str]:
-    """Return second-level tabs for the selected global monitoring category."""
-    sections = {
-        "운영 상태": ["데이터 상태", "임베딩 누락 문서", "전체 응답 품질"],
-        "평가/실험": ["고정 평가셋", "실험 실행", "Parsing 비교"],
-        "이슈/회귀": ["이슈 신고/회귀 후보"],
+    return {
+        "checks": checks,
+        "pass_count": sum(
+            1 for check in checks.values() if check["status"] == "pass"
+        ),
+        "warning_count": sum(
+            1 for check in checks.values() if check["status"] == "warning"
+        ),
+        "fail_count": sum(
+            1 for check in checks.values() if check["status"] == "fail"
+        ),
     }
-    return sections.get(category, [])
 
 
 def build_monitoring_page_labels() -> list[str]:
     """Monitoring Mode가 켜졌을 때 보여줄 top-level page를 반환합니다."""
-    return ["Chat", "전체 Monitoring"]
+    return ["Chat", "Monitoring"]
 
 
 def compact_graph_monitoring_metadata(
@@ -5141,6 +5561,7 @@ def _compact_rdb_metrics(final_state: dict[str, Any]) -> dict[str, Any]:
         column_count = len(columns)
     return {
         "sql_query": existing_metrics.get("sql_query") or final_state.get("sql_query"),
+        "query_ns": existing_metrics.get("query_ns"),
         "row_count": row_count,
         "column_count": column_count,
         "guardrail_blocked": existing_metrics.get("guardrail_blocked"),

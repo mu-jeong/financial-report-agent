@@ -344,10 +344,10 @@ def _run_pipeline_locked(
         allow_degraded_forward_recovery=True,
     )
     if runtime.is_native:
-        from src.retrieval.build_service import (
-            DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE,
-            NativeSourceExtractionError,
-            execute_incremental_update,
+        from src.retrieval.build_service import NativeSourceExtractionError
+        from src.retrieval.continuous_update import (
+            DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE,
+            execute_continuous_update,
         )
 
         extraction_engine = unembedded_extraction_engine()
@@ -359,55 +359,50 @@ def _run_pipeline_locked(
         if test_limit and test_limit > 0:
             logger.info(
                 "Native V2 ignores --limit, scans the complete source inventory, "
-                "and publishes at most %s changed reports per snapshot.",
-                DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE,
+                "and publishes at most %s changed reports per searchable delta.",
+                DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE,
             )
         try:
             embeddings = build_embeddings_fn()
             attempted_report_uids: set[str] = set()
             completed_batch_count = 0
-            last_completed = None
-            while True:
-                completed = execute_incremental_update(
-                    config.DB_PATH,
-                    config.SAVE_DIR,
-                    data_root=runtime.paths.data_root,
-                    embeddings=embeddings,
-                    model=config.EMBEDDING_MODEL,
-                    extractor_name=extraction_engine,
-                    fallback_extractor_name=fallback_engine,
-                    allow_extraction_fallback=allow_extraction_fallback,
-                    use_parent_child=config.USE_PARENT_CHILD,
-                    single_chunk_size=config.CHUNK_SIZE,
-                    parent_chunk_size=config.PARENT_CHUNK_SIZE,
-                    child_chunk_size=config.CHILD_CHUNK_SIZE,
-                    metric="l2",
-                    normalization="none",
-                    retry_extraction_failures=retry_extraction_failures,
-                    max_changed_reports=DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE,
-                    skip_report_uids=frozenset(attempted_report_uids),
-                )
-                if completed is None:
-                    break
-                result, outcome = completed
+
+            def report_delta(result) -> None:
+                nonlocal completed_batch_count
                 completed_batch_count += 1
-                last_completed = completed
                 attempted_report_uids.update(result.attempted_report_uids)
                 logger.info(
-                    "Native V2 batch publication complete: batch=%s "
-                    "generation=%s epoch=%s batch_attempted=%s processed=%s "
-                    "active_reports=%s chunks=%s deferred=%s",
+                    "Native V2 delta publication complete: batch=%s "
+                    "delta_generation=%s batch_attempted=%s processed=%s "
+                    "published=%s failed=%s deferred=%s",
                     completed_batch_count,
-                    outcome.publication_generation,
-                    outcome.write_epoch,
+                    result.sequence,
                     len(result.attempted_report_uids),
                     len(attempted_report_uids),
-                    result.indexed_report_count,
-                    result.chunk_count,
+                    len(result.published_report_uids),
+                    len(result.failed_report_uids),
                     result.deferred_report_count,
                 )
-                if result.deferred_report_count == 0:
-                    break
+
+            completed = execute_continuous_update(
+                config.DB_PATH,
+                config.SAVE_DIR,
+                data_root=runtime.paths.data_root,
+                embeddings=embeddings,
+                model=config.EMBEDDING_MODEL,
+                extractor_name=extraction_engine,
+                fallback_extractor_name=fallback_engine,
+                allow_extraction_fallback=allow_extraction_fallback,
+                use_parent_child=config.USE_PARENT_CHILD,
+                single_chunk_size=config.CHUNK_SIZE,
+                parent_chunk_size=config.PARENT_CHUNK_SIZE,
+                child_chunk_size=config.CHILD_CHUNK_SIZE,
+                metric="l2",
+                normalization="none",
+                retry_extraction_failures=retry_extraction_failures,
+                batch_size=DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE,
+                progress_callback=report_delta,
+            )
         except NativeSourceExtractionError as exc:
             logger.error(
                 "Native V2 extraction failure escaped per-document recording: %s: %s",
@@ -418,18 +413,34 @@ def _run_pipeline_locked(
         except Exception as exc:
             logger.error(f"Native V2 incremental update failed: {type(exc).__name__}: {exc}")
             return 1
-        if last_completed is None:
+        if completed is None:
             logger.info("Native V2 is already current; no PDFs required processing.")
             return 0
-        result, outcome = last_completed
+        result = completed.candidate_result
+        outcome = completed.publication_outcome
         logger.info(
-            "Native V2 update complete: snapshots=%s generation=%s epoch=%s "
+            "Native V2 final compaction complete: generation=%s epoch=%s "
             "reports=%s chunks=%s",
+            outcome.publication_generation,
+            outcome.write_epoch,
+            result.report_count,
+            result.chunk_count,
+        )
+        if getattr(outcome, "cleanup_pending", False):
+            logger.warning(
+                "Native V2 publication succeeded; artifact cleanup remains "
+                "pending and will be retried: %s",
+                getattr(outcome, "cleanup_error", None),
+            )
+        logger.info(
+            "Native V2 update complete: deltas=%s compactions=1 generation=%s "
+            "epoch=%s reports=%s chunks=%s failed=%s",
             completed_batch_count,
             outcome.publication_generation,
             outcome.write_epoch,
             result.report_count,
             result.chunk_count,
+            len(completed.failed_report_uids),
         )
         return 0
     print("=" * 60)

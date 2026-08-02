@@ -248,6 +248,36 @@ def resolve_temporal_context(
         end = f"{year:04d}-{month:02d}-{int(same_month_date_range_match.group('end_day')):02d}"
         return _temporal_context("명시 날짜 범위", start, end, today)
 
+    yearless_same_month_date_range_match = re.search(
+        "(?<!\\d)(?P<month>1[0-2]|0?[1-9])\\s*(?:-|/|\\.|\\uC6D4)\\s*"
+        "(?P<start_day>3[01]|[12]\\d|0?[1-9])\\s*\\uC77C?\\s*"
+        "(?:~|-|\\uBD80\\uD130)\\s*"
+        "(?P<end_day>3[01]|[12]\\d|0?[1-9])\\s*\\uC77C?",
+        query,
+    )
+    if yearless_same_month_date_range_match:
+        month = int(yearless_same_month_date_range_match.group("month"))
+        report_month = _latest_known_month_matching(month, known_months)
+        if report_month is None:
+            report_month = f"{today.year:04d}-{month:02d}"
+        year = int(report_month[:4])
+        try:
+            start = date(
+                year,
+                month,
+                int(yearless_same_month_date_range_match.group("start_day")),
+            )
+            end = date(
+                year,
+                month,
+                int(yearless_same_month_date_range_match.group("end_day")),
+            )
+        except ValueError:
+            return None
+        if start > end:
+            return None
+        return _temporal_context("명시 날짜 범위", start.isoformat(), end.isoformat(), today)
+
     exact_match = re.search(
         "(?P<year>20\\d{2})\\s*(?:-|/|\\.|\\uB144)\\s*"
         "(?P<month>1[0-2]|0?[1-9])\\s*(?:-|/|\\.|\\uC6D4)\\s*"
@@ -344,70 +374,81 @@ def _infer_date_filters(
     return _range_filters(context["report_date_start"], context["report_date_end"])
 
 
-@lru_cache(maxsize=1)
 def get_metadata_candidates() -> dict[str, tuple[str, ...]]:
     """Return distinct metadata values currently known by SQLite.
 
     Values are read from the local DB only; no network or LLM call is involved.
-    The cache avoids repeated metadata scans during a chat session.
+    The cache key follows the active full/delta publication revision so a
+    long-lived graph sees newly published report metadata.
     """
     try:
+        with get_connection() as connection:
+            revision = _metadata_revision_token(connection)
+    except sqlite3.Error as exc:
+        logger.warning(f"[MetadataFilter] metadata revision scan failed: {exc}")
+        return {
+            "target_name": (),
+            "broker": (),
+            "report_month": (),
+            "target_report_types": {},
+        }
+    return _metadata_candidates_for_revision(revision)
+
+
+@lru_cache(maxsize=8)
+def _metadata_candidates_for_revision(
+    _revision: tuple[Any, ...],
+) -> dict[str, tuple[str, ...]]:
+    """Load candidates once for one immutable runtime/delta revision."""
+
+    try:
         with get_connection() as conn:
-            targets = tuple(
-                row["target_name"]
-                for row in conn.execute(
-                    """
-                    SELECT DISTINCT target_name
-                    FROM reports
-                    WHERE target_name IS NOT NULL AND target_name != '' AND target_name != 'null'
-                    ORDER BY LENGTH(target_name) DESC, target_name
-                    """
-                ).fetchall()
-            )
-            brokers = tuple(
-                row["broker"]
-                for row in conn.execute(
-                    """
-                    SELECT DISTINCT broker
-                    FROM reports
-                    WHERE broker IS NOT NULL AND broker != ''
-                    ORDER BY LENGTH(broker) DESC, broker
-                    """
-                ).fetchall()
-            )
-            report_months = tuple(
-                row["report_month"]
-                for row in conn.execute(
-                    """
-                    SELECT DISTINCT substr(report_date, 1, 7) AS report_month
-                    FROM reports
-                    WHERE report_date IS NOT NULL AND report_date != ''
-                    ORDER BY report_month DESC
-                    """
-                ).fetchall()
-            )
-            target_report_types: dict[str, tuple[str, ...]] = {}
-            for row in conn.execute(
-                """
-                SELECT target_name, report_type
-                FROM reports
-                WHERE target_name IS NOT NULL
-                  AND target_name != ''
-                  AND target_name != 'null'
-                  AND report_type IS NOT NULL
-                  AND report_type != ''
-                GROUP BY target_name, report_type
-                ORDER BY target_name, report_type
-                """
-            ).fetchall():
-                target_report_types.setdefault(row["target_name"], tuple())
-                target_report_types[row["target_name"]] = (
-                    *target_report_types[row["target_name"]],
-                    row["report_type"],
-                )
+            rows = _active_metadata_rows(conn)
     except sqlite3.Error as exc:
         logger.warning(f"[MetadataFilter] metadata candidate scan failed: {exc}")
         return {"target_name": (), "broker": (), "report_month": (), "target_report_types": {}}
+
+    targets = tuple(
+        sorted(
+            {
+                str(row["target_name"])
+                for row in rows
+                if row["target_name"] not in {None, "", "null"}
+            },
+            key=lambda value: (-len(value), value),
+        )
+    )
+    brokers = tuple(
+        sorted(
+            {
+                str(row["broker"])
+                for row in rows
+                if row["broker"] not in {None, ""}
+            },
+            key=lambda value: (-len(value), value),
+        )
+    )
+    report_months = tuple(
+        sorted(
+            {
+                str(row["report_month"])
+                for row in rows
+                if row["report_month"] not in {None, ""}
+            },
+            reverse=True,
+        )
+    )
+    report_types_by_target: dict[str, set[str]] = {}
+    for row in rows:
+        target = row["target_name"]
+        report_type = row["report_type"]
+        if target in {None, "", "null"} or report_type in {None, ""}:
+            continue
+        report_types_by_target.setdefault(str(target), set()).add(str(report_type))
+    target_report_types = {
+        target: tuple(sorted(report_types))
+        for target, report_types in sorted(report_types_by_target.items())
+    }
 
     return {
         "target_name": targets,
@@ -415,6 +456,185 @@ def get_metadata_candidates() -> dict[str, tuple[str, ...]]:
         "report_month": report_months,
         "target_report_types": target_report_types,
     }
+
+
+def _metadata_revision_token(connection: sqlite3.Connection) -> tuple[Any, ...]:
+    """Return a stable cache key for the currently served report universe."""
+
+    database = next(
+        (
+            row
+            for row in connection.execute("PRAGMA database_list")
+            if str(row[1]) == "main"
+        ),
+        None,
+    )
+    database_identity = (
+        str(database[2]) if database is not None and database[2] else f":memory:{id(connection)}"
+    )
+    native = connection.execute(
+        """
+        SELECT 1 FROM sqlite_schema
+        WHERE type = 'table' AND name = 'retrieval_runtime'
+        """
+    ).fetchone()
+    if native is None:
+        legacy = connection.execute(
+            """
+            SELECT COUNT(*), COALESCE(MAX(rowid), 0),
+                   COALESCE(MAX(report_date), '')
+            FROM reports
+            """
+        ).fetchone()
+        return (database_identity, "legacy", *tuple(legacy))
+
+    runtime = connection.execute(
+        """
+        SELECT active_snapshot_id, active_build_id, publication_generation
+        FROM retrieval_runtime WHERE runtime_id = 1
+        """
+    ).fetchone()
+    if runtime is None:
+        raise sqlite3.DatabaseError("native runtime singleton is missing")
+    delta_tables = {
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT name FROM sqlite_schema
+            WHERE type = 'table' AND name IN (
+                'retrieval_delta_segments', 'retrieval_delta_reports'
+            )
+            """
+        )
+    }
+    delta_revision: tuple[Any, ...] = (0, 0, "")
+    if delta_tables == {"retrieval_delta_segments", "retrieval_delta_reports"}:
+        delta = connection.execute(
+            """
+            SELECT COALESCE(MAX(segment.sequence), 0), COUNT(*),
+                   COALESCE(MAX(segment.segment_id), '')
+            FROM retrieval_delta_segments AS segment
+            WHERE segment.base_snapshot_id = ?
+              AND segment.base_publication_generation = ?
+              AND segment.state = 'ready'
+            """,
+            (runtime[0], int(runtime[2])),
+        ).fetchone()
+        delta_revision = tuple(delta)
+    return (
+        database_identity,
+        "native",
+        runtime[0],
+        runtime[1],
+        int(runtime[2]),
+        *delta_revision,
+    )
+
+
+def _active_metadata_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Read active report metadata without expanding snapshot chunk membership."""
+
+    native = connection.execute(
+        """
+        SELECT 1 FROM sqlite_schema
+        WHERE type = 'table' AND name = 'retrieval_runtime'
+        """
+    ).fetchone()
+    if native is None:
+        return connection.execute(
+            """
+            SELECT target_name, broker, substr(report_date, 1, 7) AS report_month,
+                   report_type
+            FROM reports
+            """
+        ).fetchall()
+
+    delta_tables = {
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT name FROM sqlite_schema
+            WHERE type = 'table' AND name IN (
+                'retrieval_delta_segments', 'retrieval_delta_reports'
+            )
+            """
+        )
+    }
+    if delta_tables == {"retrieval_delta_segments", "retrieval_delta_reports"}:
+        return connection.execute(
+            """
+            WITH base_metadata AS (
+                SELECT report.canonical_relative_path, report.target_name,
+                       report.broker, substr(report.report_date, 1, 7) AS report_month,
+                       report.report_type
+                FROM retrieval_runtime AS runtime
+                JOIN retrieval_builds AS build
+                  ON build.build_id = runtime.active_build_id
+                 AND build.state = 'fully_complete'
+                JOIN json_each(build.source_manifest_json, '$.reports') AS decision
+                JOIN main.reports AS report
+                  ON report.report_uid = json_extract(decision.value, '$.report_uid')
+                WHERE runtime.runtime_id = 1
+                  AND json_extract(decision.value, '$.status') = 'included'
+            ),
+            ready_segments AS (
+                SELECT segment.segment_id, segment.sequence
+                FROM retrieval_delta_segments AS segment
+                JOIN retrieval_runtime AS runtime
+                  ON runtime.runtime_id = 1
+                 AND runtime.active_snapshot_id = segment.base_snapshot_id
+                 AND runtime.publication_generation =
+                     segment.base_publication_generation
+                WHERE segment.state = 'ready'
+            ),
+            ranked_heads AS (
+                SELECT action.canonical_relative_path, action.action,
+                       action.report_uid,
+                       row_number() OVER (
+                           PARTITION BY action.canonical_relative_path
+                           ORDER BY segment.sequence DESC, segment.segment_id DESC
+                       ) AS position
+                FROM retrieval_delta_reports AS action
+                JOIN ready_segments AS segment
+                  ON segment.segment_id = action.segment_id
+                WHERE action.action IN ('upsert', 'delete')
+            ),
+            heads AS (
+                SELECT canonical_relative_path, action, report_uid
+                FROM ranked_heads WHERE position = 1
+            )
+            SELECT base.target_name, base.broker, base.report_month,
+                   base.report_type
+            FROM base_metadata AS base
+            LEFT JOIN heads AS head
+              ON head.canonical_relative_path = base.canonical_relative_path
+            WHERE head.canonical_relative_path IS NULL
+            UNION ALL
+            SELECT report.target_name, report.broker,
+                   substr(report.report_date, 1, 7) AS report_month,
+                   report.report_type
+            FROM heads AS head
+            JOIN main.reports AS report ON report.report_uid = head.report_uid
+            WHERE head.action = 'upsert'
+            """
+        ).fetchall()
+
+    return connection.execute(
+        """
+        SELECT report.target_name, report.broker,
+               substr(report.report_date, 1, 7) AS report_month,
+               report.report_type
+        FROM retrieval_runtime AS runtime
+        JOIN retrieval_builds AS build
+          ON build.build_id = runtime.active_build_id
+         AND build.state = 'fully_complete'
+        JOIN json_each(build.source_manifest_json, '$.reports') AS decision
+        JOIN main.reports AS report
+          ON report.report_uid = json_extract(decision.value, '$.report_uid')
+        WHERE runtime.runtime_id = 1
+          AND json_extract(decision.value, '$.status') = 'included'
+        """
+    ).fetchall()
 
 
 def infer_search_filters(

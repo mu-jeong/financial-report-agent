@@ -68,23 +68,22 @@ DATA_VIEW_FUNCTIONS = {
 }
 
 MONITORING_VIEW_FUNCTIONS = {
-    "_dimension_rows",
-    "_case_type_rows",
     "_parse_monitoring_paths",
     "_engine_summary_rows",
     "_render_parsing_engine_evaluation",
     "_all_thread_messages",
     "_latest_saved_evaluation_run",
-    "_run_fixed_snapshot_evaluation",
-    "_fixed_snapshot_assets_present",
-    "_run_candidate_snapshot_evaluation",
+    "_latest_v2_accuracy_run",
     "_render_experiment_monitoring",
+    "_render_answer_metrics",
     "_render_global_monitoring",
+    "_render_v2_data_diagnostics",
     "_rerun_candidate_action",
     "_write_and_record_candidate_handoff",
-    "_run_and_record_candidate_snapshot",
     "_render_candidate_lifecycle",
     "_render_issue_report_monitoring",
+    "_render_global_chat_diagnostics",
+    "_render_chat_latency_table",
     "render_chat_monitoring_page",
     "render_global_monitoring_page",
 }
@@ -125,7 +124,8 @@ EXPLICIT_WIDGET_KEYS = {
     "'unembedded_report_display_limit'",
     "'unembedded_embedding_limit'",
     "'start_unembedded_embedding_job'",
-    "'global_monitoring_category'",
+    "'monitoring_problem_area'",
+    "'monitoring_diagnostic_thread'",
     "f\"issue_report_category_{current_thread['id']}\"",
     "f\"issue_report_description_{current_thread['id']}\"",
     "f\"issue_report_response_mode_{current_thread['id']}\"",
@@ -145,7 +145,6 @@ EXPLICIT_WIDGET_KEYS = {
     "f\"candidate_handoff_confirm_{candidate['id']}\"",
     "f\"candidate_handoff_reason_{candidate['id']}\"",
     "f\"candidate_handoff_save_{candidate['id']}\"",
-    "f\"candidate_latency_threshold_{status}_{candidate['id']}\"",
     "f\"candidate_manual_check_{status}_{candidate['id']}_{assertion_id}\"",
     "f\"candidate_manual_confirm_{status}_{candidate['id']}\"",
     "f\"candidate_manual_note_{status}_{candidate['id']}\"",
@@ -163,8 +162,6 @@ EXPLICIT_WIDGET_KEYS = {
     "f\"candidate_reopen_reason_{candidate['id']}\"",
     "f\"candidate_reopen_{candidate['id']}\"",
     "f\"candidate_repair_handoff_{item['handoff_id']}\"",
-    "f\"candidate_run_{run_kind}_{candidate['id']}\"",
-    "f\"candidate_snapshot_confirm_{status}_{candidate['id']}\"",
     "f\"no_result_suggestion_{message.get('id', index)}_{suggestion['label']}\"",
     "f\"toggle_issue_report_{current_thread['id']}\"",
     "f'cancel_thread_{thread_id}'",
@@ -290,23 +287,10 @@ def test_data_view_pure_helpers_preserve_current_outputs():
 def test_monitoring_view_pure_helpers_preserve_current_outputs():
     helpers = _load_helpers(
         MONITORING_VIEWS_PATH,
-        "_dimension_rows",
-        "_case_type_rows",
         "_parse_monitoring_paths",
         "_engine_summary_rows",
     )
 
-    assert helpers["_dimension_rows"](
-        {"monitoring_dimensions": {"routing": 1, "retrieval": 3, "citation": 3}}
-    ) == [
-        {"dimension": "citation", "case_count": 3},
-        {"dimension": "retrieval", "case_count": 3},
-        {"dimension": "routing", "case_count": 1},
-    ]
-    assert helpers["_case_type_rows"]({"case_types": {"vector": 2, "rdb": 1}}) == [
-        {"case_type": "rdb", "case_count": 1},
-        {"case_type": "vector", "case_count": 2},
-    ]
     assert helpers["_parse_monitoring_paths"]('a.pdf, "b.pdf"\n\nc.pdf') == [
         "a.pdf",
         "b.pdf",
@@ -318,6 +302,56 @@ def test_monitoring_view_pure_helpers_preserve_current_outputs():
             "alpha": {"files": 1, "success": 1},
         }
     )[0]["engine"] == "alpha"
+
+
+def test_monitoring_exposes_cleanup_backlog_in_user_language():
+    source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
+
+    assert "검색 데이터 정리 대기" in source
+    assert "pending_cleanup_file_count" in source
+
+
+def test_monitoring_defaults_to_speed_accuracy_and_defers_problem_detail():
+    source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
+
+    assert '"응답 속도"' in source
+    assert '"답변 정확도"' in source
+    assert "문제 상황 자세히 보기" in source
+    assert 'key="monitoring_problem_area"' in source
+    assert "accuracy_failure_count" in source
+    assert "monitoring.is_verified_native_v2_evaluation_run(latest)" in source
+    assert "monitoring.build_native_v2_evaluation_data_source" in source
+    assert "if not monitoring.is_native_v2_status(status):" in source
+    assert source.index("if not monitoring.is_native_v2_status(status):") < source.index(
+        "data_views.render_unembedded_reports(status)"
+    )
+    assert "global_monitoring_category" not in source
+    assert "build_monitoring_tab_labels" not in source
+    assert "_fixed_snapshot_assets_present" not in source
+    assert "_run_candidate_snapshot_evaluation" not in source
+
+
+def test_chat_monitoring_is_latency_only_and_global_keeps_accuracy():
+    source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
+    chat_start = source.index("def render_chat_monitoring_page")
+    global_start = source.index("def render_global_monitoring_page")
+    chat_source = source[chat_start:global_start]
+    global_source = source[global_start:]
+
+    assert "summarize_chat_latency_metrics" in chat_source
+    assert '"최근 답변 총시간"' in chat_source
+    assert '"현재 대화 평균"' in chat_source
+    assert '"RDB 평균 조회시간"' in chat_source
+    assert '"Vector DB 평균 검색시간"' in chat_source
+    assert "답변 정확도" not in chat_source
+    assert "_latest_v2_accuracy_run" not in chat_source
+    assert "_render_chat_diagnostics" not in source
+    assert "_render_global_chat_diagnostics" in global_source
+    assert "_render_chat_latency_table" in chat_source
+    assert "_render_answer_metrics" in global_source
+    assert '"db_path": "data/reports.db"' not in source
+    assert '"faiss_dir": "data/vector_db"' not in source
+    assert "V1" not in source
 
 
 def test_chat_job_and_view_pure_helpers_preserve_current_outputs():
@@ -387,6 +421,22 @@ def test_search_engine_status_copy_explains_background_queue_behavior():
         "error",
         "검색 엔진을 준비하지 못했습니다. 다시 준비한 뒤 질문을 처리할 수 있습니다.",
     )
+
+
+def test_reference_document_buttons_rerun_only_the_sources_fragment():
+    tree = ast.parse(
+        CHAT_VIEWS_PATH.read_text(encoding="utf-8-sig"),
+        filename=str(CHAT_VIEWS_PATH),
+    )
+    render_sources = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_render_sources"
+    )
+
+    assert [ast.unparse(decorator) for decorator in render_sources.decorator_list] == [
+        "st.fragment"
+    ]
 
 
 def test_each_session_reruns_when_the_process_queue_becomes_available():
@@ -845,6 +895,18 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
     class SuccessfulGraph:
         calls: list[tuple] = []
 
+        @staticmethod
+        def runtime_provenance():
+            return {
+                "mode": "native",
+                "active_snapshot_id": "snapshot-v2",
+                "active_build_id": "build-v2",
+                "publication_generation": 3,
+                "write_epoch": 2,
+                "v1_fallback_open": False,
+                "degraded": False,
+            }
+
         @classmethod
         def invoke(cls, graph_input, *, config):
             cls.calls.append((graph_input, config))
@@ -927,6 +989,15 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
                 "question": "질문",
                 "no_vector_results": False,
                 "selected_sources": [{"file_name": "report.pdf", "rank": 1}],
+                "retrieval_runtime": {
+                    "mode": "native",
+                    "active_snapshot_id": "snapshot-v2",
+                    "active_build_id": "build-v2",
+                    "publication_generation": 3,
+                    "write_epoch": 2,
+                    "v1_fallback_open": False,
+                    "degraded": False,
+                },
                 "route": "vectordb",
                 "latency_seconds": 1.25,
                 "search_scope": {
@@ -1289,7 +1360,8 @@ class TestSliceACandidateUi:
     def test_candidate_lifecycle_exposes_approved_evidence_controls(self):
         source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
 
-        assert "run_candidate_evaluation_snapshot.py" in source
+        assert "run_candidate_evaluation_snapshot.py" not in source
+        assert "Native V2 revision을 고정한 실행 결과" in source
         assert "monitoring.record_candidate_run(" in source
         assert "monitoring.record_candidate_manual_evidence(" in source
         assert "form_record_revision" in source

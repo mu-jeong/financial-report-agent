@@ -255,7 +255,7 @@ def _render_update_steps(status: dict) -> None:
 
     rows = [
         ("download", "리포트 다운로드/확인"),
-        ("embed", f"임베딩/검색 인덱스 생성{embed_detail}"),
+        ("embed", f"문서 처리/검색 반영{embed_detail}"),
         ("done", "완료"),
     ]
     st.markdown(
@@ -281,6 +281,14 @@ def render_update_progress() -> None:
             st.warning("이전 데이터 업데이트 작업이 중단되었습니다. 새 업데이트를 시작할 수 있습니다.")
             return
         st.info(message)
+        if (
+            status.get("phase") == "embed"
+            and status.get("search_available_during_update")
+        ):
+            st.caption(
+                "업데이트 중에도 기존 문서는 계속 검색할 수 있으며, "
+                "처리가 끝난 문서부터 순차적으로 반영됩니다."
+            )
         _render_update_steps(status)
     elif state == "succeeded":
         st.success(message)

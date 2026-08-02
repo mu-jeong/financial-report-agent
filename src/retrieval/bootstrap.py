@@ -13,6 +13,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from src.retrieval.compatibility_bundle import validate_compatibility_bundle
@@ -26,6 +27,9 @@ from src.retrieval.schema import (
 
 class RetrievalBootstrapError(RuntimeError):
     """Raised when retrieval state cannot be selected without guessing."""
+
+
+RuntimeValidationMode = Literal["full", "read"]
 
 
 def load_index(*args, **kwargs):
@@ -81,6 +85,7 @@ def inspect_runtime(
     *,
     data_root: str | Path | None = None,
     validate_snapshot: bool = True,
+    catalog_validation: RuntimeValidationMode = "full",
 ) -> RuntimeSelection:
     """Inspect and validate the one supported retrieval runtime.
 
@@ -88,6 +93,9 @@ def inspect_runtime(
     installation is still V1. Once any durable V2 state exists, a missing or
     invalid catalog fails closed instead of reopening the legacy path.
     """
+
+    if catalog_validation not in {"full", "read"}:
+        raise ValueError("catalog_validation must be 'full' or 'read'")
 
     paths = retrieval_paths(legacy_db_path, data_root=data_root)
     if not paths.catalog.exists():
@@ -101,14 +109,21 @@ def inspect_runtime(
 
     connection = _open_read_only(paths.catalog)
     try:
-        _validate_catalog(connection)
+        _validate_catalog(
+            connection,
+            validate_integrity=catalog_validation == "full",
+        )
         try:
             from src.retrieval.recovery import _validate_startup_control_plane
             from src.retrieval.publication import _open_catalog
 
             control = _open_catalog(paths.catalog, read_only=True)
             try:
-                _validate_startup_control_plane(paths.data_root, control)
+                _validate_startup_control_plane(
+                    paths.data_root,
+                    control,
+                    validate_integrity=False,
+                )
             finally:
                 control.close()
         except (OSError, sqlite3.Error, RuntimeError) as exc:
@@ -193,8 +208,9 @@ def reconcile_and_inspect_runtime(
     *,
     data_root: str | Path | None = None,
     allow_live_writer_read: bool = False,
+    prefer_fast_read: bool = False,
 ) -> RuntimeSelection:
-    """Recover when idle, optionally reading committed state during a live write."""
+    """Recover when needed, with an optional zero-scan path for trusted reads."""
 
     paths = retrieval_paths(legacy_db_path, data_root=data_root)
     if paths.catalog.is_symlink() or (
@@ -217,6 +233,30 @@ def reconcile_and_inspect_runtime(
 
     try:
         with NativeWriterLock(paths.data_root) as writer_lease:
+            if prefer_fast_read:
+                try:
+                    selection = inspect_runtime(
+                        legacy_db_path,
+                        data_root=paths.data_root,
+                        validate_snapshot=True,
+                        catalog_validation="read",
+                    )
+                    if (
+                        not _catalog_has_running_publication(paths.catalog)
+                        and not _catalog_requires_garbage_reconciliation(
+                            paths.catalog
+                        )
+                    ):
+                        if selection.is_native:
+                            from src.retrieval.dispatch import prime_native_dispatch
+
+                            prime_native_dispatch(selection)
+                        return selection
+                except (RetrievalBootstrapError, sqlite3.Error):
+                    # Missing, inconsistent, or unreadable native state must use
+                    # the existing full recovery path instead of falling back.
+                    pass
+
             outcome = StartupReconciler(paths.data_root).reconcile(
                 writer_lease=writer_lease,
             )
@@ -225,7 +265,9 @@ def reconcile_and_inspect_runtime(
             try:
                 RetrievalGarbageCollector(
                     paths.data_root
-                ).reconcile_pending_snapshots(writer_lease=writer_lease)
+                )._reconcile_pending_snapshots_after_validation(
+                    writer_lease=writer_lease
+                )
             except GarbageCollectionError as exc:
                 raise RetrievalBootstrapError(
                     f"native snapshot garbage reconciliation failed: {exc}"
@@ -234,6 +276,7 @@ def reconcile_and_inspect_runtime(
                 legacy_db_path,
                 data_root=paths.data_root,
                 validate_snapshot=True,
+                catalog_validation="read",
             )
             if selection.is_native:
                 # Startup owns cold validation; keep the same process on the
@@ -255,6 +298,7 @@ def reconcile_and_inspect_runtime(
             legacy_db_path,
             data_root=paths.data_root,
             validate_snapshot=True,
+            catalog_validation="read",
         )
         if selection.is_native:
             from src.retrieval.dispatch import prime_native_dispatch
@@ -318,29 +362,116 @@ def _open_read_only(path: Path) -> sqlite3.Connection:
         raise RetrievalBootstrapError(f"native catalog cannot be opened: {exc}") from exc
 
 
-def _validate_catalog(connection: sqlite3.Connection) -> None:
+def _validate_catalog(
+    connection: sqlite3.Connection,
+    *,
+    validate_integrity: bool = True,
+) -> None:
     try:
-        if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
-            raise RetrievalBootstrapError("native catalog quick_check failed")
-        if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-            raise RetrievalBootstrapError("native catalog integrity_check failed")
-        if connection.execute("PRAGMA foreign_key_check").fetchall():
-            raise RetrievalBootstrapError("native catalog foreign-key check failed")
+        if validate_integrity:
+            from src.retrieval.publication import _validate_catalog_integrity
+
+            _validate_catalog_integrity(connection)
+        _validate_catalog_structure(connection)
+    except RetrievalBootstrapError:
+        raise
+    except (sqlite3.Error, RuntimeError) as exc:
+        raise RetrievalBootstrapError(f"native catalog validation failed: {exc}") from exc
+
+
+def _validate_catalog_structure(connection: sqlite3.Connection) -> None:
+    """Validate the small control-plane shape without scanning every DB page."""
+
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    if not RETRIEVAL_TABLES.issubset(tables):
+        raise RetrievalBootstrapError("native catalog schema is incomplete")
+    runtime = connection.execute(
+        "SELECT COUNT(*), MIN(schema_version), MAX(schema_version) FROM retrieval_runtime"
+    ).fetchone()
+    if runtime != (1, SCHEMA_VERSION, SCHEMA_VERSION):
+        raise RetrievalBootstrapError("native catalog schema/runtime version is invalid")
+
+
+def _catalog_has_running_publication(catalog_path: Path) -> bool:
+    """Return whether an idle writer lease inherited a journal to reconcile."""
+
+    connection = _open_read_only(catalog_path)
+    try:
+        return (
+            connection.execute(
+                "SELECT 1 FROM publication_runs WHERE state = 'running' LIMIT 1"
+            ).fetchone()
+            is not None
+        )
+    finally:
+        connection.close()
+
+
+def _catalog_requires_garbage_reconciliation(catalog_path: Path) -> bool:
+    """Detect durable cleanup work before selecting the non-mutating fast path."""
+
+    connection = _open_read_only(catalog_path)
+    try:
+        if connection.execute(
+            """
+            SELECT 1 FROM vector_snapshots
+            WHERE state = 'garbage_pending' LIMIT 1
+            """
+        ).fetchone() is not None:
+            return True
         tables = {
             row[0]
             for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
+                """
+                SELECT name FROM sqlite_schema
+                WHERE type = 'table' AND name IN (
+                    'retrieval_delta_segments', 'retrieval_delta_artifact_gc'
+                )
+                """
             )
         }
-        if not RETRIEVAL_TABLES.issubset(tables):
-            raise RetrievalBootstrapError("native catalog schema is incomplete")
-        runtime = connection.execute(
-            "SELECT COUNT(*), MIN(schema_version), MAX(schema_version) FROM retrieval_runtime"
-        ).fetchone()
-        if runtime != (1, SCHEMA_VERSION, SCHEMA_VERSION):
-            raise RetrievalBootstrapError("native catalog schema/runtime version is invalid")
-    except sqlite3.Error as exc:
-        raise RetrievalBootstrapError(f"native catalog validation failed: {exc}") from exc
+        if "retrieval_delta_segments" not in tables:
+            return False
+        if "retrieval_delta_artifact_gc" not in tables:
+            return True
+        return (
+            connection.execute(
+                """
+                SELECT 1
+                FROM retrieval_delta_segments AS segment
+                JOIN vector_snapshots AS base
+                  ON base.snapshot_id = segment.base_snapshot_id
+                LEFT JOIN retrieval_delta_artifact_gc AS artifact_gc
+                  ON artifact_gc.segment_id = segment.segment_id
+                WHERE segment.relative_path IS NOT NULL
+                  AND base.state = 'garbage_collected'
+                  AND artifact_gc.segment_id IS NULL
+                  AND (
+                      segment.state = 'compacted'
+                      OR (
+                          segment.state IN ('ready', 'failed')
+                          AND NOT EXISTS (
+                              SELECT 1 FROM retrieval_runtime AS runtime
+                              WHERE runtime.runtime_id = 1
+                                AND runtime.active_snapshot_id =
+                                    segment.base_snapshot_id
+                                AND runtime.publication_generation =
+                                    segment.base_publication_generation
+                          )
+                      )
+                  )
+                LIMIT 1
+                """
+            ).fetchone()
+            is not None
+        )
+    finally:
+        connection.close()
 
 
 def _epoch_zero_fallback_or_raise(

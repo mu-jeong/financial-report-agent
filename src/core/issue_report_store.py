@@ -585,6 +585,65 @@ def list_issue_report_artifacts(
     }
 
 
+def list_v2_issue_report_artifacts(
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    """Discover only canonical V2 reports for the active monitoring UI."""
+
+    report_dir = Path(DEBUG_REPORT_DIR)
+    if not report_dir.exists():
+        return {"items": [], "warnings": []}
+    items: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    for json_path in sorted(report_dir.glob("issue_report_*.json")):
+        try:
+            payload = strict_json_loads(
+                json_path.read_text(encoding="utf-8-sig")
+            )
+        except (OSError, UnicodeError, ValueError):
+            warnings.append(
+                _report_warning("malformed_json", json_path, blocking=True)
+            )
+            continue
+        if not isinstance(payload, Mapping):
+            warnings.append(
+                _report_warning("malformed_json", json_path, blocking=True)
+            )
+            continue
+        if (
+            payload.get("schema_version") != 2
+            or payload.get("report_contract_version") != 2
+        ):
+            continue
+        try:
+            report = load_report(json_path)
+        except IssueReportLoadError:
+            warnings.append(
+                _report_warning("malformed_json", json_path, blocking=True)
+            )
+            continue
+        if thread_id is not None and report.get("thread_id") != thread_id:
+            continue
+        text_path = json_path.with_suffix(".txt")
+        if text_path.exists():
+            try:
+                report["content"] = text_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                report["content"] = ""
+        else:
+            report["content"] = ""
+            warnings.append(_report_warning("missing_text_companion", text_path))
+        items.append(report)
+    return {
+        "items": sorted(
+            items,
+            key=lambda report: str(report.get("created_at") or ""),
+            reverse=True,
+        ),
+        "warnings": warnings,
+    }
+
+
 def repair_issue_report_text_companion(json_path: str | Path) -> Path:
     """Rebuild a missing derived text companion from its canonical JSON."""
     canonical_path = Path(json_path)
@@ -752,6 +811,7 @@ def create_issue_report(
     if normalized_kind not in _REPORT_KINDS:
         raise ValueError("kind is invalid")
     report = {
+        "schema_version": 2,
         "report_contract_version": 2,
         "id": report_id,
         "thread_id": thread_id,
@@ -811,7 +871,7 @@ def _import_issue_report_text_locked(
 
     imported_at = _utc_now()
     report_id = _line_value(text, "Report ID: ") or f"imported_{uuid.uuid4().hex[:12]}"
-    for existing in list_issue_report_artifacts()["items"]:
+    for existing in list_v2_issue_report_artifacts()["items"]:
         if existing.get("id") == report_id:
             return {
                 "id": report_id,
@@ -832,6 +892,8 @@ def _import_issue_report_text_locked(
         parsed_context["conversation_messages"] = conversation_messages
         parsed_context["conversation_message_count"] = len(conversation_messages)
     report = {
+        "schema_version": 2,
+        "report_contract_version": 2,
         "id": report_id,
         "thread_id": _line_value(text, "Thread ID: ") or "external_email",
         "category": _line_value(text, "Category: ") or "Imported issue report",

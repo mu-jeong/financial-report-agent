@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
         selection = reconcile_and_inspect_runtime(
             DB_PATH,
             allow_live_writer_read=not args.write,
+            prefer_fast_read=not args.write,
         )
         if args.write:
             selection = guard_before_retrieval_write(DB_PATH)

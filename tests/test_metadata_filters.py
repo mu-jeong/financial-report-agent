@@ -1,10 +1,15 @@
 from datetime import date
+import json
+import sqlite3
 
 from langchain_core.documents import Document
 import pytest
 
+from src.core import metadata_filters as metadata_filters_module
 from src.core.metadata_filters import (
+    _active_metadata_rows,
     filter_docs_with_scores,
+    get_metadata_candidates,
     infer_search_filters,
     metadata_matches,
     resolve_temporal_context,
@@ -15,6 +20,116 @@ from src.utils.citations import (
     group_sources_by_document,
     normalize_citation_ranks,
 )
+
+
+def test_native_metadata_candidates_follow_active_manifest_and_delta_revision(
+    monkeypatch,
+):
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE retrieval_runtime (
+                runtime_id INTEGER PRIMARY KEY,
+                active_snapshot_id TEXT NOT NULL,
+                active_build_id TEXT NOT NULL,
+                publication_generation INTEGER NOT NULL
+            );
+            CREATE TABLE retrieval_builds (
+                build_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                source_manifest_json TEXT NOT NULL
+            );
+            CREATE TABLE reports (
+                report_uid TEXT PRIMARY KEY,
+                canonical_relative_path TEXT NOT NULL,
+                target_name TEXT,
+                broker TEXT,
+                report_date TEXT,
+                report_type TEXT
+            );
+            CREATE TABLE retrieval_delta_segments (
+                segment_id TEXT PRIMARY KEY,
+                base_snapshot_id TEXT NOT NULL,
+                base_publication_generation INTEGER NOT NULL,
+                sequence INTEGER NOT NULL,
+                state TEXT NOT NULL
+            );
+            CREATE TABLE retrieval_delta_reports (
+                segment_id TEXT NOT NULL,
+                canonical_relative_path TEXT NOT NULL,
+                action TEXT NOT NULL,
+                report_uid TEXT
+            );
+            CREATE TEMP VIEW reports AS
+            SELECT target_name, broker, report_date, report_type
+            FROM main.reports;
+            """
+        )
+        manifest = {
+            "reports": [
+                {"report_uid": "included", "status": "included"},
+                {"report_uid": "excluded", "status": "excluded"},
+            ]
+        }
+        connection.execute(
+            "INSERT INTO retrieval_runtime VALUES (1, 'snapshot', 'build', 3)"
+        )
+        connection.execute(
+            "INSERT INTO retrieval_builds VALUES ('build', 'fully_complete', ?)",
+            (json.dumps(manifest),),
+        )
+        connection.executemany(
+            "INSERT INTO main.reports VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "included",
+                    "reports/included.pdf",
+                    "Alpha",
+                    "Broker",
+                    "2026-07-20",
+                    "company",
+                ),
+                (
+                    "excluded",
+                    "reports/excluded.pdf",
+                    "Beta",
+                    "Broker",
+                    "2026-07-21",
+                    "company",
+                ),
+            ],
+        )
+
+        monkeypatch.setattr(
+            metadata_filters_module,
+            "get_connection",
+            lambda: connection,
+        )
+        metadata_filters_module._metadata_candidates_for_revision.cache_clear()
+
+        rows = _active_metadata_rows(connection)
+        initial = get_metadata_candidates()
+
+        assert [row["target_name"] for row in rows] == ["Alpha"]
+        assert rows[0]["report_month"] == "2026-07"
+        assert initial["target_name"] == ("Alpha",)
+
+        connection.execute(
+            "INSERT INTO retrieval_delta_segments VALUES (?, ?, ?, ?, ?)",
+            ("segment", "snapshot", 3, 1, "ready"),
+        )
+        connection.execute(
+            "INSERT INTO retrieval_delta_reports VALUES (?, ?, ?, ?)",
+            ("segment", "reports/excluded.pdf", "upsert", "excluded"),
+        )
+        refreshed = get_metadata_candidates()
+
+        assert set(refreshed["target_name"]) == {"Alpha", "Beta"}
+    finally:
+        metadata_filters_module._metadata_candidates_for_revision.cache_clear()
+        connection.close()
 
 
 def test_infer_search_filters_from_known_metadata_values():
@@ -99,6 +214,56 @@ def test_infer_search_filters_normalizes_temporal_expressions(query, expected_st
         "report_date_start": expected_start,
         "report_date_end": expected_end,
     }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "7월 20~24일 발간 리포트",
+        "7월 20일 ~ 24일 발간 리포트",
+        "7/20-24 발간 리포트",
+        "7.20일부터 24일 발간 리포트",
+    ],
+)
+def test_infer_search_filters_normalizes_yearless_same_month_date_ranges(query):
+    filters = infer_search_filters(
+        query,
+        {
+            "target_name": [],
+            "broker": [],
+            "report_month": ["2026-06", "2025-07", "2024-07"],
+        },
+        current_date=date(2026, 8, 2),
+    )
+
+    assert filters == {
+        "report_date_start": "2025-07-20",
+        "report_date_end": "2025-07-24",
+    }
+
+
+def test_yearless_same_month_date_range_falls_back_to_current_year():
+    context = resolve_temporal_context(
+        "7월 20~24일",
+        known_months=["2026-06"],
+        current_date=date(2026, 8, 2),
+    )
+
+    assert context is not None
+    assert context["report_date_start"] == "2026-07-20"
+    assert context["report_date_end"] == "2026-07-24"
+
+
+@pytest.mark.parametrize("query", ["7월 24~20일", "2월 29~30일"])
+def test_yearless_same_month_date_range_rejects_invalid_bounds(query):
+    assert (
+        resolve_temporal_context(
+            query,
+            known_months=["2025-07", "2025-02"],
+            current_date=date(2026, 8, 2),
+        )
+        is None
+    )
 
 
 def test_infer_search_filters_combines_date_range_with_other_metadata():

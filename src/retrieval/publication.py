@@ -14,7 +14,7 @@ import os
 import sqlite3
 import stat
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -80,6 +80,8 @@ class PublicationOutcome:
     checkpoint_relative_path: str
     checkpoint_sha256: str
     committed_floor_relative_path: str
+    cleanup_pending: bool = False
+    cleanup_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -288,10 +290,16 @@ class PublicationCoordinator:
                 self._finish_publication(connection, intent)
             self._crash("fully_complete", crash_after, crash_hook)
             outcome = _outcome_from_floor(connection, floor)
-            _reconcile_retired_snapshots(
+            cleanup_error = _reconcile_retired_snapshots(
                 self.data_root,
                 writer_lease=writer_lease,
             )
+            if cleanup_error is not None:
+                outcome = replace(
+                    outcome,
+                    cleanup_pending=True,
+                    cleanup_error=cleanup_error,
+                )
             return outcome
         finally:
             connection.close()
@@ -1004,14 +1012,22 @@ def _reconcile_retired_snapshots(
     data_root: Path,
     *,
     writer_lease: WriterLease,
-) -> None:
-    """Finish post-commit deletion; PermissionError remains durably pending."""
+) -> str | None:
+    """Finish snapshot and compacted-child deletion after a durable commit."""
 
-    from src.retrieval.garbage_collector import RetrievalGarbageCollector
-
-    RetrievalGarbageCollector(data_root).reconcile_pending_snapshots(
-        writer_lease=writer_lease,
+    from src.retrieval.garbage_collector import (
+        GarbageCollectionError,
+        RetrievalGarbageCollector,
     )
+
+    try:
+        collector = RetrievalGarbageCollector(data_root)
+        collector._reconcile_pending_snapshots_after_validation(
+            writer_lease=writer_lease,
+        )
+    except (GarbageCollectionError, OSError, sqlite3.Error) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 def read_durable_floors(data_root: str | Path) -> tuple[DurableFloor, ...]:
