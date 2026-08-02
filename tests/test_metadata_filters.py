@@ -413,6 +413,16 @@ def test_document_source_aliases_are_sequential_after_deduplication():
     )
 
 
+def test_document_source_aliases_prefer_report_uid_over_same_file_name():
+    rerank_info = [
+        {"rank": 1, "report_uid": "report-1", "file_name": "same.pdf"},
+        {"rank": 2, "report_uid": "report-2", "file_name": "same.pdf"},
+    ]
+
+    assert len(group_sources_by_document(rerank_info)) == 2
+    assert document_rank_aliases(rerank_info) == {1: 1, 2: 2}
+
+
 def test_query_rewrite_marks_date_only_followup_for_router():
     question = "6/15(월)"
 

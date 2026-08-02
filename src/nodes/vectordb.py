@@ -12,7 +12,7 @@ from src.configs.config import (
     DB_PATH,
     FAISS_DIR,
     RECENCY_WEIGHT,
-    RERANK_CANDIDATE_MULTIPLIER,
+    SEARCH_CANDIDATE_MULTIPLIER,
     SEARCH_TOP_K,
     USE_RERANKER,
     get_logger,
@@ -47,9 +47,13 @@ def build_embeddings_fn():
     return build_embeddings_model()
 
 
+def _requested_candidate_count() -> int:
+    return SEARCH_TOP_K * max(SEARCH_CANDIDATE_MULTIPLIER, 1)
+
+
 def _metadata_aware_fetch_k(faiss_store: FAISS, search_filters: dict | None) -> int:
     """metadata filtering 전에 충분한 후보를 가져옵니다."""
-    default_fetch_k = max(SEARCH_TOP_K * 8, SEARCH_TOP_K)
+    default_fetch_k = _requested_candidate_count()
     if not search_filters:
         return default_fetch_k
     total_docs = len(getattr(faiss_store, "index_to_docstore_id", {}) or {})
@@ -495,10 +499,7 @@ def select_top_passages(
 ) -> tuple[list[dict], dict]:
     """최종 context passage를 선택합니다."""
     passages = _build_passages(docs_with_scores)
-    candidate_count = min(
-        len(passages),
-        max(SEARCH_TOP_K, SEARCH_TOP_K * max(RERANK_CANDIDATE_MULTIPLIER, 1)),
-    )
+    candidate_count = min(len(passages), _requested_candidate_count())
     if USE_RERANKER:
         ranked = get_ranker().rerank(query, passages, candidate_count)
     else:
@@ -538,14 +539,6 @@ def _native_document(chunk: RetrievedChunk) -> Document:
         }
     )
     return Document(page_content=chunk.parent_slice, metadata=metadata)
-
-
-def _requested_candidate_count() -> int:
-    return max(
-        SEARCH_TOP_K,
-        SEARCH_TOP_K * 8,
-        SEARCH_TOP_K * max(RERANK_CANDIDATE_MULTIPLIER, 1),
-    )
 
 
 def _retrieve_docs_with_scores(
@@ -844,6 +837,16 @@ def vectordb_node(state: State) -> dict:
                 "broker": meta.get("broker", "-"),
                 "report_type": meta.get("report_type", "-"),
                 "file_name": meta.get("file_name", "-"),
+                "report_uid": meta.get("report_uid"),
+                "chunk_uid": meta.get("chunk_uid"),
+                "parent_uid": meta.get("parent_uid"),
+                "profile_id": meta.get("profile_id"),
+                "child_index": meta.get("child_index"),
+                "span_start": meta.get("span_start"),
+                "span_end": meta.get("span_end"),
+                "physical_id": meta.get("physical_id"),
+                "snapshot_id": meta.get("snapshot_id"),
+                "publication_generation": meta.get("publication_generation"),
                 "score": float(result.get("score", 0.0)),
                 "rerank_score": result.get("rerank_score"),
                 "recency_score": result.get("recency_score"),

@@ -24,6 +24,11 @@ from src.core.artifact_io import (
     safe_artifact_token,
     strict_json_loads,
 )
+from src.core.answer_requirements import (
+    AnswerRequirementValidationError,
+    canonicalize_answer_requirements,
+    evaluate_answer_requirements,
+)
 from src.core.followup_scope import build_answer_scope_index
 
 EVALUATION_DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "evaluation_dataset.json"
@@ -33,6 +38,7 @@ EVALUATION_SNAPSHOT_MANIFEST_PATH = EVALUATION_SNAPSHOT_ROOT / "manifest.json"
 
 _CANDIDATE_WRITE_LOCK = threading.RLock()
 _AUTOMATIC_CHECKS = {
+    "answer_requirements_pass",
     "route_pass",
     "filter_pass",
     "source_hit",
@@ -292,6 +298,84 @@ def validate_evaluation_snapshot(
     }
 
 
+def assess_evaluation_snapshot_readiness(
+    *,
+    dataset_path: str | Path = EVALUATION_DATASET_PATH,
+    manifest_path: str | Path = EVALUATION_SNAPSHOT_MANIFEST_PATH,
+    snapshot_root: str | Path = EVALUATION_SNAPSHOT_ROOT,
+) -> dict[str, Any]:
+    """Check whether the fixed inputs required for automatic reproduction exist and agree."""
+
+    dataset_file = Path(dataset_path)
+    manifest_file = Path(manifest_path)
+    snapshot_directory = Path(snapshot_root)
+    inputs = {
+        "dataset": dataset_file,
+        "snapshot_manifest": manifest_file,
+        "snapshot_root": snapshot_directory,
+    }
+    missing_inputs = [
+        name for name, path in inputs.items() if not path.exists()
+    ]
+    base = {
+        "dataset_path": str(dataset_file),
+        "manifest_path": str(manifest_file),
+        "snapshot_root": str(snapshot_directory),
+        "missing_inputs": missing_inputs,
+    }
+    if missing_inputs:
+        return {
+            **base,
+            "ready": False,
+            "status": "missing",
+            "failed_checks": [],
+            "reason": "fixed automatic reproduction inputs are missing",
+        }
+
+    try:
+        dataset = load_evaluation_dataset(dataset_file)
+        manifest = load_evaluation_snapshot_manifest(manifest_file)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return {
+            **base,
+            "ready": False,
+            "status": "invalid",
+            "failed_checks": [],
+            "reason": f"fixed input cannot be loaded: {type(exc).__name__}",
+        }
+    if not isinstance(dataset, dict) or not isinstance(manifest, dict):
+        return {
+            **base,
+            "ready": False,
+            "status": "invalid",
+            "failed_checks": [],
+            "reason": "fixed dataset and manifest must be JSON objects",
+        }
+
+    validation = validate_evaluation_snapshot(
+        dataset,
+        manifest,
+        snapshot_directory,
+    )
+    failed_checks = [
+        str(check.get("name") or "")
+        for check in validation.get("checks") or []
+        if check.get("status") == "fail"
+    ]
+    ready = validation.get("status") == "pass"
+    return {
+        **base,
+        "ready": ready,
+        "status": "ready" if ready else "invalid",
+        "failed_checks": failed_checks,
+        "reason": (
+            ""
+            if ready
+            else "fixed dataset and snapshot validation failed"
+        ),
+    }
+
+
 def summarize_evaluation_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
     """고정 dataset의 Monitoring Mode coverage metric을 반환합니다."""
     cases = dataset.get("cases") or []
@@ -527,7 +611,31 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
         route = metadata.get("route", "-")
         created_at = message.get("created_at")
         source_names = _ordered_file_names(selected_sources)
-        source_count = len(group_sources_by_document(selected_sources))
+        vector_sources = selected_sources if route == "vectordb" else []
+        rdb_sources = selected_sources if route == "rdb" else []
+        used_chunks = _build_used_chunk_rows(vector_sources, [])
+        used_documents = _build_used_document_rows(used_chunks)
+        rdb_evidence = _build_rdb_evidence_rows(rdb_sources)
+        source_count = len(used_documents) + len(rdb_evidence)
+        answer = str(message.get("content") or "")
+        citation_ranks = (
+            sorted(extract_citation_ranks(answer, source_count=None))
+            if route == "vectordb"
+            else []
+        )
+        citation_valid = (
+            _citation_valid(answer, vector_sources)
+            if route == "vectordb"
+            else None
+        )
+        retrieval_k = _build_retrieval_k_trace(metadata)
+        grounding = _build_grounding_trace(
+            metadata,
+            selected_sources=selected_sources,
+            citation_ranks=citation_ranks,
+            citation_valid=citation_valid,
+        )
+        state_status = _build_state_status_trace(metadata)
         rows.append(
             {
                 "message_id": message.get("id"),
@@ -538,6 +646,15 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
                 "route": route,
                 "latency_seconds": metadata.get("latency_seconds"),
                 "source_count": source_count,
+                "document_count": len(used_documents),
+                "chunk_count": len(used_chunks),
+                "rdb_evidence_count": len(rdb_evidence),
+                "state_status": state_status.get("overall"),
+                "grounding_status": grounding.get("status"),
+                "configured_top_k": retrieval_k.get("configured_top_k"),
+                "requested_k": retrieval_k.get("requested_k"),
+                "fetch_k": retrieval_k.get("fetch_k"),
+                "context_count": retrieval_k.get("context_count"),
                 "search_filters": search_filters,
                 "scope_source": metadata.get("scope_source") or search_scope.get("scope_source"),
                 "scope_decision_reason": scope_decision.get("reason"),
@@ -598,6 +715,347 @@ def _metadata_retrieval(metadata: dict[str, Any]) -> dict[str, Any]:
 
 def _metadata_query_rewrite(metadata: dict[str, Any]) -> dict[str, Any]:
     return (metadata.get("monitoring") or {}).get("query_rewrite") or {}
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    return value
+
+
+def _first_measured_int(*values: Any) -> int | None:
+    for value in values:
+        measured = _nonnegative_int(value)
+        if measured is not None:
+            return measured
+    return None
+
+
+def _build_turn_timing_trace(metadata: dict[str, Any]) -> dict[str, Any]:
+    monitoring = metadata.get("monitoring") or {}
+    retrieval = _metadata_retrieval(metadata)
+    rdb = monitoring.get("rdb") or {}
+    total_seconds = _duration_seconds(metadata.get("latency_seconds"))
+    if total_seconds is None:
+        total_seconds = _duration_seconds((monitoring.get("timing") or {}).get("total_seconds"))
+    rdb_seconds = _duration_seconds_from_ns(rdb.get("query_ns"))
+    vector_seconds = _duration_seconds_from_ns(retrieval.get("native_total_ns"))
+    vector_stages = {
+        "scope_compile": _duration_seconds_from_ns(retrieval.get("native_scope_compile_ns")),
+        "eligibility": _duration_seconds_from_ns(retrieval.get("native_eligibility_ns")),
+        "faiss": _duration_seconds_from_ns(retrieval.get("native_faiss_ns")),
+        "hydration": _duration_seconds_from_ns(retrieval.get("native_hydration_ns")),
+        "lease": _duration_seconds_from_ns(retrieval.get("native_lease_ns")),
+    }
+    measured = any(
+        value is not None
+        for value in (total_seconds, rdb_seconds, vector_seconds, *vector_stages.values())
+    )
+    return {
+        "status": "measured" if measured else "not_measured",
+        "total_seconds": total_seconds,
+        "rdb_query_seconds": rdb_seconds,
+        "vector_search_seconds": vector_seconds,
+        "vector_stage_seconds": vector_stages,
+    }
+
+
+def _build_retrieval_k_trace(metadata: dict[str, Any]) -> dict[str, Any]:
+    if metadata.get("route") != "vectordb":
+        return {
+            "status": "not_applicable",
+            "configured_top_k": None,
+            "requested_k": None,
+            "fetch_k": None,
+            "candidate_count_before_filter": None,
+            "candidate_count_after_filter": None,
+            "context_count": None,
+        }
+
+    retrieval = _metadata_retrieval(metadata)
+    values = {
+        "configured_top_k": _nonnegative_int(retrieval.get("search_top_k")),
+        "requested_k": _nonnegative_int(retrieval.get("requested_k")),
+        "fetch_k": _nonnegative_int(retrieval.get("fetch_k")),
+        "candidate_count_before_filter": _first_measured_int(
+            retrieval.get("candidate_count_before_filter"),
+            retrieval.get("native_candidate_count"),
+        ),
+        "candidate_count_after_filter": _nonnegative_int(
+            retrieval.get("candidate_count_after_filter")
+        ),
+        "context_count": _first_measured_int(
+            retrieval.get("selected_source_count"),
+            retrieval.get("source_count"),
+        ),
+    }
+    if any(value is not None for value in values.values()):
+        status = "measured"
+    else:
+        status = "not_measured"
+    return {"status": status, **values}
+
+
+def _build_used_chunk_rows(
+    selected_sources: list[dict[str, Any]],
+    citation_ranks: list[int],
+) -> list[dict[str, Any]]:
+    cited = set(citation_ranks)
+    rows: list[dict[str, Any]] = []
+    for fallback_rank, raw_source in enumerate(selected_sources, 1):
+        source = raw_source if isinstance(raw_source, dict) else {}
+        rank = _first_measured_int(source.get("rank"), fallback_rank)
+        chunk_uid = _stable_identity_value(source.get("chunk_uid"))
+        report_uid = _stable_identity_value(source.get("report_uid"))
+        rows.append(
+            {
+                "rank": rank,
+                "identity_status": (
+                    "measured" if chunk_uid and report_uid else "not_measured"
+                ),
+                "chunk_uid": chunk_uid,
+                "parent_uid": source.get("parent_uid"),
+                "report_uid": report_uid,
+                "file_name": source.get("file_name"),
+                "target_name": source.get("target_name"),
+                "report_date": source.get("report_date"),
+                "title": source.get("title"),
+                "broker": source.get("broker"),
+                "report_type": source.get("report_type"),
+                "child_index": _nonnegative_int(source.get("child_index")),
+                "span_start": _nonnegative_int(source.get("span_start")),
+                "span_end": _nonnegative_int(source.get("span_end")),
+                "score": source.get("score"),
+                "rerank_score": source.get("rerank_score"),
+                "recency_score": source.get("recency_score"),
+                "final_score": source.get("final_score"),
+                "cited": rank in cited,
+            }
+        )
+    return rows
+
+
+def _build_used_document_rows(
+    chunk_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    documents: dict[tuple[str, str], dict[str, Any]] = {}
+    for position, chunk in enumerate(chunk_rows, 1):
+        document_uid = _stable_identity_value(chunk.get("report_uid"))
+        file_name = _stable_identity_value(chunk.get("file_name"))
+        if document_uid:
+            grouping_key = ("report_uid", document_uid)
+        elif file_name:
+            grouping_key = ("legacy_file_name", file_name)
+        else:
+            grouping_key = ("unknown_position", str(position))
+        row = documents.get(grouping_key)
+        if row is None:
+            row = {
+                "document_uid": document_uid,
+                "identity_status": "measured" if document_uid else "not_measured",
+                "file_name": chunk.get("file_name"),
+                "target_name": chunk.get("target_name"),
+                "report_date": chunk.get("report_date"),
+                "title": chunk.get("title"),
+                "broker": chunk.get("broker"),
+                "report_type": chunk.get("report_type"),
+                "best_rank": chunk.get("rank"),
+                "chunk_count": 0,
+                "cited_chunk_count": 0,
+            }
+            documents[grouping_key] = row
+        row["chunk_count"] += 1
+        if chunk.get("cited"):
+            row["cited_chunk_count"] += 1
+        rank = _nonnegative_int(chunk.get("rank"))
+        best_rank = _nonnegative_int(row.get("best_rank"))
+        if rank is not None and (best_rank is None or rank < best_rank):
+            row["best_rank"] = rank
+    return list(documents.values())
+
+
+def _build_rdb_evidence_rows(
+    selected_sources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return document metadata for RDB evidence without labelling it as chunks."""
+
+    rows: list[dict[str, Any]] = []
+    for fallback_rank, raw_source in enumerate(selected_sources, 1):
+        source = raw_source if isinstance(raw_source, dict) else {}
+        document_uid = _stable_identity_value(source.get("report_uid"))
+        rows.append(
+            {
+                "rank": _first_measured_int(source.get("rank"), fallback_rank),
+                "document_uid": document_uid,
+                "identity_status": "measured" if document_uid else "not_measured",
+                "file_name": source.get("file_name"),
+                "target_name": source.get("target_name"),
+                "report_date": source.get("report_date"),
+                "title": source.get("title"),
+                "broker": source.get("broker"),
+                "report_type": source.get("report_type"),
+            }
+        )
+    return rows
+
+
+def _stable_identity_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if normalized and normalized != "-" else None
+
+
+def _source_identity_status(selected_sources: list[dict[str, Any]]) -> str:
+    if not selected_sources:
+        return "not_applicable"
+    measured = sum(
+        1
+        for source in selected_sources
+        if _stable_identity_value((source or {}).get("chunk_uid"))
+        and _stable_identity_value((source or {}).get("report_uid"))
+    )
+    if measured == len(selected_sources):
+        return "measured"
+    if measured:
+        return "partial"
+    return "not_measured"
+
+
+def _build_grounding_trace(
+    metadata: dict[str, Any],
+    *,
+    selected_sources: list[dict[str, Any]],
+    citation_ranks: list[int],
+    citation_valid: bool | None,
+) -> dict[str, Any]:
+    overall = metadata.get("status", "unknown")
+    route = metadata.get("route")
+    reason_codes: list[str] = []
+    source_identity_status = (
+        _source_identity_status(selected_sources)
+        if route == "vectordb"
+        else "not_applicable"
+    )
+    if overall != "succeeded":
+        status = "not_evaluated"
+        reason_codes.append("response_not_succeeded")
+    elif route == "vectordb" and metadata.get("no_vector_results"):
+        status = "not_applicable"
+        reason_codes.append("no_vector_results")
+    elif route == "vectordb" and not selected_sources:
+        status = "unavailable"
+        reason_codes.append("no_context_sources")
+    elif (
+        route == "vectordb"
+        and citation_ranks
+        and citation_valid
+        and source_identity_status == "measured"
+    ):
+        status = "linked"
+        reason_codes.append("valid_citation_to_selected_source")
+    elif route == "vectordb" and citation_ranks and citation_valid:
+        status = "partial"
+        reason_codes.extend(
+            [
+                "valid_citation_rank_without_stable_source_identity",
+                f"source_identity_{source_identity_status}",
+            ]
+        )
+    elif route == "vectordb":
+        status = "partial"
+        reason_codes.append(
+            "citation_missing" if not citation_ranks else "citation_out_of_range"
+        )
+    elif route == "rdb":
+        rdb = (metadata.get("monitoring") or {}).get("rdb") or {}
+        row_count = _nonnegative_int(rdb.get("row_count"))
+        if rdb.get("guardrail_blocked"):
+            status = "unavailable"
+            reason_codes.append("rdb_guardrail_blocked")
+        elif row_count == 0:
+            status = "not_applicable"
+            reason_codes.append("rdb_no_rows")
+        elif row_count is not None:
+            status = "linked"
+            reason_codes.append("rdb_result_available")
+        else:
+            status = "not_measured"
+            reason_codes.append("rdb_evidence_not_measured")
+    else:
+        status = "not_measured"
+        reason_codes.append("route_not_measured")
+    return {
+        "status": status,
+        "reason_codes": reason_codes,
+        "semantic_review_status": "not_evaluated",
+        "source_identity_status": source_identity_status,
+        "citation_valid": citation_valid if selected_sources else None,
+    }
+
+
+def _build_state_status_trace(metadata: dict[str, Any]) -> dict[str, Any]:
+    monitoring = metadata.get("monitoring") or {}
+    query_rewrite = _metadata_query_rewrite(metadata)
+    retrieval = _metadata_retrieval(metadata)
+    route = metadata.get("route")
+    state_trace = monitoring.get("state_trace") or {}
+    state_snapshot = monitoring.get("state_snapshot") or {}
+    available_keys = set(state_snapshot.get("available_keys") or [])
+    overall = metadata.get("status", "unknown")
+    if overall == "succeeded":
+        answer_status = "completed"
+    elif overall == "failed":
+        answer_status = "failed"
+    elif overall == "running":
+        answer_status = "running"
+    else:
+        answer_status = "not_measured"
+    if route == "vectordb" and metadata.get("no_vector_results"):
+        retrieval_status = "no_results"
+    elif route == "vectordb" and retrieval:
+        retrieval_status = "completed"
+    elif route == "rdb" and monitoring.get("rdb"):
+        retrieval_status = "completed"
+    elif route in {"vectordb", "rdb"}:
+        retrieval_status = "not_measured"
+    else:
+        retrieval_status = "not_applicable"
+    return {
+        "overall": overall,
+        "stages": {
+            "input": "completed" if metadata.get("question") else "not_measured",
+            "query_rewrite": (
+                "completed"
+                if query_rewrite.get("rewritten_query") is not None
+                or "rewritten_query" in available_keys
+                else "not_measured"
+            ),
+            "search_scope": (
+                "completed"
+                if bool(metadata.get("search_scope"))
+                or bool(metadata.get("scope_source"))
+                or bool(metadata.get("scope_decision"))
+                or "search_filters" in available_keys
+                or bool((state_trace.get("after_search_scope") or {}))
+                else "not_measured"
+            ),
+            "routing": (
+                "completed"
+                if route in {"vectordb", "rdb"}
+                and (
+                    state_snapshot.get("route") == route
+                    or "route" in available_keys
+                    or bool(monitoring.get("routing"))
+                    or bool(metadata.get("routing_context"))
+                )
+                else "not_measured"
+            ),
+            "retrieval": retrieval_status,
+            "answer": answer_status,
+        },
+        "snapshot": state_snapshot,
+    }
 
 
 def _scope_file_count(scope: dict[str, Any] | None) -> int:
@@ -702,9 +1160,26 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
     retrieval = _metadata_retrieval(metadata)
     query_rewrite = _metadata_query_rewrite(metadata)
     selected_sources = _metadata_selected_sources(metadata)
-    source_count = len(group_sources_by_document(selected_sources))
+    route = metadata.get("route")
+    vector_sources = selected_sources if route == "vectordb" else []
+    rdb_sources = selected_sources if route == "rdb" else []
+    source_count = (
+        len(group_sources_by_document(vector_sources))
+        if route == "vectordb"
+        else len(rdb_sources)
+    )
     answer = str(message.get("content") or "")
-    citation_ranks = sorted(extract_citation_ranks(answer, source_count=None))
+    citation_ranks = (
+        sorted(extract_citation_ranks(answer, source_count=None))
+        if route == "vectordb"
+        else []
+    )
+    citation_valid = (
+        _citation_valid(answer, vector_sources) if route == "vectordb" else None
+    )
+    used_chunks = _build_used_chunk_rows(vector_sources, citation_ranks)
+    used_documents = _build_used_document_rows(used_chunks)
+    rdb_evidence = _build_rdb_evidence_rows(rdb_sources)
     return {
         "query_rewrite": {
             "original_question": user_question or metadata.get("question"),
@@ -729,13 +1204,25 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
             "full_period_request": (monitoring.get("routing") or {}).get("full_period_request"),
         },
         "state_transitions": _build_state_transition_trace(metadata),
+        "state_status": _build_state_status_trace(metadata),
+        "timing": _build_turn_timing_trace(metadata),
+        "retrieval_k": _build_retrieval_k_trace(metadata),
+        "grounding": _build_grounding_trace(
+            metadata,
+            selected_sources=selected_sources,
+            citation_ranks=citation_ranks,
+            citation_valid=citation_valid,
+        ),
         "retrieval": retrieval,
-        "sources": selected_sources,
+        "sources": used_chunks,
+        "used_chunks": used_chunks,
+        "used_documents": used_documents,
+        "rdb_evidence": rdb_evidence,
         "answer": {
             "assistant_preview": _safe_preview(answer, 500),
             "source_count": source_count,
             "citation_ranks_used": citation_ranks,
-            "citation_valid": _citation_valid(answer, selected_sources),
+            "citation_valid": citation_valid,
         },
     }
 
@@ -751,6 +1238,9 @@ def build_message_trace_summary(
     scope = detail.get("scope") or {}
     routing = detail.get("routing") or {}
     retrieval = detail.get("retrieval") or {}
+    retrieval_k = detail.get("retrieval_k") or {}
+    state_status = detail.get("state_status") or {}
+    grounding = detail.get("grounding") or {}
     answer = detail.get("answer") or {}
     scope_decision = query_rewrite.get("scope_decision") or {}
     industry_lookup = scope.get("industry_lookup_context") or {}
@@ -764,10 +1254,24 @@ def build_message_trace_summary(
         "industry_term": scope_decision.get("industry_term") or industry_lookup.get("term"),
         "search_filters": scope.get("search_filters") or {},
         "candidate_count_after_filter": retrieval.get("candidate_count_after_filter"),
-        "source_count": answer.get("source_count") or retrieval.get("source_count"),
+        "source_count": (
+            answer.get("source_count")
+            if answer.get("source_count") is not None
+            else retrieval.get("source_count")
+        ),
         "prior_scope_file_count": (detail.get("state_transitions") or {}).get("input", {}).get("prior_search_scope_file_count"),
         "search_scope_file_count": (detail.get("state_transitions") or {}).get("after_search_scope", {}).get("search_scope_file_count"),
         "citation_valid": answer.get("citation_valid"),
+        "state_status": state_status.get("overall"),
+        "grounding_status": grounding.get("status"),
+        "source_identity_status": grounding.get("source_identity_status"),
+        "configured_top_k": retrieval_k.get("configured_top_k"),
+        "requested_k": retrieval_k.get("requested_k"),
+        "fetch_k": retrieval_k.get("fetch_k"),
+        "context_count": retrieval_k.get("context_count"),
+        "used_chunk_count": len(detail.get("used_chunks") or []),
+        "used_document_count": len(detail.get("used_documents") or []),
+        "rdb_evidence_count": len(detail.get("rdb_evidence") or []),
         "debug_hint_count": len(hints or []),
         "diff_available": bool(diff),
     }
@@ -1206,11 +1710,18 @@ def _filters_match(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
 
 
 def _citation_valid(answer: str, sources: list[dict[str, Any]]) -> bool:
-    source_count = len(group_sources_by_document(sources))
     cited = extract_citation_ranks(answer or "", source_count=None)
     if not cited:
-        return source_count == 0
-    return all(1 <= rank <= source_count for rank in cited)
+        return len(sources) == 0
+    available_ranks: set[int] = set()
+    for fallback_rank, source in enumerate(sources, 1):
+        try:
+            rank = int((source or {}).get("rank", fallback_rank))
+        except (TypeError, ValueError):
+            rank = fallback_rank
+        if rank > 0:
+            available_ranks.add(rank)
+    return cited.issubset(available_ranks)
 
 
 def evaluate_dataset_case_result(
@@ -1232,7 +1743,21 @@ def evaluate_dataset_case_result(
     no_result_absent = not no_result
     expected_state = case.get("expected_state") or {}
     expected_state_pass = _expected_state_matches(expected_state, final_state)[0]
+    try:
+        answer_requirement_evaluation = evaluate_answer_requirements(
+            case.get("expected_answer_requirements"),
+            answer=str(final_state.get("generation") or ""),
+            sources=[
+                source for source in sources if isinstance(source, Mapping)
+            ],
+        )
+    except AnswerRequirementValidationError as exc:
+        raise CandidateValidationError(
+            f"expected_answer_requirements is invalid: {exc}"
+        ) from exc
+    answer_requirements_pass = answer_requirement_evaluation["passed"]
     check_results = {
+        "answer_requirements_pass": answer_requirements_pass,
         "route_pass": route_pass,
         "filter_pass": filter_pass,
         "source_hit": source_hit,
@@ -1252,6 +1777,9 @@ def evaluate_dataset_case_result(
                 f"unsupported active checks: {sorted(unknown)}"
             )
         prerequisites = {
+            "answer_requirements_pass": case.get(
+                "expected_answer_requirements"
+            ),
             "route_pass": case.get("expected_route"),
             "filter_pass": case.get("expected_filters"),
             "source_hit": case.get("expected_sources"),
@@ -1298,6 +1826,10 @@ def evaluate_dataset_case_result(
         "no_result": no_result,
         "no_result_absent": no_result_absent,
         "expected_state_pass": expected_state_pass,
+        "answer_requirements_pass": answer_requirements_pass,
+        "answer_requirement_results": answer_requirement_evaluation[
+            "results"
+        ],
         "actual_filters": final_state.get("search_filters") or {},
         "source_count": len(sources),
     }
@@ -1991,7 +2523,14 @@ def _canonical_expected(value: Any) -> dict[str, Any]:
         return {}
     if not isinstance(value, Mapping):
         raise CandidateValidationError("expected must be an object")
-    allowed = {"route", "filters", "sources", "state", "manual_assertions"}
+    allowed = {
+        "route",
+        "filters",
+        "sources",
+        "state",
+        "manual_assertions",
+        "answer_requirements",
+    }
     unknown = set(value) - allowed
     if unknown:
         raise CandidateValidationError(f"unsupported expected fields: {sorted(unknown)}")
@@ -1999,10 +2538,19 @@ def _canonical_expected(value: Any) -> dict[str, Any]:
     sources = value.get("sources", [])
     state = value.get("state", {})
     assertions = value.get("manual_assertions", [])
+    raw_answer_requirements = value.get("answer_requirements", [])
     filters = {} if filters is None else filters
     sources = [] if sources is None else sources
     state = {} if state is None else state
     assertions = [] if assertions is None else assertions
+    try:
+        answer_requirements = canonicalize_answer_requirements(
+            raw_answer_requirements
+        )
+    except AnswerRequirementValidationError as exc:
+        raise CandidateValidationError(
+            f"expected.answer_requirements is invalid: {exc}"
+        ) from exc
     if not isinstance(filters, Mapping):
         raise CandidateValidationError("expected.filters must be an object")
     if not isinstance(sources, list) or any(
@@ -2089,13 +2637,16 @@ def _canonical_expected(value: Any) -> dict[str, Any]:
     route = value.get("route")
     if route not in (None, "vectordb", "rdb"):
         raise CandidateValidationError("expected.route is invalid")
-    return {
+    result = {
         "route": route,
         "filters": dict(filters),
         "sources": [dict(source) for source in sources],
         "state": dict(state),
         "manual_assertions": normalized_assertions,
     }
+    if answer_requirements:
+        result["answer_requirements"] = answer_requirements
+    return result
 
 
 def _canonical_quality_profile(value: Any) -> str:
@@ -2850,6 +3401,7 @@ def _validate_active_checks(candidate: Mapping[str, Any]) -> None:
     ]
     requires_manual = _MANUAL_CHECK in active_checks
     prerequisites = {
+        "answer_requirements_pass": expected.get("answer_requirements"),
         "route_pass": expected.get("route"),
         "filter_pass": expected.get("filters"),
         "source_hit": expected.get("sources"),
@@ -4602,6 +5154,10 @@ def build_candidate_evaluation_case(
         "expected_filters": expected.get("filters") or {},
         "expected_sources": expected.get("sources") or [],
         "expected_state": expected.get("state") or {},
+        "expected_answer_requirements": expected.get(
+            "answer_requirements"
+        )
+        or [],
         "evaluation_profile": _candidate_validation_plan(canonical)[
             "quality_profile"
         ],
@@ -5386,6 +5942,9 @@ def compact_graph_monitoring_metadata(
         "scope_decision": final_state.get("scope_decision"),
         "industry_lookup_context": final_state.get("industry_lookup_context"),
         "monitoring": {
+            "timing": {
+                "total_seconds": round(latency_seconds, 3),
+            },
             "query_rewrite": {
                 "rewritten_query": final_state.get("rewritten_query"),
                 "uses_chat_history": final_state.get("uses_chat_history"),
@@ -5401,6 +5960,19 @@ def compact_graph_monitoring_metadata(
             "retrieval": {
                 "source_count": len(rerank_info),
                 "score_summary": _score_summary(rerank_info),
+            },
+            "state_snapshot": {
+                "available_keys": sorted(str(key) for key in final_state),
+                "route": route,
+                "search_filters": final_state.get("search_filters") or {},
+                "scope_source": final_state.get("scope_source"),
+                "no_vector_results": bool(final_state.get("no_vector_results")),
+                "memory_retry_attempted": bool(
+                    final_state.get("memory_retry_attempted")
+                ),
+                "has_generation": final_state.get("generation") is not None,
+                "has_rdb_result": final_state.get("rdb_result") is not None,
+                "selected_source_count": len(rerank_info),
             },
         },
     }

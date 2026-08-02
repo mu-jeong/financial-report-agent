@@ -204,7 +204,7 @@ def test_v1_rerank_then_coverage_keeps_one_passage_per_required_report(
     monkeypatch.setattr(vectordb, "get_ranker", lambda: ranker)
     monkeypatch.setattr(vectordb, "USE_RERANKER", True)
     monkeypatch.setattr(vectordb, "SEARCH_TOP_K", 2)
-    monkeypatch.setattr(vectordb, "RERANK_CANDIDATE_MULTIPLIER", 2)
+    monkeypatch.setattr(vectordb, "SEARCH_CANDIDATE_MULTIPLIER", 2)
     monkeypatch.setattr(vectordb, "RECENCY_WEIGHT", 0.0)
     required_files = [
         fixture.file_names["company_january"],

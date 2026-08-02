@@ -50,7 +50,6 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | `RERANK_PROVIDER` | `openrouter` | `openrouter` 또는 명시적 로컬 `flashrank` adapter |
 | `RERANK_MODEL` | `cohere/rerank-v3.5` | OpenRouter rerank 모델 |
 | `RERANK_TIMEOUT` | `60.0` | rerank 요청 timeout(초) |
-| `RERANK_CANDIDATE_MULTIPLIER` | `3` | rerank 전에 `SEARCH_TOP_K`의 몇 배 후보를 가져올지 결정 |
 
 `RERANK_PROVIDER=flashrank`는 자동 fallback이 아니라 명시적 로컬 adapter입니다. 이 경우 `RERANK_MODEL`도 FlashRank가 지원하는 로컬 model name으로 바꿔야 합니다(예: `ms-marco-TinyBERT-L-2-v2`). 기본값 `cohere/rerank-v3.5`는 OpenRouter rerank 전용입니다. Quick Start와 기본 실행은 비용을 줄이기 위해 `USE_RERANKER=false`를 권장합니다.
 
@@ -59,6 +58,7 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | 설정 | 설명 |
 | --- | --- |
 | `SEARCH_TOP_K` | 답변 파이프라인으로 넘길 vector search 결과 수 |
+| `SEARCH_CANDIDATE_MULTIPLIER` | retrieval과 rerank 전에 가져올 후보 수의 배수. 기본값은 `1`이며 후보 수는 `SEARCH_TOP_K × SEARCH_CANDIDATE_MULTIPLIER`로 계산 |
 | `RECENCY_WEIGHT` | 최신 리포트에 부여하는 검색 점수 가중치 |
 | `TEST_LIMIT` | V1 기본 임베딩 처리 제한. `0`이면 V1 pending 전체 처리. Native V2는 이 값을 무시하고 전체 source inventory를 검사 |
 | `USE_PARENT_CHILD` | parent-child chunking 사용 여부 |

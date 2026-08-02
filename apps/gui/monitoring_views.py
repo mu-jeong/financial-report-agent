@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import streamlit as st
@@ -12,11 +11,16 @@ from apps.gui import search_engine
 from src.configs import config as config_module
 from src.core import compare_pdf_extractors
 from src.core import conversation_store
+from src.core import expectation_suggester
 from src.core import feedback_handoff
 from src.core import issue_report_store
 from src.core import monitoring
-from src.core import reproduction_manifest
 from src.core import status as status_module
+from src.core.answer_requirements import (
+    AnswerRequirementValidationError,
+    MAX_ANSWER_REQUIREMENTS,
+    canonicalize_answer_requirements,
+)
 
 
 MONITORING_EVAL_RUN_DIR = Path("debug") / "evaluation_runs"
@@ -30,7 +34,7 @@ _PROBLEM_AREA_LABELS = {
     "search_data": "검색 자료 준비",
     "evaluation": "정확도 평가",
     "parsing": "문서 읽기 품질 비교",
-    "issues": "신고·수정 확인",
+    "issues": "신고·수정 확인 · 묶음 전 단계",
 }
 
 _V2_CHECK_LABELS = {
@@ -588,6 +592,46 @@ def _write_and_record_candidate_handoff(
     )
 
 
+def _load_candidate_source_report(candidate: dict) -> dict | None:
+    """Load the report only to give the LLM the selected answer and comment."""
+
+    for key in ("source_json_path", "source_file_path"):
+        source_path = candidate.get(key)
+        if not source_path:
+            continue
+        try:
+            return issue_report_store.load_report(source_path)
+        except (
+            issue_report_store.IssueReportLoadError,
+            OSError,
+        ):
+            continue
+    return None
+
+
+def _parse_condition_terms(value: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for part in value.replace("\n", ",").split(","):
+        term = part.strip()
+        normalized = term.casefold()
+        if term and normalized not in seen:
+            seen.add(normalized)
+            terms.append(term)
+    return terms
+
+
+def _manual_assertions_from_text(value: str) -> list[dict[str, str]]:
+    return [
+        {
+            "id": f"manual_assertion_{index}",
+            "text": line.strip(),
+        }
+        for index, line in enumerate(value.splitlines(), 1)
+        if line.strip()
+    ]
+
+
 def _render_candidate_lifecycle(candidate: dict) -> None:
     path = candidate.get("json_path")
     if not path:
@@ -624,6 +668,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
     )
     if not readiness["ready"]:
         st.warning(readiness["reason"])
+    snapshot_readiness = monitoring.assess_evaluation_snapshot_readiness()
     with st.expander("검증 계획과 재현 매니페스트", expanded=False):
         st.json(
             {
@@ -632,6 +677,33 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                     "reproduction_manifest"
                 ),
             }
+        )
+        st.markdown("##### 자동 재현 자료")
+        if snapshot_readiness["ready"]:
+            st.success("자동 재현 자료 준비됨")
+        else:
+            st.warning("자동 재현 자료 미준비")
+            missing_labels = {
+                "dataset": "고정 dataset",
+                "snapshot_manifest": "snapshot manifest",
+                "snapshot_root": "snapshot 디렉터리",
+            }
+            missing = [
+                missing_labels.get(item, item)
+                for item in snapshot_readiness["missing_inputs"]
+            ]
+            if missing:
+                st.caption("누락: " + ", ".join(missing))
+            elif snapshot_readiness["failed_checks"]:
+                st.caption(
+                    "검증 실패: "
+                    + ", ".join(snapshot_readiness["failed_checks"])
+                )
+            else:
+                st.caption(snapshot_readiness["reason"])
+        st.caption(
+            "검증 계획은 판정 기준이고 재현 매니페스트는 환경 지문입니다. "
+            "자동 실행에는 별도의 유효한 고정 dataset과 snapshot이 필요합니다."
         )
     form_revision_key = (
         f"feedback_candidate_form_revision_{candidate['id']}_{status}"
@@ -643,13 +715,23 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
     else:
         form_record_revision = int(candidate["record_revision"])
 
-    with st.expander("관찰 결과와 승인 기대 결과", expanded=False):
+    with st.expander("관찰 결과와 현재 기대 결과", expanded=False):
         observed_column, expected_column = st.columns(2)
         with observed_column:
             st.markdown("##### 관찰 결과")
             st.json(candidate.get("observed") or {})
         with expected_column:
-            st.markdown("##### 승인 기대 결과")
+            st.markdown("##### 현재 기대 결과(읽기 전용)")
+            approved_at = candidate.get("expected_approved_at")
+            approved_by = candidate.get("expected_approved_by")
+            if approved_at:
+                st.success("승인 여부: 승인됨")
+                st.caption(
+                    f"승인자: {approved_by or '기록 없음'} · "
+                    f"승인 시각: {approved_at}"
+                )
+            else:
+                st.warning("승인 여부: 미승인")
             st.json(candidate.get("expected") or {})
 
     run_recovery = monitoring.discover_candidate_orphan_runs(
@@ -886,7 +968,6 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         decision_options = [
             "accepted",
             "needs_info",
-            "duplicate",
             "rejected",
         ]
         current_impact = candidate.get("impact_area")
@@ -922,11 +1003,6 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                     else 0
                 ),
             )
-            duplicate_of = st.text_input(
-                "중복 대상 후보 ID",
-                value=str(candidate.get("duplicate_of") or ""),
-                help="처리 결정을 중복으로 선택했을 때만 입력합니다.",
-            )
             save_triage = st.form_submit_button(
                 "분류 저장",
                 use_container_width=True,
@@ -941,11 +1017,6 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                         "impact_area": impact_area,
                         "impact_summary": impact_summary,
                         "operator_decision": decision,
-                        "duplicate_of": (
-                            duplicate_of.strip()
-                            if decision == "duplicate"
-                            else None
-                        ),
                     },
                     reason="모니터링 화면에서 분류 저장",
                 ),
@@ -983,7 +1054,6 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             decision_options = [
                 "accepted",
                 "needs_info",
-                "duplicate",
                 "rejected",
             ]
             current_impact = candidate.get("impact_area")
@@ -1020,11 +1090,6 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                         else decision_options.index("needs_info")
                     ),
                 )
-                duplicate_of = st.text_input(
-                    "중복 대상 후보 ID",
-                    value=str(candidate.get("duplicate_of") or ""),
-                    help="처리 결정을 중복으로 선택했을 때만 입력합니다.",
-                )
                 save_followup = st.form_submit_button(
                     "추가 정보 반영",
                     use_container_width=True,
@@ -1039,11 +1104,6 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                             "impact_area": impact_area,
                             "impact_summary": impact_summary,
                             "operator_decision": revised_decision,
-                            "duplicate_of": (
-                                duplicate_of.strip()
-                                if revised_decision == "duplicate"
-                                else None
-                            ),
                         },
                         reason="추가 정보 반영 후 후보 재분류",
                     ),
@@ -1088,314 +1148,340 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                         reason=rejection_reason,
                     )
                 )
-        elif decision == "duplicate":
-            duplicate_reason = st.text_input(
-                "중복 처리 사유",
-                key=f"candidate_duplicate_reason_{candidate['id']}",
-            )
-            if st.button(
-                "중복 후보로 종료",
-                key=f"candidate_duplicate_{candidate['id']}",
-                use_container_width=True,
-                disabled=not duplicate_reason.strip(),
-            ):
-                _rerun_candidate_action(
-                    lambda: monitoring.transition_regression_candidate(
-                        path,
-                        to_status="duplicate",
-                        expected_record_revision=candidate["record_revision"],
-                        reason=duplicate_reason,
-                    )
-                )
         else:
             st.info("추가 정보가 확보되면 분류 내용을 갱신해 주세요.")
 
     elif status == "needs_expectation":
         expected = candidate.get("expected") or {}
-        route_options = [None, "vectordb", "rdb"]
-        current_route = expected.get("route")
+        observed = candidate.get("observed") or {}
+        reproduction_input = observed.get("reproduction_input") or {}
+        actual = observed.get("actual") or {}
         current_plan = candidate.get("validation_plan") or {}
-        current_profile = candidate.get("quality_profile") or "balanced"
-        profile_options = [
-            "accuracy_first",
-            "balanced",
-            "speed_first",
-        ]
-        check_options = [
-            "route_pass",
-            "filter_pass",
-            "source_hit",
-            "citation_valid",
-            "latency_pass",
-            "no_result_absent",
-            "expected_state_pass",
-        ]
-        with st.form(f"candidate_contract_{candidate['id']}"):
-            reproduction_input_text = st.text_area(
-                "재현 입력(JSON)",
-                value=json.dumps(
-                    (candidate.get("observed") or {}).get(
-                        "reproduction_input"
+        current_profile = (
+            candidate.get("quality_profile") or "accuracy_first"
+        )
+        question = str(reproduction_input.get("question") or "").strip()
+        scenario = str(reproduction_input.get("scenario") or "").strip()
+        supports_answer_requirements = bool(question)
+        st.markdown("##### 재현 대상")
+        st.write(question or scenario or "재현 질문 또는 시나리오가 없습니다.")
+        chat_history = reproduction_input.get("chat_history") or []
+        if chat_history:
+            st.caption(f"이전 대화 {len(chat_history)}개 turn도 자동으로 사용합니다.")
+
+        suggestion_key = (
+            f"candidate_expectation_suggestion_{candidate['id']}_"
+            f"{candidate['record_revision']}"
+        )
+        draft_version_key = f"{suggestion_key}_version"
+        count_key = f"{suggestion_key}_count"
+        if st.button(
+            "LLM으로 최소 조건 제안",
+            key=f"candidate_suggest_expectation_{candidate['id']}",
+            use_container_width=True,
+            disabled=not supports_answer_requirements,
+            help=(
+                "신고된 질문·답변·검색 메타데이터를 기존 생성 모델로 분석합니다. "
+                "제안은 저장되거나 승인되지 않습니다."
+            ),
+        ):
+            with st.spinner("현재 답변에서 빠진 최소 조건을 찾는 중입니다..."):
+                try:
+                    suggestion = (
+                        expectation_suggester.suggest_minimum_expectation(
+                            candidate,
+                            source_report=_load_candidate_source_report(
+                                candidate
+                            ),
+                        )
                     )
-                    or {},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                help=(
-                    "응답 문제는 question과 필요한 prior_search_scope, "
-                    "응답 없는 UI 문제는 scenario를 사용합니다."
-                ),
+                except expectation_suggester.ExpectationSuggestionError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state[suggestion_key] = suggestion
+                    st.session_state[draft_version_key] = (
+                        int(st.session_state.get(draft_version_key, 0)) + 1
+                    )
+                    st.session_state[count_key] = len(
+                        suggestion["requirements"]
+                    )
+                    st.rerun()
+        st.caption(
+            "버튼을 누를 때 선택 turn의 질문·답변·신고 사유와 제한된 출처 "
+            "메타데이터가 현재 설정된 LLM으로 전송됩니다. LLM은 초안만 만들며 "
+            "저장과 승인은 운영자가 각각 수행합니다."
+        )
+        if not supports_answer_requirements:
+            st.info(
+                "답변이 없는 화면·동작 신고입니다. 고급 설정에 수동 확인 "
+                "조건을 한 줄씩 입력해 주세요."
             )
-            quality_profile = st.selectbox(
-                "품질 프로파일",
-                profile_options,
-                index=(
-                    profile_options.index(current_profile)
-                    if current_profile in profile_options
-                    else 1
-                ),
-                format_func=lambda value: {
-                    "accuracy_first": "정확성 우선",
-                    "balanced": "균형형",
-                    "speed_first": "속도 우선",
-                }[value],
-            )
+
+        suggestion = st.session_state.get(suggestion_key) or {}
+        if suggestion.get("summary"):
+            st.success(f"제안 요약: {suggestion['summary']}")
+        initial_requirements = (
+            expected.get("answer_requirements")
+            or suggestion.get("requirements")
+            or []
+        )
+        if supports_answer_requirements:
+            if count_key in st.session_state:
+                condition_count = int(
+                    st.number_input(
+                        "최소 답변 조건 수",
+                        min_value=1,
+                        max_value=MAX_ANSWER_REQUIREMENTS,
+                        step=1,
+                        key=count_key,
+                    )
+                )
+            else:
+                condition_count = int(
+                    st.number_input(
+                        "최소 답변 조건 수",
+                        min_value=1,
+                        max_value=MAX_ANSWER_REQUIREMENTS,
+                        value=min(
+                            MAX_ANSWER_REQUIREMENTS,
+                            max(1, len(initial_requirements)),
+                        ),
+                        step=1,
+                        key=count_key,
+                    )
+                )
+        else:
+            condition_count = 0
+        draft_version = int(st.session_state.get(draft_version_key, 0))
+        edited_requirements: list[dict] = []
+        form_key = (
+            f"candidate_contract_{candidate['id']}_{draft_version}"
+        )
+        with st.form(form_key):
+            st.markdown("##### 최소 답변 조건")
             st.caption(
-                "속도 우선도 정확성·안전성 경성 기준을 "
-                "최소 하나 포함해야 합니다."
+                "모든 조건을 만족해야 통과합니다. 표현은 쉼표로 구분하며, "
+                "같은 대상의 정식명과 별칭을 함께 적을 수 있습니다."
             )
-            route = st.selectbox(
-                "기대 경로",
-                route_options,
-                index=route_options.index(current_route)
-                if current_route in route_options
-                else 0,
-                format_func=lambda value: value
-                or "수동 검사에서는 사용하지 않음",
+            for index in range(condition_count):
+                requirement = (
+                    initial_requirements[index]
+                    if index < len(initial_requirements)
+                    else {}
+                )
+                with st.expander(
+                    f"조건 {index + 1}",
+                    expanded=index == 0,
+                ):
+                    description = st.text_input(
+                        "통과 조건",
+                        value=str(requirement.get("description") or ""),
+                        key=(
+                            f"candidate_requirement_description_"
+                            f"{candidate['id']}_{draft_version}_{index}"
+                        ),
+                        placeholder=(
+                            "예: SK하이닉스 리포트 내용을 근거와 함께 다룬다."
+                        ),
+                    )
+                    answer_terms = st.text_input(
+                        "답변에서 확인할 표현",
+                        value=", ".join(
+                            requirement.get("answer_terms_any") or []
+                        ),
+                        key=(
+                            f"candidate_requirement_answer_terms_"
+                            f"{candidate['id']}_{draft_version}_{index}"
+                        ),
+                        placeholder="SK하이닉스, 하이닉스",
+                    )
+                    source_terms = st.text_input(
+                        "근거 문서에서 확인할 대상",
+                        value=", ".join(
+                            requirement.get("source_terms_any") or []
+                        ),
+                        key=(
+                            f"candidate_requirement_source_terms_"
+                            f"{candidate['id']}_{draft_version}_{index}"
+                        ),
+                        placeholder="SK하이닉스, 하이닉스",
+                    )
+                    require_citation = st.checkbox(
+                        "일치하는 근거 문서를 인용해야 통과",
+                        value=bool(
+                            requirement.get("require_citation", True)
+                        ),
+                        key=(
+                            f"candidate_requirement_citation_"
+                            f"{candidate['id']}_{draft_version}_{index}"
+                        ),
+                    )
+                    edited_requirements.append(
+                        {
+                            "id": str(
+                                requirement.get("id")
+                                or f"answer_requirement_{index + 1}"
+                            ),
+                            "description": description,
+                            "answer_terms_any": _parse_condition_terms(
+                                answer_terms
+                            ),
+                            "source_terms_any": _parse_condition_terms(
+                                source_terms
+                            ),
+                            "require_citation": require_citation,
+                        }
+                    )
+
+            current_manual_assertions = expected.get(
+                "manual_assertions"
+            ) or []
+            with st.expander("고급 설정", expanded=False):
+                st.caption(
+                    "품질 프로파일, 성능 예산, 재현 입력과 환경 지문은 기존 "
+                    "후보 설정에서 자동으로 유지합니다."
+                )
+                manual_assertions_text = st.text_area(
+                    "수동 확인 조건(선택, 한 줄에 하나)",
+                    value="\n".join(
+                        str(item.get("text") or "")
+                        for item in current_manual_assertions
+                    ),
+                    key=(
+                        f"candidate_manual_assertions_text_"
+                        f"{candidate['id']}_{draft_version}"
+                    ),
+                )
+                st.caption(
+                    f"자동 유지: 품질 프로파일 {current_profile} · "
+                    f"재현 매니페스트 "
+                    f"{str((candidate.get('reproduction_manifest') or {}).get('manifest_hash') or '')[:12] or '미준비'}"
+                )
+            save_contract = st.form_submit_button(
+                "최소 조건 저장",
+                use_container_width=True,
             )
-            filters_text = st.text_area(
-                "기대 검색 조건(JSON)",
-                value=json.dumps(
-                    expected.get("filters") or {},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-            sources_text = st.text_area(
-                "기대 출처(JSON 배열)",
-                value=json.dumps(
-                    expected.get("sources") or [],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-            state_text = st.text_area(
-                "기대 상태(JSON)",
-                value=json.dumps(
-                    expected.get("state") or {},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-            assertions_text = st.text_area(
-                "수동 검사 항목(JSON 배열)",
-                value=json.dumps(
-                    expected.get("manual_assertions") or [],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                help=(
-                    '예: [{"id": "answer_grounded", '
-                    '"text": "근거가 명확함"}]'
-                ),
-            )
-            selected_checks = st.multiselect(
-                "자동 경성 검사",
-                check_options,
-                default=[
+        if save_contract:
+            populated_requirements = [
+                requirement
+                for requirement in edited_requirements
+                if (
+                    requirement["description"].strip()
+                    or requirement["answer_terms_any"]
+                    or requirement["source_terms_any"]
+                )
+            ]
+            try:
+                answer_requirements = canonicalize_answer_requirements(
+                    populated_requirements
+                )
+            except AnswerRequirementValidationError as exc:
+                st.error(f"최소 답변 조건을 확인해 주세요: {exc}")
+            else:
+                manual_assertions = _manual_assertions_from_text(
+                    manual_assertions_text
+                )
+                prerequisite_values = {
+                    "route_pass": expected.get("route"),
+                    "filter_pass": expected.get("filters"),
+                    "source_hit": expected.get("sources"),
+                    "expected_state_pass": expected.get("state"),
+                }
+                preserved_checks = [
                     check
-                    for check in current_plan.get("hard_checks")
-                    or candidate.get("active_checks")
-                    or []
-                    if check in check_options
-                ],
-            )
-            include_manual = st.checkbox(
-                "수동 검사도 경성 기준으로 포함",
-                value=(
-                    "manual_assertions_pass"
-                    in (
+                    for check in (
                         current_plan.get("hard_checks")
                         or candidate.get("active_checks")
                         or []
                     )
-                ),
-            )
-            manual_mode = st.selectbox(
-                "수동 검사 유형",
-                ["manual_answer_quality", "manual_ui"],
-                index=(
-                    1
-                    if candidate.get("verification_type")
-                    == "manual_ui"
-                    else 0
-                ),
-                format_func=lambda value: {
-                    "manual_answer_quality": "답변 품질",
-                    "manual_ui": "화면·동작",
-                }[value],
-                disabled=not include_manual,
-            )
-            soft_objectives = st.multiselect(
-                "연성 목표",
-                [
-                    "latency_p95",
-                    "answer_conciseness",
-                    "answer_depth",
-                ],
-                default=list(
-                    current_plan.get("soft_objectives") or []
-                ),
-            )
-            current_budget = (
-                current_plan.get("performance_budget") or {}
-            )
-            performance_enforcement = st.selectbox(
-                "반복 성능 예산 판정",
-                ["soft", "hard"],
-                index=(
-                    1
-                    if current_budget.get("enforcement") == "hard"
-                    or quality_profile == "speed_first"
-                    else 0
-                ),
-                disabled=quality_profile == "speed_first",
-                format_func=lambda value: {
-                    "soft": "연성 목표",
-                    "hard": "경성 기준",
-                }[value],
-            )
-            max_p95_seconds = st.number_input(
-                "p95 최대 시간(초)",
-                min_value=0.1,
-                max_value=600.0,
-                value=float(
-                    current_budget.get("max_p95_seconds") or 20.0
-                ),
-                step=0.5,
-            )
-            min_runs = st.number_input(
-                "측정 반복 횟수",
-                min_value=1,
-                max_value=50,
-                value=int(current_budget.get("min_runs") or 3),
-                step=1,
-            )
-            warmup_runs = st.number_input(
-                "워밍업 횟수",
-                min_value=0,
-                max_value=max(0, int(min_runs) - 1),
-                value=min(
-                    int(current_budget.get("warmup_runs") or 0),
-                    max(0, int(min_runs) - 1),
-                ),
-                step=1,
-            )
-            manifest = candidate.get("reproduction_manifest") or {}
-            data_revision = st.text_input(
-                "데이터 개정 ID",
-                value=str(manifest.get("data_revision") or ""),
-            )
-            index_revision = st.text_input(
-                "인덱스 개정 ID",
-                value=str(manifest.get("index_revision") or ""),
-            )
-            if manifest:
-                st.caption(
-                    "현재 재현 매니페스트: "
-                    f"{str(manifest.get('manifest_hash') or '')[:12]} "
-                    f"({'완전' if manifest.get('complete') else '보강 필요'})"
+                    if check
+                    not in {
+                        "answer_requirements_pass",
+                        "manual_assertions_pass",
+                        "performance_p95_pass",
+                    }
+                    and (
+                        check not in prerequisite_values
+                        or prerequisite_values[check]
+                    )
+                ]
+                hard_checks = (
+                    ["answer_requirements_pass"]
+                    if answer_requirements
+                    else []
                 )
-            save_contract = st.form_submit_button(
-                "기대 결과·프로파일·재현 정보 저장",
-                use_container_width=True,
-            )
-        if save_contract:
-            try:
-                filters = json.loads(filters_text)
-                sources = json.loads(sources_text)
-                expected_state = json.loads(state_text)
-                manual_assertions = json.loads(assertions_text)
-                reproduction_input = json.loads(
-                    reproduction_input_text
+                hard_checks.extend(
+                    check
+                    for check in preserved_checks
+                    if check not in hard_checks
                 )
-            except json.JSONDecodeError as exc:
-                st.error(f"JSON 형식 오류: {exc}")
-            else:
-                enforcement = (
-                    "hard"
-                    if quality_profile == "speed_first"
-                    else performance_enforcement
-                )
-                hard_checks = list(selected_checks)
-                if include_manual:
+                if manual_assertions:
                     hard_checks.append("manual_assertions_pass")
-                if enforcement == "hard":
+                current_budget = dict(
+                    current_plan.get("performance_budget")
+                    or monitoring.QUALITY_PROFILE_RULES[current_profile][
+                        "default_performance_budget"
+                    ]
+                )
+                automatic_checks = [
+                    check
+                    for check in hard_checks
+                    if check != "manual_assertions_pass"
+                ]
+                if (
+                    current_budget.get("enforcement") == "hard"
+                    and automatic_checks
+                ):
                     hard_checks.append("performance_p95_pass")
+                elif current_budget.get("enforcement") == "hard":
+                    current_budget["enforcement"] = "soft"
+                if not hard_checks:
+                    st.error(
+                        "최소 답변 조건 또는 수동 확인 조건을 하나 이상 입력해 주세요."
+                    )
+                    return
+                soft_objectives = list(
+                    current_plan.get("soft_objectives")
+                    or monitoring.QUALITY_PROFILE_RULES[current_profile][
+                        "default_soft_objectives"
+                    ]
+                )
                 validation_plan = {
                     "schema_version": 1,
-                    "quality_profile": quality_profile,
+                    "quality_profile": current_profile,
                     "hard_checks": hard_checks,
                     "soft_objectives": soft_objectives,
-                    "performance_budget": {
-                        "max_p95_seconds": float(max_p95_seconds),
-                        "min_runs": int(min_runs),
-                        "warmup_runs": int(warmup_runs),
-                        "enforcement": enforcement,
-                    },
+                    "performance_budget": current_budget,
                 }
-                current_reproduction_manifest = (
-                    reproduction_manifest
-                    .build_runtime_reproduction_manifest(
-                        data_revision=data_revision.strip() or None,
-                        index_revision=index_revision.strip() or None,
-                    )
-                )
                 _rerun_candidate_action(
                     lambda: monitoring.update_regression_candidate(
                         path,
                         expected_record_revision=form_record_revision,
                         changes={
-                            "observed": {
-                                "reproduction_input": (
-                                    reproduction_input
-                                )
-                            },
                             "expected": {
-                                "route": route,
-                                "filters": filters,
-                                "sources": sources,
-                                "state": expected_state,
-                                "manual_assertions": (
-                                    manual_assertions
-                                    if include_manual
-                                    else []
+                                "route": (
+                                    expected.get("route")
+                                    or actual.get("route")
+                                    if automatic_checks
+                                    else None
                                 ),
+                                "filters": expected.get("filters") or {},
+                                "sources": expected.get("sources") or [],
+                                "state": expected.get("state") or {},
+                                "manual_assertions": manual_assertions,
+                                "answer_requirements": answer_requirements,
                             },
                             "validation_plan": validation_plan,
-                            "reproduction_manifest": (
-                                current_reproduction_manifest
-                            ),
                             "verification_type": (
-                                manual_mode
-                                if include_manual
-                                and not selected_checks
+                                "manual_ui"
+                                if manual_assertions
+                                and not automatic_checks
                                 else "mixed"
-                                if include_manual
+                                if manual_assertions
                                 else "graph_contract"
                             ),
                         },
-                        reason="모니터링 화면에서 기대 결과 저장",
+                        reason="LLM 보조 최소 기대 조건 저장",
                     ),
                     form_revision_key=form_revision_key,
                 )
@@ -1672,8 +1758,16 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
 
 
 def _render_issue_report_monitoring() -> None:
-    st.subheader("Issue reports")
-    st.caption("사용자 신고를 전체 개선 루프의 입력으로 모아 봅니다. 필요하면 실패 케이스를 regression 후보로 승격할 수 있습니다.")
+    st.subheader("신고·회귀 후보 관리")
+    st.info(
+        "이 화면은 최종 평가 묶음보다 앞선 단계입니다. 사용자 신고를 "
+        "수정 후보로 만들고 재현·검증하는 곳이며, verified 또는 closed "
+        "후보만 이후 새 평가 사례의 입력으로 사용할 수 있습니다."
+    )
+    st.caption(
+        "평가 묶음에 후보를 추가할 때는 새로 고정한 데이터 기준에서 "
+        "기대 조건과 출처를 다시 검토해야 합니다."
+    )
 
     st.markdown("#### Import emailed issue report")
     imported_text = st.text_area(
@@ -1860,12 +1954,45 @@ def _render_issue_report_monitoring() -> None:
 def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> None:
     rows = monitoring.build_message_monitoring_rows(messages)
     if rows:
+        state_labels = {
+            "succeeded": "완료",
+            "failed": "실패",
+            "running": "처리 중",
+            "unknown": "측정 전",
+        }
+        grounding_labels = {
+            "linked": "근거 연결",
+            "partial": "부분 연결",
+            "unavailable": "근거 없음",
+            "not_applicable": "해당 없음",
+            "not_evaluated": "평가하지 않음",
+            "not_measured": "측정 전",
+        }
         st.dataframe(
             [
                 {
                     "발생 시각": row.get("created_at"),
                     "상태": row.get("status"),
                     "응답 시간": row.get("latency_seconds"),
+                    "state": state_labels.get(
+                        row.get("state_status"), row.get("state_status") or "측정 전"
+                    ),
+                    "근거 연결": grounding_labels.get(
+                        row.get("grounding_status"),
+                        row.get("grounding_status") or "측정 전",
+                    ),
+                    "k (설정/요청/fetch/context)": " / ".join(
+                        "-" if value is None else str(value)
+                        for value in (
+                            row.get("configured_top_k"),
+                            row.get("requested_k"),
+                            row.get("fetch_k"),
+                            row.get("context_count"),
+                        )
+                    ),
+                    "사용 chunk": row.get("chunk_count"),
+                    "사용 문서": row.get("document_count"),
+                    "RDB 근거": row.get("rdb_evidence_count"),
                     "질문": row.get("user_question_preview"),
                 }
                 for row in rows
@@ -1938,14 +2065,52 @@ def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> No
             st.json(diff)
         else:
             st.caption("비교할 이전 성공 응답이 없습니다.")
+    with st.expander("처리시간과 검색 k", expanded=True):
+        st.markdown("**처리시간**")
+        st.json(detail["timing"])
+        st.markdown("**검색 k 단계값**")
+        st.caption(
+            "설정 상한, backend 요청, 실제 fetch, 최종 prompt context 수를 "
+            "서로 다른 값으로 기록합니다."
+        )
+        st.json(detail["retrieval_k"])
     with st.expander("검색어와 검색 범위", expanded=False):
         st.json(detail["query_rewrite"])
         st.json(detail["scope"])
         st.json(detail["routing"])
+    with st.expander("사용한 chunk와 문서", expanded=True):
+        st.markdown("**문서**")
+        if detail["used_documents"]:
+            st.dataframe(
+                detail["used_documents"],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("이 turn에 기록된 사용 문서가 없습니다.")
+        st.markdown("**prompt에 사용한 chunk**")
+        if detail["used_chunks"]:
+            st.dataframe(
+                detail["used_chunks"],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("이 turn에 기록된 사용 chunk가 없습니다.")
+        if detail["rdb_evidence"]:
+            st.markdown("**RDB 참고 문서**")
+            st.dataframe(
+                detail["rdb_evidence"],
+                use_container_width=True,
+                hide_index=True,
+            )
+        st.caption("청크 본문은 저장하지 않고 안정적 ID·순위·점수만 표시합니다.")
     with st.expander("참고 자료 선택과 출처 표시", expanded=False):
         st.json(detail["retrieval"])
         st.json(detail["answer"])
-    with st.expander("처리 흐름 기술 정보", expanded=False):
+        st.json(detail["grounding"])
+    with st.expander("state 처리 흐름", expanded=True):
+        st.json(detail["state_status"])
         st.json(detail["state_transitions"])
 
 
@@ -1980,9 +2145,11 @@ def _render_chat_latency_table(messages: list[dict]) -> None:
 
 
 def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
-    """Render current-thread Native V2 latency metrics only."""
+    """Render current-thread Native V2 timing and turn evidence."""
     st.header("답변 모니터링")
-    st.caption(f"현재 대화: {current_thread['name']} · 성공한 Native V2 응답만 집계")
+    st.caption(
+        f"현재 대화: {current_thread['name']} · 속도 집계는 성공한 Native V2 응답 기준"
+    )
     messages = conversation_store.list_messages(current_id)
     summary = monitoring.summarize_chat_latency_metrics(messages)
     columns = st.columns(4)
@@ -2015,6 +2182,15 @@ def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
 
     st.markdown("#### 응답별 시간")
     _render_chat_latency_table(messages)
+
+    st.markdown("#### 처리시간 · state · 검색 k · 사용 근거")
+    st.caption(
+        "응답 turn을 선택하면 처리속도, 답변에 사용된 compact state, "
+        "검색 단계별 k와 Vector DB prompt chunk·문서 또는 RDB 참고 문서를 "
+        "확인할 수 있습니다. "
+        "이 화면의 근거 연결 상태는 의미 정확도 점수가 아닙니다."
+    )
+    _render_global_chat_diagnostics(current_id, messages)
 
 
 def render_global_monitoring_page() -> None:

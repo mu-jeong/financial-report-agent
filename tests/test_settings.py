@@ -51,6 +51,7 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     monkeypatch.delenv("MONITORING_MODE", raising=False)
     monkeypatch.delenv("DB_PATH", raising=False)
     monkeypatch.delenv("FAISS_DIR", raising=False)
+    monkeypatch.delenv("SEARCH_CANDIDATE_MULTIPLIER", raising=False)
     monkeypatch.setenv("CRAWLER_TARGET_DATE", "")
     monkeypatch.setenv("UNEMBEDDED_EXTRACTION_ENGINE", "")
 
@@ -61,6 +62,7 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     assert get_config_value("MONITORING_MODE") is False
     assert get_config_value("DB_PATH") == str(BASE_DIR / "data" / "reports.db")
     assert get_config_value("FAISS_DIR") == str(BASE_DIR / "data" / "vector_db")
+    assert get_config_value("SEARCH_CANDIDATE_MULTIPLIER") == 1
 
 
 def test_pdf_extraction_fallback_can_be_disabled_with_an_explicit_blank(monkeypatch):
@@ -101,6 +103,8 @@ def test_render_env_example_contains_generated_defaults():
     assert "REPORT_PDF_DIR=" in content
     assert "COMPANY_INDUSTRY_DATA_PATH=" in content
     assert "MONITORING_MODE=false" in content
+    assert "SEARCH_CANDIDATE_MULTIPLIER=1" in content
+    assert "RERANK_CANDIDATE_MULTIPLIER" not in content
 
 
 def test_env_example_file_matches_rendered_specs():

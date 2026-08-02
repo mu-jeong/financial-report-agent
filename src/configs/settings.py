@@ -216,16 +216,6 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
             ),
         ),
         (
-            "RERANK_CANDIDATE_MULTIPLIER",
-            ConfigSpec(
-                name="RERANK_CANDIDATE_MULTIPLIER",
-                default=3,
-                parser=as_int,
-                description="Fetch SEARCH_TOP_K times this many candidates before reranking.",
-                section="Rerank",
-            ),
-        ),
-        (
             "RECENCY_WEIGHT",
             ConfigSpec(
                 name="RECENCY_WEIGHT",
@@ -242,6 +232,16 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 default=20,
                 parser=as_int,
                 description="Number of vector search results returned to the answer pipeline.",
+                section="Search",
+            ),
+        ),
+        (
+            "SEARCH_CANDIDATE_MULTIPLIER",
+            ConfigSpec(
+                name="SEARCH_CANDIDATE_MULTIPLIER",
+                default=1,
+                parser=as_int,
+                description="Multiply SEARCH_TOP_K by this value when fetching candidates.",
                 section="Search",
             ),
         ),

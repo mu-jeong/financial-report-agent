@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ from src.core.monitoring import (
     summarize_evaluation_dataset,
     summarize_issue_reports,
     summarize_v2_data_integrity,
+    assess_evaluation_snapshot_readiness,
     validate_evaluation_snapshot,
 )
 
@@ -162,6 +164,61 @@ def test_validate_evaluation_snapshot_fails_for_missing_files_and_mismatched_dat
     assert "snapshot_date" in failed_checks
     assert "snapshot_db_exists" in failed_checks
     assert "vector_file:index.faiss" in failed_checks
+
+
+def test_assess_evaluation_snapshot_readiness_reports_missing_fixed_inputs(tmp_path):
+    readiness = assess_evaluation_snapshot_readiness(
+        dataset_path=tmp_path / "evaluation_dataset.json",
+        manifest_path=tmp_path / "eval_snapshot" / "manifest.json",
+        snapshot_root=tmp_path / "eval_snapshot",
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["status"] == "missing"
+    assert set(readiness["missing_inputs"]) == {
+        "dataset",
+        "snapshot_manifest",
+        "snapshot_root",
+    }
+
+
+def test_assess_evaluation_snapshot_readiness_validates_fixed_inputs(tmp_path):
+    snapshot_root = tmp_path / "eval_snapshot"
+    vector_dir = snapshot_root / "vector_db"
+    vector_dir.mkdir(parents=True)
+    (snapshot_root / "reports.db").write_bytes(b"sqlite placeholder")
+    (vector_dir / "index.faiss").write_bytes(b"faiss")
+    (vector_dir / "index.pkl").write_bytes(b"pkl")
+    dataset = {
+        "name": "fixed-evaluation",
+        "version": 1,
+        "generated_from": {"snapshot_date": "2026-08-02"},
+    }
+    manifest = {
+        "dataset_name": "fixed-evaluation",
+        "dataset_version": 1,
+        "snapshot_date": "2026-08-02",
+        "database": {"path": "reports.db"},
+        "vector_db": {
+            "path": "vector_db",
+            "required_files": ["index.faiss", "index.pkl"],
+        },
+    }
+    dataset_path = tmp_path / "evaluation_dataset.json"
+    manifest_path = snapshot_root / "manifest.json"
+    dataset_path.write_text(json.dumps(dataset), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    readiness = assess_evaluation_snapshot_readiness(
+        dataset_path=dataset_path,
+        manifest_path=manifest_path,
+        snapshot_root=snapshot_root,
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["status"] == "ready"
+    assert readiness["missing_inputs"] == []
+    assert readiness["failed_checks"] == []
 
 
 def test_chat_monitoring_summary_and_rows_are_safe_metadata_only():
@@ -366,6 +423,7 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
         "role": "assistant",
         "content": "답변 본문 [1]",
         "metadata": {
+            "status": "succeeded",
             "question": "개별 종목 자세히",
             "route": "vectordb",
             "search_filters": {"report_type": "company"},
@@ -378,7 +436,20 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
                 "search_filters": {"report_type": "company"},
                 "file_names": ["company.pdf"],
             },
-            "rerank_info": [{"rank": 1, "file_name": "company.pdf", "report_type": "company"}],
+            "rerank_info": [
+                {
+                    "rank": 1,
+                    "file_name": "company.pdf",
+                    "report_type": "company",
+                    "report_uid": "report-1",
+                    "chunk_uid": "chunk-1",
+                    "parent_uid": "parent-1",
+                    "child_index": 2,
+                    "span_start": 10,
+                    "span_end": 80,
+                    "score": 0.25,
+                }
+            ],
             "monitoring": {
                 "query_rewrite": {
                     "rewritten_query": "개별 종목 자세히",
@@ -386,7 +457,14 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
                     "followup_scope_intent": True,
                 },
                 "retrieval": {
+                    "search_top_k": 20,
+                    "requested_k": 160,
+                    "fetch_k": 48,
+                    "candidate_count_before_filter": 48,
                     "candidate_count_after_filter": 8,
+                    "selected_source_count": 1,
+                    "native_total_ns": 250_000_000,
+                    "native_faiss_ns": 100_000_000,
                     "document_coverage_applied": True,
                     "document_coverage_reason": "section_followup_scope",
                     "selected_file_names": ["company.pdf"],
@@ -416,8 +494,252 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
     assert detail["state_transitions"]["suspect_transitions"]["prior_scope_files_dropped"] is True
     assert detail["retrieval"]["document_coverage_reason"] == "section_followup_scope"
     assert detail["sources"][0]["report_type"] == "company"
+    assert detail["timing"] == {
+        "status": "measured",
+        "total_seconds": None,
+        "rdb_query_seconds": None,
+        "vector_search_seconds": 0.25,
+        "vector_stage_seconds": {
+            "scope_compile": None,
+            "eligibility": None,
+            "faiss": 0.1,
+            "hydration": None,
+            "lease": None,
+        },
+    }
+    assert detail["retrieval_k"] == {
+        "status": "measured",
+        "configured_top_k": 20,
+        "requested_k": 160,
+        "fetch_k": 48,
+        "candidate_count_before_filter": 48,
+        "candidate_count_after_filter": 8,
+        "context_count": 1,
+    }
+    assert detail["state_status"]["overall"] == "succeeded"
+    assert detail["state_status"]["stages"]["retrieval"] == "completed"
+    assert detail["grounding"]["status"] == "linked"
+    assert detail["grounding"]["semantic_review_status"] == "not_evaluated"
+    assert detail["used_chunks"] == [
+        {
+            "rank": 1,
+            "identity_status": "measured",
+            "chunk_uid": "chunk-1",
+            "parent_uid": "parent-1",
+            "report_uid": "report-1",
+            "file_name": "company.pdf",
+            "target_name": None,
+            "report_date": None,
+            "title": None,
+            "broker": None,
+            "report_type": "company",
+            "child_index": 2,
+            "span_start": 10,
+            "span_end": 80,
+            "score": 0.25,
+            "rerank_score": None,
+            "recency_score": None,
+            "final_score": None,
+            "cited": True,
+        }
+    ]
+    assert detail["used_documents"] == [
+        {
+            "document_uid": "report-1",
+            "identity_status": "measured",
+            "file_name": "company.pdf",
+            "target_name": None,
+            "report_date": None,
+            "title": None,
+            "broker": None,
+            "report_type": "company",
+            "best_rank": 1,
+            "chunk_count": 1,
+            "cited_chunk_count": 1,
+        }
+    ]
+    assert "content" not in detail["used_chunks"][0]
     assert detail["answer"]["citation_ranks_used"] == [1]
     assert detail["answer"]["citation_valid"] is True
+
+
+def test_rdb_turn_marks_retrieval_k_not_applicable_without_fake_counts():
+    detail = build_message_trace_detail(
+        {
+            "content": "관계형 조회 답변",
+            "status": "succeeded",
+            "metadata": {
+                "route": "rdb",
+                "monitoring": {
+                    "retrieval": {
+                        "search_top_k": 20,
+                        "source_count": 3,
+                    }
+                },
+            },
+        }
+    )
+
+    assert detail["retrieval_k"] == {
+        "status": "not_applicable",
+        "configured_top_k": None,
+        "requested_k": None,
+        "fetch_k": None,
+        "candidate_count_before_filter": None,
+        "candidate_count_after_filter": None,
+        "context_count": None,
+    }
+
+
+def test_legacy_vector_turn_does_not_invent_identity_or_completed_state_stages():
+    detail = build_message_trace_detail(
+        {
+            "content": "과거 근거 [1]",
+            "status": "succeeded",
+            "metadata": {
+                "status": "succeeded",
+                "route": "vectordb",
+                "selected_sources": [{"rank": 1, "file_name": "legacy.pdf"}],
+            },
+        }
+    )
+
+    assert detail["state_status"]["stages"]["search_scope"] == "not_measured"
+    assert detail["state_status"]["stages"]["routing"] == "not_measured"
+    assert detail["used_chunks"][0]["identity_status"] == "not_measured"
+    assert detail["used_documents"] == [
+        {
+            "document_uid": None,
+            "identity_status": "not_measured",
+            "file_name": "legacy.pdf",
+            "target_name": None,
+            "report_date": None,
+            "title": None,
+            "broker": None,
+            "report_type": None,
+            "best_rank": 1,
+            "chunk_count": 1,
+            "cited_chunk_count": 1,
+        }
+    ]
+    assert detail["grounding"]["status"] == "partial"
+    assert detail["grounding"]["source_identity_status"] == "not_measured"
+    assert "unidentified-document" not in str(detail)
+
+
+def test_rdb_turn_keeps_document_evidence_separate_from_vector_chunks():
+    detail = build_message_trace_detail(
+        {
+            "content": "관계형 결과입니다.",
+            "metadata": {
+                "status": "succeeded",
+                "route": "rdb",
+                "selected_sources": [
+                    {
+                        "rank": 1,
+                        "file_name": "report.pdf",
+                        "target_name": "테스트 기업",
+                    }
+                ],
+                "monitoring": {"rdb": {"row_count": 2}},
+            },
+        }
+    )
+
+    assert detail["used_chunks"] == []
+    assert detail["used_documents"] == []
+    assert detail["rdb_evidence"] == [
+        {
+            "rank": 1,
+            "document_uid": None,
+            "identity_status": "not_measured",
+            "file_name": "report.pdf",
+            "target_name": "테스트 기업",
+            "report_date": None,
+            "title": None,
+            "broker": None,
+            "report_type": None,
+        }
+    ]
+    assert detail["answer"]["citation_ranks_used"] == []
+    assert detail["answer"]["citation_valid"] is None
+    assert detail["grounding"]["status"] == "linked"
+
+
+def test_distinct_report_uids_do_not_collapse_when_file_names_match():
+    detail = build_message_trace_detail(
+        {
+            "content": "두 번째 보고서 [2]",
+            "metadata": {
+                "status": "succeeded",
+                "route": "vectordb",
+                "selected_sources": [
+                    {
+                        "rank": 1,
+                        "chunk_uid": "chunk-1",
+                        "report_uid": "report-1",
+                        "file_name": "same.pdf",
+                    },
+                    {
+                        "rank": 2,
+                        "chunk_uid": "chunk-2",
+                        "report_uid": "report-2",
+                        "file_name": "same.pdf",
+                    },
+                ],
+            },
+        }
+    )
+
+    assert detail["answer"]["source_count"] == 2
+    assert detail["answer"]["citation_valid"] is True
+    assert [row["document_uid"] for row in detail["used_documents"]] == [
+        "report-1",
+        "report-2",
+    ]
+    assert detail["grounding"]["status"] == "linked"
+
+
+def test_message_trace_tracks_cited_chunk_when_one_document_supplies_multiple_chunks():
+    message = {
+        "role": "assistant",
+        "content": "두 번째 근거를 사용했습니다 [2]",
+        "metadata": {
+            "status": "succeeded",
+            "question": "같은 문서의 근거를 비교해줘",
+            "route": "vectordb",
+            "selected_sources": [
+                {
+                    "rank": 1,
+                    "chunk_uid": "chunk-1",
+                    "parent_uid": "parent-1",
+                    "report_uid": "report-1",
+                    "file_name": "same.pdf",
+                },
+                {
+                    "rank": 2,
+                    "chunk_uid": "chunk-2",
+                    "parent_uid": "parent-2",
+                    "report_uid": "report-1",
+                    "file_name": "same.pdf",
+                },
+            ],
+            "monitoring": {
+                "retrieval": {
+                    "search_top_k": 20,
+                    "selected_source_count": 2,
+                }
+            },
+        },
+    }
+
+    detail = build_message_trace_detail(message)
+
+    assert detail["answer"]["source_count"] == 1
+    assert detail["answer"]["citation_valid"] is True
+    assert [row["cited"] for row in detail["used_chunks"]] == [False, True]
+    assert detail["used_documents"][0]["chunk_count"] == 2
+    assert detail["used_documents"][0]["cited_chunk_count"] == 1
 
 
 def test_message_trace_summary_flattens_common_debug_fields():
@@ -434,6 +756,16 @@ def test_message_trace_summary_flattens_common_debug_fields():
         },
         "routing": {"route": "vectordb"},
         "retrieval": {"candidate_count_after_filter": 3},
+        "retrieval_k": {
+            "configured_top_k": 20,
+            "requested_k": 160,
+            "fetch_k": 40,
+            "context_count": 2,
+        },
+        "state_status": {"overall": "succeeded"},
+        "grounding": {"status": "linked"},
+        "used_chunks": [{"chunk_uid": "chunk-a"}, {"chunk_uid": "chunk-b"}],
+        "used_documents": [{"document_uid": "doc-a"}],
         "answer": {"source_count": 2, "citation_valid": True},
     }
 
@@ -449,6 +781,14 @@ def test_message_trace_summary_flattens_common_debug_fields():
     assert summary["scope_reason"] == "industry_company_universe_intersection"
     assert summary["industry_term"] == "반도체"
     assert summary["source_count"] == 2
+    assert summary["state_status"] == "succeeded"
+    assert summary["grounding_status"] == "linked"
+    assert summary["configured_top_k"] == 20
+    assert summary["requested_k"] == 160
+    assert summary["fetch_k"] == 40
+    assert summary["context_count"] == 2
+    assert summary["used_chunk_count"] == 2
+    assert summary["used_document_count"] == 1
     assert "prior_scope_file_count" in summary
     assert "search_scope_file_count" in summary
     assert summary["search_filters"] == {"report_type": "company", "file_names": ["a.pdf", "b.pdf"]}
@@ -598,6 +938,18 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
                 "file_names": ["a.pdf", "b.pdf"],
             },
             "scope_decision": {"reason": "matched_prior_section_alias"},
+            "no_vector_results": False,
+            "memory_retry_attempted": True,
+            "generation": "answer text must not enter the state snapshot",
+            "monitoring_metrics": {
+                "retrieval": {
+                    "search_top_k": 20,
+                    "requested_k": 160,
+                    "fetch_k": 40,
+                    "candidate_count_after_filter": 8,
+                    "selected_source_count": 2,
+                }
+            },
         },
         latency_seconds=1.23456,
         rerank_info=[
@@ -622,6 +974,36 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
     }
     assert metadata["monitoring"]["retrieval"]["source_count"] == 2
     assert metadata["monitoring"]["retrieval"]["score_summary"]["rerank_score"]["avg"] == 0.7
+    assert metadata["monitoring"]["timing"] == {"total_seconds": 1.235}
+    assert metadata["monitoring"]["state_snapshot"] == {
+        "available_keys": sorted(
+            [
+                "followup_scope_intent",
+                "generation",
+                "memory_retry_attempted",
+                "monitoring_metrics",
+                "no_vector_results",
+                "prior_search_scope",
+                "rewritten_query",
+                "route",
+                "routing_context",
+                "scope_decision",
+                "scope_source",
+                "search_filters",
+                "temporal_context",
+                "uses_chat_history",
+            ]
+        ),
+        "route": "vectordb",
+        "search_filters": {"target_name": "NAVER"},
+        "scope_source": "prior_search_scope",
+        "no_vector_results": False,
+        "memory_retry_attempted": True,
+        "has_generation": True,
+        "has_rdb_result": False,
+        "selected_source_count": 2,
+    }
+    assert "generation" not in metadata["monitoring"]["state_snapshot"]
 
 
 def test_compact_graph_monitoring_metadata_handles_no_result_none_rerank_info():
@@ -723,6 +1105,51 @@ def test_evaluate_dataset_case_result_fails_bad_route_missing_source_and_bad_cit
     assert result["citation_valid"] is False
     assert result["latency_pass"] is False
     assert result["no_result"] is True
+
+
+def test_evaluate_dataset_case_uses_grounded_minimum_answer_requirements():
+    case = {
+        "id": "hynix-coverage",
+        "question": "삼성전자와 하이닉스 리포트를 알려줘",
+        "expected_answer_requirements": [
+            {
+                "id": "answer_requirement_1",
+                "description": "SK하이닉스 리포트 내용을 근거와 함께 다룬다.",
+                "answer_terms_any": ["SK하이닉스", "하이닉스"],
+                "source_terms_any": ["SK하이닉스", "하이닉스"],
+                "require_citation": True,
+            }
+        ],
+        "active_checks": ["answer_requirements_pass"],
+    }
+    missing_state = {
+        "generation": "SK하이닉스 자료는 조회 결과에 없습니다.",
+        "rerank_info": [{"rank": 1, "target_name": "삼성전자"}],
+    }
+    fixed_state = {
+        "generation": "SK하이닉스 리포트는 HBM 수요를 강조합니다. [2]",
+        "rerank_info": [
+            {"rank": 1, "target_name": "삼성전자"},
+            {"rank": 2, "target_name": "SK하이닉스"},
+        ],
+    }
+
+    missing = evaluate_dataset_case_result(
+        case,
+        missing_state,
+        latency_seconds=1.0,
+    )
+    fixed = evaluate_dataset_case_result(
+        case,
+        fixed_state,
+        latency_seconds=1.0,
+    )
+
+    assert missing["status"] == "fail"
+    assert missing["answer_requirements_pass"] is False
+    assert missing["failed_checks"] == ["answer_requirements_pass"]
+    assert fixed["status"] == "pass"
+    assert fixed["answer_requirements_pass"] is True
 
 
 def test_run_evaluation_dataset_saves_run_and_summary(tmp_path):

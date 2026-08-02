@@ -34,10 +34,11 @@ def source_rank(info: dict[str, Any], fallback_rank: int) -> int:
 
 def source_identity(info: dict[str, Any]) -> str:
     """Return a stable document identity for grouping multiple chunks."""
-    file_name = str(info.get("file_name") or "").strip()
-    if file_name and file_name != "-":
-        return file_name
-    return "|".join(
+    for key in ("report_uid", "canonical_path", "file_name"):
+        value = str(info.get(key) or "").strip()
+        if value and value != "-":
+            return f"{key}:{value}"
+    return "legacy_metadata:" + "|".join(
         str(info.get(key) or "").strip()
         for key in ("target_name", "report_date", "broker", "title")
     )

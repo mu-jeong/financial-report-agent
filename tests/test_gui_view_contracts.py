@@ -136,8 +136,6 @@ EXPLICIT_WIDGET_KEYS = {
     "f\"candidate_attach_handoff_{item['handoff_id']}\"",
     "f\"candidate_attach_run_{run['run_id']}\"",
     "f\"candidate_close_action_{candidate['id']}\"",
-    "f\"candidate_duplicate_reason_{candidate['id']}\"",
-    "f\"candidate_duplicate_{candidate['id']}\"",
     "f\"candidate_edit_contract_reason_{candidate['id']}\"",
     "f\"candidate_edit_contract_{candidate['id']}\"",
     "f\"candidate_fixing_{candidate['id']}\"",
@@ -162,6 +160,13 @@ EXPLICIT_WIDGET_KEYS = {
     "f\"candidate_reopen_reason_{candidate['id']}\"",
     "f\"candidate_reopen_{candidate['id']}\"",
     "f\"candidate_repair_handoff_{item['handoff_id']}\"",
+    "f\"candidate_suggest_expectation_{candidate['id']}\"",
+    "f\"candidate_requirement_description_{candidate['id']}_{draft_version}_{index}\"",
+    "f\"candidate_requirement_answer_terms_{candidate['id']}_{draft_version}_{index}\"",
+    "f\"candidate_requirement_source_terms_{candidate['id']}_{draft_version}_{index}\"",
+    "f\"candidate_requirement_citation_{candidate['id']}_{draft_version}_{index}\"",
+    "f\"candidate_manual_assertions_text_{candidate['id']}_{draft_version}\"",
+    "count_key",
     "f\"no_result_suggestion_{message.get('id', index)}_{suggestion['label']}\"",
     "f\"toggle_issue_report_{current_thread['id']}\"",
     "f'cancel_thread_{thread_id}'",
@@ -331,7 +336,7 @@ def test_monitoring_defaults_to_speed_accuracy_and_defers_problem_detail():
     assert "_run_candidate_snapshot_evaluation" not in source
 
 
-def test_chat_monitoring_is_latency_only_and_global_keeps_accuracy():
+def test_chat_monitoring_exposes_turn_observability_and_global_keeps_accuracy():
     source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
     chat_start = source.index("def render_chat_monitoring_page")
     global_start = source.index("def render_global_monitoring_page")
@@ -345,8 +350,13 @@ def test_chat_monitoring_is_latency_only_and_global_keeps_accuracy():
     assert '"Vector DB 평균 검색시간"' in chat_source
     assert "답변 정확도" not in chat_source
     assert "_latest_v2_accuracy_run" not in chat_source
-    assert "_render_chat_diagnostics" not in source
-    assert "_render_global_chat_diagnostics" in global_source
+    assert "_render_global_chat_diagnostics(current_id, messages)" in chat_source
+    assert "처리시간 · state · 검색 k · 사용 근거" in chat_source
+    assert "_render_global_chat_diagnostics" in source
+    assert "detail[\"retrieval_k\"]" in source
+    assert "detail[\"state_status\"]" in source
+    assert "detail[\"used_chunks\"]" in source
+    assert "detail[\"used_documents\"]" in source
     assert "_render_chat_latency_table" in chat_source
     assert "_render_answer_metrics" in global_source
     assert '"db_path": "data/reports.db"' not in source
@@ -892,6 +902,8 @@ def test_chat_job_failure_is_persisted_and_unlocks_the_job():
 
 
 def test_chat_job_success_persists_scope_monitoring_and_event():
+    from src.core.monitoring import compact_graph_monitoring_metadata
+
     class SuccessfulGraph:
         calls: list[tuple] = []
 
@@ -913,11 +925,26 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
             return {
                 "generation": "완료된 답변",
                 "route": "vectordb",
-                "rerank_info": [{"file_name": "report.pdf", "rank": 1}],
+                "rerank_info": [
+                    {
+                        "file_name": "report.pdf",
+                        "rank": 1,
+                        "chunk_uid": "chunk-1",
+                        "report_uid": "report-1",
+                    }
+                ],
                 "search_filters": {"target_name": "테스트 기업"},
                 "temporal_context": {"description": "2026-07"},
                 "scope_source": "current_question",
                 "no_vector_results": False,
+                "monitoring_metrics": {
+                    "retrieval": {
+                        "search_top_k": 20,
+                        "requested_k": 160,
+                        "fetch_k": 48,
+                        "selected_source_count": 1,
+                    }
+                },
             }
 
     clock_values = iter([10.0, 11.25])
@@ -947,12 +974,7 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
                 }
             ),
             "build_scope_notice": lambda final_state: "검색 범위 안내",
-            "compact_graph_monitoring_metadata": (
-                lambda **kwargs: {
-                    "route": kwargs["final_state"]["route"],
-                    "latency_seconds": kwargs["latency_seconds"],
-                }
-            ),
+            "compact_graph_monitoring_metadata": compact_graph_monitoring_metadata,
             "update_message": lambda *args: updates.append(args),
             "_record_chat_job_event": (
                 lambda event, target_registry=None: events.append(event)
@@ -979,42 +1001,22 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
             {"configurable": {"thread_id": "thread-1"}},
         )
     ]
-    assert updates == [
-        (
-            7,
-            "완료된 답변",
-            {
-                "status": "succeeded",
-                "job_id": "job-1",
-                "question": "질문",
-                "no_vector_results": False,
-                "selected_sources": [{"file_name": "report.pdf", "rank": 1}],
-                "retrieval_runtime": {
-                    "mode": "native",
-                    "active_snapshot_id": "snapshot-v2",
-                    "active_build_id": "build-v2",
-                    "publication_generation": 3,
-                    "write_epoch": 2,
-                    "v1_fallback_open": False,
-                    "degraded": False,
-                },
-                "route": "vectordb",
-                "latency_seconds": 1.25,
-                "search_scope": {
-                    "route": "vectordb",
-                    "search_filters": {"target_name": "테스트 기업"},
-                    "temporal_context": {"description": "2026-07"},
-                    "scope_source": "current_question",
-                    "file_names": ["report.pdf"],
-                    "answer_scope_index": {
-                        "file_names": ["report.pdf"],
-                        "source_count": 1,
-                    },
-                },
-                "scope_notice": "검색 범위 안내",
-            },
-        )
-    ]
+    assert len(updates) == 1
+    message_id, answer, persisted = updates[0]
+    assert message_id == 7
+    assert answer == "완료된 답변"
+    assert persisted["status"] == "succeeded"
+    assert persisted["route"] == "vectordb"
+    assert persisted["latency_seconds"] == 1.25
+    assert persisted["selected_sources"][0]["chunk_uid"] == "chunk-1"
+    assert persisted["selected_sources"][0]["report_uid"] == "report-1"
+    assert persisted["monitoring"]["timing"]["total_seconds"] == 1.25
+    assert persisted["monitoring"]["retrieval"]["search_top_k"] == 20
+    assert persisted["monitoring"]["retrieval"]["requested_k"] == 160
+    assert persisted["monitoring"]["retrieval"]["fetch_k"] == 48
+    assert persisted["monitoring"]["state_snapshot"]["route"] == "vectordb"
+    assert persisted["search_scope"]["file_names"] == ["report.pdf"]
+    assert persisted["scope_notice"] == "검색 범위 안내"
     assert events == [
         {
             "status": "succeeded",
@@ -1373,7 +1375,20 @@ class TestSliceACandidateUi:
         assert 'to_status="not_reproducible"' in source
         assert 'to_status="verified"' in source
         assert 'to_status="rejected"' in source
-        assert 'to_status="duplicate"' in source
+        assert "중복 대상 후보 ID" not in source
+        assert "candidate_duplicate_reason_" not in source
+        assert 'to_status="duplicate"' not in source
+        assert "현재 기대 결과(읽기 전용)" in source
+        assert "승인 여부:" in source
+        assert "자동 재현 자료 미준비" in source
+        assert "최종 평가 묶음보다 앞선 단계" in source
+        assert "LLM으로 최소 조건 제안" in source
+        assert "최소 답변 조건" in source
+        assert "재현 입력(JSON)" not in source
+        assert "기대 검색 조건(JSON)" not in source
+        assert "기대 출처(JSON 배열)" not in source
+        assert "기대 상태(JSON)" not in source
+        assert "수동 검사 항목(JSON 배열)" not in source
 
     def test_candidate_form_conflict_clears_loaded_revision_without_retry(self):
         class CandidateConflictError(RuntimeError):

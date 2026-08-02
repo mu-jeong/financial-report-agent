@@ -19,6 +19,10 @@ from src.core.artifact_io import (
     safe_artifact_token,
     strict_json_loads,
 )
+from src.core.answer_requirements import (
+    AnswerRequirementValidationError,
+    canonicalize_answer_requirements,
+)
 from src.core.monitoring import (
     CandidateValidationError,
     canonicalize_regression_candidate,
@@ -38,6 +42,7 @@ DEFAULT_CODEX_VERIFICATION_COMMANDS = (
 )
 
 _AUTOMATIC_CHECKS = {
+    "answer_requirements_pass",
     "route_pass",
     "filter_pass",
     "source_hit",
@@ -69,6 +74,13 @@ _STATE_KEYS = {
     "scope_source",
     "scope_decision_reason",
     "scope_decision_matched_section_id",
+}
+_ANSWER_REQUIREMENT_KEYS = {
+    "id",
+    "description",
+    "answer_terms_any",
+    "source_terms_any",
+    "require_citation",
 }
 _SOURCE_KEYS = {"file_name", "report_type"}
 _PAYLOAD_KEYS = {
@@ -473,6 +485,14 @@ def build_codex_handoff_payload(
                 )
                 for assertion in expected.get("manual_assertions") or []
             ],
+            "answer_requirements": [
+                _copy_allowed_mapping(
+                    requirement,
+                    _ANSWER_REQUIREMENT_KEYS,
+                    "expected.answer_requirements[]",
+                )
+                for requirement in expected.get("answer_requirements") or []
+            ],
         },
         "acceptance": {"active_checks": list(canonical.get("active_checks") or [])},
         "verification": {"commands": commands},
@@ -672,8 +692,16 @@ def validate_codex_handoff_payload(payload: Mapping[str, Any]) -> None:
     )
     expected = _require_exact_keys(
         root["expected"],
-        {"route", "filters", "sources", "state", "manual_assertions"},
+        {
+            "route",
+            "filters",
+            "sources",
+            "state",
+            "manual_assertions",
+            "answer_requirements",
+        },
         "expected",
+        required={"route", "filters", "sources", "state", "manual_assertions"},
     )
     for label, section in (("observed", observed), ("expected", expected)):
         if section["route"] not in {None, "vectordb", "rdb"}:
@@ -731,6 +759,22 @@ def validate_codex_handoff_payload(payload: Mapping[str, Any]) -> None:
         ):
             raise FeedbackHandoffError("invalid_payload", "manual assertion id is unsafe")
         _require_string(row["text"], "manual_assertion.text", allow_empty=False)
+    answer_requirements = expected.get("answer_requirements") or []
+    try:
+        canonical_requirements = canonicalize_answer_requirements(
+            answer_requirements
+        )
+    except AnswerRequirementValidationError as exc:
+        raise FeedbackHandoffError(
+            "invalid_payload",
+            f"answer_requirements is invalid: {exc}",
+        ) from exc
+    if canonical_requirements != answer_requirements:
+        raise FeedbackHandoffError(
+            "invalid_payload",
+            "answer_requirements is not canonical",
+        )
+    _validate_string_tree(answer_requirements)
 
     acceptance = _require_exact_keys(root["acceptance"], {"active_checks"}, "acceptance")
     _validate_checks(

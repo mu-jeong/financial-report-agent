@@ -1,4 +1,4 @@
-# Finance LLM
+﻿# Finance LLM
 
 > Version: `0.5.1`
 
@@ -266,7 +266,7 @@ python -m pytest tests/test_evaluation_dataset.py -q
 
 ## Monitoring Mode
 
-Monitoring Mode는 답변 속도와 정확도를 우선 확인하고, 문제가 있을 때만 상세 진단으로 내려가는 Native V2 개발자 화면입니다. 일반 GUI에서는 숨기고 `.env`에서 명시적으로 켰을 때만 노출합니다. 구현 계약은 [`docs/MONITORING.md`](docs/MONITORING.md)에 정리되어 있습니다.
+Monitoring Mode는 전체 Native V2 운영 상태와 개별 대화 turn을 분리해 확인하는 개발자 화면입니다. 전체 Monitoring은 평가 묶음 제작·시험·승인·봉인 운영 계획을 기준으로 확장하고, 개별 답변 모니터링은 처리시간과 실제 답변 근거를 추적합니다. 일반 GUI에서는 숨기고 `.env`에서 명시적으로 켰을 때만 노출합니다. 구현 계약은 [`docs/MONITORING.md`](docs/MONITORING.md)에 정리되어 있습니다.
 
 ### 실행 방법
 
@@ -282,12 +282,13 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 현재 대화의 최근·평균 응답시간과 RDB·Vector DB 평균 조회시간만 보여줍니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여주고, 응답 trace, 검색 자료 상태, 정확도 평가, parsing 비교, issue report와 회귀 후보는 `문제 상황 자세히 보기` 안에서 선택합니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 현재 대화의 최근·평균 응답시간과 RDB·Vector DB 평균 조회시간을 보여주며, 각 turn에서 compact state와 설정/요청/fetch/context k를 확인할 수 있습니다. Vector DB는 prompt에 사용한 chunk·문서 ID와 순위를, RDB는 참고 문서를 별도 근거로 표시합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여주고, 전역 응답 trace, 검색 자료 상태, 정확도 평가, parsing 비교, issue report와 회귀 후보는 `문제 상황 자세히 보기` 안에서 선택합니다. 회귀 후보의 최소 기대 조건은 운영자가 JSON을 작성하는 대신 LLM 제안을 자연어로 검토·수정해 저장하며, 제안만으로 자동 승인되지는 않습니다. 평가 묶음 운영은 자료 계약부터 개정 계획의 단계 순서대로 추가합니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
 
 ### 테스트 방법
 
 ```bash
 python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_gui_view_contracts.py tests/test_feedback_loop.py -q
+python -m pytest tests/test_evaluation_bundle.py tests/test_artifact_io.py -q
 python -m pytest -q
 ```
 
@@ -299,6 +300,7 @@ python -m pytest -q
 - 평가 자료가 없으면 0%가 아니라 `측정 전`으로 표시합니다.
 - Native V2 상태가 없을 때 과거 지표로 우회하지 않습니다.
 - 스키마 없는 과거 report·candidate·run은 활성 화면에서 제외하되 자동 삭제하지 않습니다.
+- 개별 turn의 근거 연결 상태는 의미 정확도 점수가 아니며, 청크/PDF 본문이나 provider 원문 응답은 monitoring metadata에 복제하지 않습니다.
 
 ### 문제 상황 상세 영역
 
@@ -321,3 +323,5 @@ python -m pytest -q
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
 - [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.
+- [ ] 복수 기업 질문을 retrieval-only LangGraph `Send` fan-out과 단일 fan-in·rerank·답변·전역 citation으로 처리합니다.
+- [ ] Native V2를 V1 SQLite·FAISS·pickle 경로에서 분리하고 기본 설치의 `langchain-community` 의존성을 제거한 뒤, 검증된 격리·승인 절차로 남은 V1 artifacts를 퇴역합니다.

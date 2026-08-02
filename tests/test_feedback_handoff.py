@@ -245,6 +245,7 @@ def test_payload_is_exact_allowlist_redacted_and_uses_exact_baseline(tmp_path: P
     }
     assert "ignored" not in json.dumps(payload, ensure_ascii=False)
     assert payload["observed"]["baseline_failed_checks"] == ["source_hit"]
+    assert payload["expected"]["answer_requirements"] == []
     assert "[REDACTED:" in payload["user_impact"]["summary"]
     validate_codex_handoff_payload(payload)
 

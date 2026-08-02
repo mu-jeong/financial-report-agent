@@ -8,6 +8,19 @@ from src.nodes.vectordb import (
 )
 
 
+def test_requested_candidate_count_uses_one_configurable_multiplier(monkeypatch):
+    import src.nodes.vectordb as vectordb
+
+    monkeypatch.setattr(vectordb, "SEARCH_TOP_K", 40)
+    monkeypatch.setattr(vectordb, "SEARCH_CANDIDATE_MULTIPLIER", 1, raising=False)
+
+    assert vectordb._requested_candidate_count() == 40
+
+    monkeypatch.setattr(vectordb, "SEARCH_CANDIDATE_MULTIPLIER", 3)
+
+    assert vectordb._requested_candidate_count() == 120
+
+
 def test_ensure_document_coverage_keeps_small_filtered_document_set():
     docs_with_scores = [
         (
@@ -591,6 +604,96 @@ def test_native_parent_slice_deduplicates_without_legacy_parent_lookup(monkeypat
 
     assert len(passages) == 1
     assert passages[0]["text"] == "canonical parent slice"
+
+
+def test_vectordb_node_records_prompt_chunk_and_document_identifiers(monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    import src.nodes.vectordb as vectordb
+
+    metadata = {
+        "report_uid": "report-1",
+        "chunk_uid": "chunk-1",
+        "parent_uid": "parent-1",
+        "profile_id": "profile-1",
+        "child_index": 3,
+        "span_start": 20,
+        "span_end": 120,
+        "physical_id": 9,
+        "snapshot_id": "snapshot-1",
+        "publication_generation": 4,
+        "file_name": "company.pdf",
+        "target_name": "Acme",
+        "report_date": "2026-07-15",
+        "title": "Outlook",
+        "broker": "Broker",
+        "report_type": "company",
+    }
+    document = Document(page_content="prompt context", metadata=metadata)
+    monkeypatch.setattr(
+        vectordb,
+        "_retrieve_docs_with_scores",
+        lambda *_args, **_kwargs: (
+            [(document, 0.25)],
+            {
+                "runtime_mode": "native",
+                "requested_k": 160,
+                "fetch_k": 8,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        vectordb,
+        "filter_docs_with_scores",
+        lambda docs, _filters: docs,
+    )
+    monkeypatch.setattr(
+        vectordb,
+        "select_top_passages",
+        lambda *_args, **_kwargs: (
+            [
+                {
+                    "text": "prompt context",
+                    "score": 0.25,
+                    "meta": metadata,
+                }
+            ],
+            {
+                "document_coverage_applied": False,
+                "document_coverage_reason": "single_target_default",
+            },
+        ),
+    )
+
+    class FakeChatModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            return AIMessage(content="answer [1]")
+
+    monkeypatch.setattr(vectordb, "build_chat_model", lambda **_kwargs: FakeChatModel())
+
+    result = vectordb.vectordb_node(
+        {
+            "question": "Acme outlook",
+            "rewritten_query": "Acme outlook",
+            "search_filters": {"target_name": "Acme"},
+        }
+    )
+
+    source = result["rerank_info"][0]
+    assert source["report_uid"] == "report-1"
+    assert source["chunk_uid"] == "chunk-1"
+    assert source["parent_uid"] == "parent-1"
+    assert source["child_index"] == 3
+    assert source["span_start"] == 20
+    assert source["span_end"] == 120
+    assert source["physical_id"] == 9
+    assert source["snapshot_id"] == "snapshot-1"
+    assert source["publication_generation"] == 4
+    assert "text" not in source
+    assert "page_content" not in source
 
 
 def test_vectordb_passes_matching_prior_files_into_single_retrieval_scope(monkeypatch):

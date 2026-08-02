@@ -117,7 +117,7 @@ RERANK_PROVIDER=openrouter
 RERANK_MODEL=cohere/rerank-v3.5
 ```
 
-검색 후보 수는 `SEARCH_TOP_K`와 `RERANK_CANDIDATE_MULTIPLIER`에 의해 결정됩니다.
+검색 후보 수는 `SEARCH_TOP_K × SEARCH_CANDIDATE_MULTIPLIER`로 계산합니다. `SEARCH_CANDIDATE_MULTIPLIER`의 기본값은 `1`이며, 모니터링에서 문서 검색 누락이 확인될 때만 높입니다.
 
 ## 8. 대화 장기 메모리
 
