@@ -17,22 +17,26 @@ Monitoring Mode는 전체 운영 상태와 개별 대화 turn을 서로 다른 �
 
 속도 표본이나 승인된 V2 평가 run이 없으면 `측정 전`으로 표시한다. 데이터가 없다는 사실을 0초나 정확도 0%로 오해하지 않게 하기 위한 계약이다.
 
-나머지 정보는 하나의 `문제 상황 자세히 보기 · 확인 필요 N건` expander 안에 둔다. 기본 대시보드에 route, source 수, snapshot 세부값, parser 비교, 신고 목록을 동시에 펼치지 않는다.
+나머지 정보는 기본 지표 아래의 용도별 가로 내비게이션에서 하나씩 선택한다. `운영 모니터링`과 `성능 개선 실험`을 먼저 분리하고, 선택한 그룹 안에서 세부 화면을 다시 고른다. 선택하지 않은 route, source, snapshot, parser 비교, 신고 목록은 렌더링하지 않는다.
 
 ```text
 Monitoring
 ├─ 응답 속도 (P95)
 ├─ 답변 정확도 (correctness-only)
-└─ 문제 상황 자세히 보기
-   ├─ 현재 문제
-   ├─ 응답 원인 확인
-   ├─ 검색 자료 준비
-   ├─ 정확도 평가
-   ├─ 문서 읽기 품질 비교
-   └─ 신고·수정 확인 · 묶음 전 단계
+└─ 용도별 상단 내비게이션
+   ├─ 운영 모니터링
+   │  ├─ 현재 문제
+   │  ├─ 응답 원인 확인
+   │  └─ 검색 자료 준비
+   └─ 성능 개선 실험
+      ├─ 정확도 평가
+      ├─ 문서 읽기 품질 비교
+      └─ 신고·수정 확인 · 묶음 전 단계
 ```
 
-문제 영역의 내부 ID는 각각 `summary`, `response`, `search_data`, `evaluation`, `parsing`, `issues`로 고정한다. 화면 문구가 바뀌어도 widget state와 테스트가 흔들리지 않게 하기 위해서다.
+그룹 내부 ID는 `operations`, `experiments`로 고정한다. 세부 영역의 내부 ID는 각각 `summary`, `response`, `search_data`, `evaluation`, `parsing`, `issues`로 유지한다. 화면 문구가 바뀌어도 widget state와 테스트가 흔들리지 않게 하기 위해서다. Streamlit `st.tabs`는 숨은 panel까지 모두 계산하므로, 이 화면은 선택한 panel만 계산하는 `st.segmented_control`을 탭형 내비게이션으로 사용한다.
+
+각 그룹은 마지막으로 선택한 세부 화면을 따로 기억한다. `현재 문제`의 경고 행은 상태 이름만 표시하지 않고 실제 집계 세부값과 다음 확인 경로를 함께 제공한다.
 
 ## 2. 진입 구조
 
@@ -245,7 +249,7 @@ python -m pytest -q tests/test_evaluation_bundle.py tests/test_artifact_io.py
 - latency가 정확도에 섞이지 않음
 - self-labeled/tampered run 및 runtime revision 불일치 차단
 - 평가 자료가 없을 때 `측정 전`
-- 기본 화면의 두 지표와 단일 문제 expander
+- 기본 화면의 두 지표와 용도별 상단 내비게이션
 - 활성 UI에 과거 DB/vector 실행 경로가 없음
 - 스키마 없는 report/candidate/run의 활성 discovery 제외
 - Native V2 무결성 및 cleanup backlog 표시

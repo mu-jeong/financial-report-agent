@@ -9,6 +9,7 @@ import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+pytestmark = pytest.mark.slow
 
 
 @pytest.mark.parametrize(

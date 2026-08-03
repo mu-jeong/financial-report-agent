@@ -37,6 +37,16 @@ _PROBLEM_AREA_LABELS = {
     "issues": "신고·수정 확인 · 묶음 전 단계",
 }
 
+_MONITORING_AREA_GROUPS = {
+    "operations": ("summary", "response", "search_data"),
+    "experiments": ("evaluation", "parsing", "issues"),
+}
+
+_MONITORING_GROUP_LABELS = {
+    "operations": "운영 모니터링",
+    "experiments": "성능 개선 실험",
+}
+
 _V2_CHECK_LABELS = {
     "v2_runtime": "현재 검색 자료 준비",
     "native_snapshot": "현재 검색 자료 준비",
@@ -47,6 +57,39 @@ _V2_CHECK_LABELS = {
     "runtime_health": "검색 서비스 상태",
     "cleanup_backlog": "정리 대기 파일",
 }
+
+_V2_CHECK_ACTIONS = {
+    "v2_runtime": "Native V2 검색 데이터와 실행 설정을 확인하세요.",
+    "native_snapshot": "검색 자료 준비에서 현재 빌드와 스냅샷 상태를 확인하세요.",
+    "native_membership": "카탈로그와 벡터 인덱스의 검색 대상 수를 확인하세요.",
+    "manifest_backlog": "검색 자료 준비에서 미반영 문서를 확인한 뒤 업데이트하세요.",
+    "pdf_vs_manifest": "원문 PDF 동기화 상태를 확인하세요.",
+    "search_coverage": "검색 자료 준비에서 누락 보고서를 확인하세요.",
+    "runtime_health": "검색 런타임의 세대와 쓰기 가능 상태를 확인하세요.",
+    "cleanup_backlog": "데이터 업데이트 완료 여부와 정리 대기 파일을 확인하세요.",
+}
+
+
+def _restore_monitoring_area_selection(
+    widget_key: str,
+    storage_key: str,
+    options: tuple[str, ...],
+) -> None:
+    """Restore a group selection after Streamlit cleaned up its hidden widget."""
+
+    selected = st.session_state.get(storage_key, options[0])
+    if selected not in options:
+        selected = options[0]
+    st.session_state[storage_key] = selected
+    st.session_state[widget_key] = selected
+
+
+def _store_monitoring_area_selection(widget_key: str, storage_key: str) -> None:
+    """Copy the visible widget value into a permanent session-state key."""
+
+    selected = st.session_state.get(widget_key)
+    if selected is not None:
+        st.session_state[storage_key] = selected
 
 
 def _parse_monitoring_paths(raw_paths: str) -> list[str]:
@@ -232,7 +275,7 @@ def _latest_saved_evaluation_run(
     return matching_runs[0] if matching_runs else None
 
 
-def _render_experiment_monitoring() -> None:
+def _render_experiment_monitoring(status: dict | None = None) -> None:
     st.subheader("답변 정확도 평가")
     st.caption(
         "승인된 기준 질문을 현재 Native V2 검색 데이터로 평가합니다. "
@@ -251,7 +294,7 @@ def _render_experiment_monitoring() -> None:
     execution_mode = "native_v2"
     try:
         data_source = monitoring.build_native_v2_evaluation_data_source(
-            status_module.get_native_v2_data_status()
+            status or status_module.get_native_v2_data_status()
         )
     except monitoring.CandidateValidationError as exc:
         data_source = None
@@ -424,6 +467,11 @@ def _render_global_monitoring(
         {
             "항목": _V2_CHECK_LABELS.get(key, key),
             "상태": value.get("status"),
+            "세부 정보": value.get("detail"),
+            "다음 확인": _V2_CHECK_ACTIONS.get(
+                key,
+                "검색 자료 준비에서 기술 세부정보를 확인하세요.",
+            ),
         }
         for key, value in integrity["checks"].items()
         if value.get("status") != "pass"
@@ -432,7 +480,7 @@ def _render_global_monitoring(
     if problem_checks:
         st.dataframe(
             problem_checks,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -451,7 +499,7 @@ def _render_global_monitoring(
                 }
                 for row in failures
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -2193,12 +2241,53 @@ def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
     _render_global_chat_diagnostics(current_id, messages)
 
 
+def _render_global_monitoring_area(
+    problem_area: str,
+    *,
+    status: dict,
+    thread_messages: list[dict],
+    summary: dict,
+    integrity: dict,
+    accuracy: dict,
+) -> None:
+    if problem_area == "summary":
+        _render_global_monitoring(summary, integrity, accuracy)
+    elif problem_area == "response":
+        if not thread_messages:
+            st.caption("확인할 대화가 없습니다.")
+            return
+        thread_by_id = {
+            str(entry["thread"]["id"]): entry for entry in thread_messages
+        }
+        selected_thread_id = st.selectbox(
+            "확인할 대화",
+            options=list(thread_by_id),
+            format_func=lambda thread_id: thread_by_id[thread_id]["thread"][
+                "name"
+            ],
+            key="monitoring_diagnostic_thread",
+        )
+        selected_entry = thread_by_id[selected_thread_id]
+        _render_global_chat_diagnostics(
+            selected_thread_id,
+            selected_entry["messages"],
+        )
+    elif problem_area == "search_data":
+        _render_v2_data_diagnostics(status)
+    elif problem_area == "evaluation":
+        _render_experiment_monitoring(status)
+    elif problem_area == "parsing":
+        _render_parsing_engine_evaluation()
+    else:
+        _render_issue_report_monitoring()
+
+
 def render_global_monitoring_page() -> None:
     """Render the V2-only speed/accuracy dashboard and problem tools."""
     st.header("답변 모니터링")
     st.caption(
-        "평소에는 답변 속도와 정확도만 확인합니다. 나머지 정보는 "
-        "문제가 있을 때 필요한 진단 도구에서 확인합니다."
+        "답변 속도와 정확도를 먼저 확인하고, 아래에서 운영 진단과 "
+        "성능 개선 실험을 나누어 선택합니다."
     )
 
     status = status_module.get_native_v2_data_status()
@@ -2222,45 +2311,69 @@ def render_global_monitoring_page() -> None:
         + int(integrity.get("warning_count") or 0)
         + int(integrity.get("fail_count") or 0)
     )
-    with st.expander(
-        f"문제 상황 자세히 보기 · 확인 필요 {problem_count}건",
-        expanded=problem_count > 0,
-    ):
-        problem_area = st.selectbox(
-            "확인할 내용",
-            options=list(_PROBLEM_AREA_LABELS),
-            format_func=_PROBLEM_AREA_LABELS.__getitem__,
-            key="monitoring_problem_area",
+    st.divider()
+    monitoring_group = st.segmented_control(
+        "용도",
+        options=list(_MONITORING_AREA_GROUPS),
+        default="operations",
+        format_func=_MONITORING_GROUP_LABELS.__getitem__,
+        key="monitoring_area_group",
+        label_visibility="collapsed",
+        width="stretch",
+    )
+    if monitoring_group is None:
+        return
+
+    if monitoring_group == "operations":
+        st.caption(f"운영 상태와 원인을 확인합니다 · 확인 필요 {problem_count}건")
+        area_options = _MONITORING_AREA_GROUPS["operations"]
+        _restore_monitoring_area_selection(
+            "monitoring_operations_area",
+            "monitoring_operations_area_selection",
+            area_options,
         )
-        if problem_area == "summary":
-            _render_global_monitoring(summary, integrity, accuracy)
-        elif problem_area == "response":
-            if not thread_messages:
-                st.caption("확인할 대화가 없습니다.")
-            else:
-                thread_by_id = {
-                    str(entry["thread"]["id"]): entry
-                    for entry in thread_messages
-                }
-                selected_thread_id = st.selectbox(
-                    "확인할 대화",
-                    options=list(thread_by_id),
-                    format_func=lambda thread_id: thread_by_id[thread_id][
-                        "thread"
-                    ]["name"],
-                    key="monitoring_diagnostic_thread",
-                )
-                selected_entry = thread_by_id[selected_thread_id]
-                _render_global_chat_diagnostics(
-                    selected_thread_id,
-                    selected_entry["messages"],
-                )
-        elif problem_area == "search_data":
-            _render_v2_data_diagnostics(status)
-        elif problem_area == "evaluation":
-            _render_experiment_monitoring()
-        elif problem_area == "parsing":
-            _render_parsing_engine_evaluation()
-        else:
-            _render_issue_report_monitoring()
+        problem_area = st.segmented_control(
+            "화면",
+            options=list(area_options),
+            format_func=_PROBLEM_AREA_LABELS.__getitem__,
+            key="monitoring_operations_area",
+            on_change=_store_monitoring_area_selection,
+            args=(
+                "monitoring_operations_area",
+                "monitoring_operations_area_selection",
+            ),
+            label_visibility="collapsed",
+            width="stretch",
+        )
+    else:
+        st.caption("변경 전후의 품질을 검증하고 회귀 후보를 관리합니다.")
+        area_options = _MONITORING_AREA_GROUPS["experiments"]
+        _restore_monitoring_area_selection(
+            "monitoring_experiments_area",
+            "monitoring_experiments_area_selection",
+            area_options,
+        )
+        problem_area = st.segmented_control(
+            "화면",
+            options=list(area_options),
+            format_func=_PROBLEM_AREA_LABELS.__getitem__,
+            key="monitoring_experiments_area",
+            on_change=_store_monitoring_area_selection,
+            args=(
+                "monitoring_experiments_area",
+                "monitoring_experiments_area_selection",
+            ),
+            label_visibility="collapsed",
+            width="stretch",
+        )
+    if problem_area is None:
+        return
+    _render_global_monitoring_area(
+        problem_area,
+        status=status,
+        thread_messages=thread_messages,
+        summary=summary,
+        integrity=integrity,
+        accuracy=accuracy,
+    )
 

@@ -216,6 +216,7 @@ def test_epoch_zero_uses_one_complete_successor_without_sparse_deltas(
     )
 
 
+@pytest.mark.slow
 def test_failure_is_durable_retains_old_version_and_is_not_retried(
     tmp_path: Path,
 ) -> None:
@@ -550,6 +551,7 @@ def test_independent_cache_pinned_base_survives_two_publications(
         repository.close()
 
 
+@pytest.mark.slow
 def test_delete_only_composite_eagerly_pins_base_across_next_gc(
     tmp_path: Path,
 ) -> None:

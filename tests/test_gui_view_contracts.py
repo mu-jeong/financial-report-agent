@@ -70,6 +70,8 @@ DATA_VIEW_FUNCTIONS = {
 MONITORING_VIEW_FUNCTIONS = {
     "_parse_monitoring_paths",
     "_engine_summary_rows",
+    "_restore_monitoring_area_selection",
+    "_store_monitoring_area_selection",
     "_render_parsing_engine_evaluation",
     "_all_thread_messages",
     "_latest_saved_evaluation_run",
@@ -84,6 +86,7 @@ MONITORING_VIEW_FUNCTIONS = {
     "_render_issue_report_monitoring",
     "_render_global_chat_diagnostics",
     "_render_chat_latency_table",
+    "_render_global_monitoring_area",
     "render_chat_monitoring_page",
     "render_global_monitoring_page",
 }
@@ -124,7 +127,9 @@ EXPLICIT_WIDGET_KEYS = {
     "'unembedded_report_display_limit'",
     "'unembedded_embedding_limit'",
     "'start_unembedded_embedding_job'",
-    "'monitoring_problem_area'",
+    "'monitoring_area_group'",
+    "'monitoring_operations_area'",
+    "'monitoring_experiments_area'",
     "'monitoring_diagnostic_thread'",
     "f\"issue_report_category_{current_thread['id']}\"",
     "f\"issue_report_description_{current_thread['id']}\"",
@@ -321,8 +326,10 @@ def test_monitoring_defaults_to_speed_accuracy_and_defers_problem_detail():
 
     assert '"응답 속도"' in source
     assert '"답변 정확도"' in source
-    assert "문제 상황 자세히 보기" in source
-    assert 'key="monitoring_problem_area"' in source
+    assert 'key="monitoring_area_group"' in source
+    assert 'key="monitoring_operations_area"' in source
+    assert 'key="monitoring_experiments_area"' in source
+    assert 'key="monitoring_problem_area"' not in source
     assert "accuracy_failure_count" in source
     assert "monitoring.is_verified_native_v2_evaluation_run(latest)" in source
     assert "monitoring.build_native_v2_evaluation_data_source" in source
@@ -334,6 +341,88 @@ def test_monitoring_defaults_to_speed_accuracy_and_defers_problem_detail():
     assert "build_monitoring_tab_labels" not in source
     assert "_fixed_snapshot_assets_present" not in source
     assert "_run_candidate_snapshot_evaluation" not in source
+
+
+def test_monitoring_groups_horizontal_navigation_by_operator_purpose():
+    source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
+    tree = ast.parse(source, filename=str(MONITORING_VIEWS_PATH))
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "_MONITORING_AREA_GROUPS"
+            for target in node.targets
+        )
+    )
+
+    assert ast.literal_eval(assignment.value) == {
+        "operations": ("summary", "response", "search_data"),
+        "experiments": ("evaluation", "parsing", "issues"),
+    }
+    assert '"operations": "운영 모니터링"' in source
+    assert '"experiments": "성능 개선 실험"' in source
+    assert source.count("st.segmented_control(") >= 2
+
+
+def test_monitoring_restores_each_groups_last_selected_area():
+    class FakeStreamlit:
+        def __init__(self):
+            self.session_state = {}
+
+    fake_st = FakeStreamlit()
+    helpers = _load_helpers(
+        MONITORING_VIEWS_PATH,
+        "_restore_monitoring_area_selection",
+        "_store_monitoring_area_selection",
+        extra_namespace={"st": fake_st},
+    )
+    restore = helpers["_restore_monitoring_area_selection"]
+    store = helpers["_store_monitoring_area_selection"]
+
+    restore(
+        "monitoring_operations_area",
+        "monitoring_operations_area_selection",
+        ("summary", "response", "search_data"),
+    )
+    fake_st.session_state["monitoring_operations_area"] = "response"
+    store(
+        "monitoring_operations_area",
+        "monitoring_operations_area_selection",
+    )
+    del fake_st.session_state["monitoring_operations_area"]
+
+    restore(
+        "monitoring_experiments_area",
+        "monitoring_experiments_area_selection",
+        ("evaluation", "parsing", "issues"),
+    )
+    fake_st.session_state["monitoring_experiments_area"] = "parsing"
+    store(
+        "monitoring_experiments_area",
+        "monitoring_experiments_area_selection",
+    )
+    del fake_st.session_state["monitoring_experiments_area"]
+
+    restore(
+        "monitoring_operations_area",
+        "monitoring_operations_area_selection",
+        ("summary", "response", "search_data"),
+    )
+
+    assert fake_st.session_state["monitoring_operations_area"] == "response"
+    assert fake_st.session_state["monitoring_experiments_area_selection"] == "parsing"
+
+
+def test_current_problem_rows_include_detail_and_next_check():
+    source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
+    function_start = source.index("def _render_global_monitoring(")
+    function_end = source.index("\ndef _render_v2_data_diagnostics", function_start)
+    function_source = source[function_start:function_end]
+
+    assert '"세부 정보": value.get("detail")' in function_source
+    assert '"다음 확인": _V2_CHECK_ACTIONS.get(' in function_source
 
 
 def test_chat_monitoring_exposes_turn_observability_and_global_keeps_accuracy():

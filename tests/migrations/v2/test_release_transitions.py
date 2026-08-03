@@ -104,6 +104,7 @@ def _write_query_spec(data_root: Path, target: Path) -> None:
     target.write_text(json.dumps(payload), encoding="utf-8")
 
 
+@pytest.mark.slow
 def test_release_transition_run_proves_recovery_lease_gc_and_gate_d(tmp_path: Path):
     data_root, sources = _native_seed(tmp_path)
     plan = _prepare(

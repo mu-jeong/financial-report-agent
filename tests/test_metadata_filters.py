@@ -9,7 +9,6 @@ from src.core import metadata_filters as metadata_filters_module
 from src.core.metadata_filters import (
     _active_metadata_rows,
     filter_docs_with_scores,
-    get_metadata_candidates,
     infer_search_filters,
     metadata_matches,
     resolve_temporal_context,
@@ -20,6 +19,32 @@ from src.utils.citations import (
     group_sources_by_document,
     normalize_citation_ranks,
 )
+
+
+_ORIGINAL_GET_METADATA_CANDIDATES = metadata_filters_module.get_metadata_candidates
+
+
+def _isolated_metadata_candidates():
+    return {
+        "target_name": (),
+        "broker": (),
+        "report_month": (),
+        "target_report_types": {},
+    }
+
+
+@pytest.fixture(autouse=True)
+def _isolate_repository_metadata(monkeypatch):
+    monkeypatch.setattr(
+        metadata_filters_module,
+        "get_metadata_candidates",
+        _isolated_metadata_candidates,
+    )
+    monkeypatch.setattr(
+        search_scope,
+        "get_metadata_candidates",
+        _isolated_metadata_candidates,
+    )
 
 
 def test_native_metadata_candidates_follow_active_manifest_and_delta_revision(
@@ -107,10 +132,15 @@ def test_native_metadata_candidates_follow_active_manifest_and_delta_revision(
             "get_connection",
             lambda: connection,
         )
+        monkeypatch.setattr(
+            metadata_filters_module,
+            "get_metadata_candidates",
+            _ORIGINAL_GET_METADATA_CANDIDATES,
+        )
         metadata_filters_module._metadata_candidates_for_revision.cache_clear()
 
         rows = _active_metadata_rows(connection)
-        initial = get_metadata_candidates()
+        initial = metadata_filters_module.get_metadata_candidates()
 
         assert [row["target_name"] for row in rows] == ["Alpha"]
         assert rows[0]["report_month"] == "2026-07"
@@ -124,7 +154,7 @@ def test_native_metadata_candidates_follow_active_manifest_and_delta_revision(
             "INSERT INTO retrieval_delta_reports VALUES (?, ?, ?, ?)",
             ("segment", "reports/excluded.pdf", "upsert", "excluded"),
         )
-        refreshed = get_metadata_candidates()
+        refreshed = metadata_filters_module.get_metadata_candidates()
 
         assert set(refreshed["target_name"]) == {"Alpha", "Beta"}
     finally:
@@ -449,7 +479,16 @@ def test_query_rewrite_marks_date_only_followup_for_router():
         ("\uc0b0\uc5c5\ubd84\uc11d", "industry"),
     ],
 )
-def test_query_rewrite_marks_report_type_only_followup_for_router(question, expected_report_type):
+def test_query_rewrite_marks_report_type_only_followup_for_router(
+    question,
+    expected_report_type,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        metadata_filters_module,
+        "get_metadata_candidates",
+        lambda: pytest.fail("report-type parsing must not read repository metadata"),
+    )
     result = query_rewrite.query_rewrite_node(
         {
             "question": question,
@@ -462,7 +501,8 @@ def test_query_rewrite_marks_report_type_only_followup_for_router(question, expe
         "uses_chat_history": False,
         "followup_scope_intent": True,
     }
-    assert infer_search_filters(question)["report_type"] == expected_report_type
+    candidates = _isolated_metadata_candidates()
+    assert infer_search_filters(question, candidates)["report_type"] == expected_report_type
 
 
 def test_query_rewrite_leaves_explicit_target_questions_independent_of_keyword_followup_rules():

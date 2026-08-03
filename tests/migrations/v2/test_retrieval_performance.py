@@ -488,6 +488,7 @@ def test_paired_runner_executes_probes_and_never_retains_query_payloads():
     assert set(analysis["workloads"]) == set(REQUIRED_WORKLOADS)
 
 
+@pytest.mark.slow
 def test_cli_runner_uses_three_fresh_processes_and_writes_gate_evidence(tmp_path):
     output = tmp_path / "paired-benchmark.json"
     completed = subprocess.run(

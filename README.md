@@ -282,7 +282,7 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 현재 대화의 최근·평균 응답시간과 RDB·Vector DB 평균 조회시간을 보여주며, 각 turn에서 compact state와 설정/요청/fetch/context k를 확인할 수 있습니다. Vector DB는 prompt에 사용한 chunk·문서 ID와 순위를, RDB는 참고 문서를 별도 근거로 표시합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여주고, 전역 응답 trace, 검색 자료 상태, 정확도 평가, parsing 비교, issue report와 회귀 후보는 `문제 상황 자세히 보기` 안에서 선택합니다. 회귀 후보의 최소 기대 조건은 운영자가 JSON을 작성하는 대신 LLM 제안을 자연어로 검토·수정해 저장하며, 제안만으로 자동 승인되지는 않습니다. 평가 묶음 운영은 자료 계약부터 개정 계획의 단계 순서대로 추가합니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 현재 대화의 최근·평균 응답시간과 RDB·Vector DB 평균 조회시간을 보여주며, 각 turn에서 compact state와 설정/요청/fetch/context k를 확인할 수 있습니다. Vector DB는 prompt에 사용한 chunk·문서 ID와 순위를, RDB는 참고 문서를 별도 근거로 표시합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여줍니다. 상세 화면은 상단의 `운영 모니터링`과 `성능 개선 실험`으로 나뉩니다. 운영 모니터링에는 현재 문제·전역 응답 trace·검색 자료 상태를, 성능 개선 실험에는 정확도 평가·parsing 비교·issue report와 회귀 후보를 둡니다. 회귀 후보의 최소 기대 조건은 운영자가 JSON을 작성하는 대신 LLM 제안을 자연어로 검토·수정해 저장하며, 제안만으로 자동 승인되지는 않습니다. 평가 묶음 운영은 자료 계약부터 개정 계획의 단계 순서대로 추가합니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
 
 ### 테스트 방법
 
@@ -302,14 +302,10 @@ python -m pytest -q
 - 스키마 없는 과거 report·candidate·run은 활성 화면에서 제외하되 자동 삭제하지 않습니다.
 - 개별 turn의 근거 연결 상태는 의미 정확도 점수가 아니며, 청크/PDF 본문이나 provider 원문 응답은 monitoring metadata에 복제하지 않습니다.
 
-### 문제 상황 상세 영역
+### 용도별 상세 영역
 
-- 현재 문제
-- 응답 원인 확인
-- 검색 자료 준비
-- 정확도 평가
-- 문서 읽기 품질 비교
-- 신고·수정 확인
+- 운영 모니터링: 현재 문제, 응답 원인 확인, 검색 자료 준비
+- 성능 개선 실험: 정확도 평가, 문서 읽기 품질 비교, 신고·수정 확인
 
 ### TODO
 

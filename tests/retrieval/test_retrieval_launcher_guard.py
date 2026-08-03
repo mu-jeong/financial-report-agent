@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from src.configs import config as config_module
 from src.retrieval import launcher_guard
 from src.retrieval.writer_lock import NativeWriterLock
@@ -104,6 +106,7 @@ def test_supported_launchers_guard_before_update_or_graph_import():
     )
 
 
+@pytest.mark.slow
 def test_gui_runtime_smoke_executes_the_gui_entrypoint(tmp_path):
     data_root, _sources = _native_seed(tmp_path)
     root = Path(__file__).resolve().parents[2]

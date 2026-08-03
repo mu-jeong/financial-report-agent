@@ -1,8 +1,5 @@
 import re
 
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import PromptTemplate
-
 from src.configs.config import get_logger
 from src.configs.prompts import HISTORY_USAGE_DECISION_PROMPT, QUERY_REWRITE_PROMPT
 from src.core.followup_scope import is_section_deep_dive_followup
@@ -194,14 +191,23 @@ def _parse_history_decision(raw_decision: str) -> bool:
     return first_token in {"true", "yes", "y", "1"}
 
 
+def _build_text_chain(prompt_template: str):
+    """Build the LangChain text pipeline only when an LLM call is required."""
+
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.prompts import PromptTemplate
+
+    llm = build_chat_model(temperature=0.0)
+    prompt = PromptTemplate.from_template(prompt_template)
+    return prompt | llm | StrOutputParser()
+
+
 def _llm_history_decision(question: str, history_text: str) -> bool:
     """질문이 최근 history에 의존하는지 LLM으로 분류합니다."""
     if not history_text.strip():
         return False
 
-    llm = build_chat_model(temperature=0.0)
-    prompt = PromptTemplate.from_template(HISTORY_USAGE_DECISION_PROMPT)
-    chain = prompt | llm | StrOutputParser()
+    chain = _build_text_chain(HISTORY_USAGE_DECISION_PROMPT)
     decision = chain.invoke({"chat_history": history_text, "question": question})
     return _parse_history_decision(decision)
 
@@ -250,10 +256,7 @@ def query_rewrite_node(state: State) -> dict:
         }
 
     history_text = format_recent_history(history)
-    llm = build_chat_model(temperature=0.0)
-
-    prompt = PromptTemplate.from_template(QUERY_REWRITE_PROMPT)
-    chain = prompt | llm | StrOutputParser()
+    chain = _build_text_chain(QUERY_REWRITE_PROMPT)
 
     rewritten = chain.invoke({"chat_history": history_text, "question": question}).strip()
 

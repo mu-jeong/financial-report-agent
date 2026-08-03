@@ -308,6 +308,143 @@ def test_native_status_includes_active_delta_membership_and_artifacts(
     )
 
 
+def test_native_status_uses_build_manifest_instead_of_recomputing_active_views(
+    tmp_path,
+    monkeypatch,
+):
+    base_report_uids = [_digest(f"report-{index}") for index in range(1, 6)]
+    manifest = {
+        "schema_version": 1,
+        "counts": {
+            "discovered": len(base_report_uids),
+            "included": len(base_report_uids),
+            "excluded": 0,
+        },
+        "exclusion_policy": {
+            "version": "test-v1",
+            "reason_codes": [],
+        },
+        "reports": [
+            {
+                "report_uid": report_uid,
+                "status": "included",
+                "reason_code": "included",
+            }
+            for report_uid in base_report_uids
+        ],
+    }
+    catalog, base_rows = _create_catalog(
+        tmp_path,
+        source_manifest_json=json.dumps(manifest, sort_keys=True),
+    )
+
+    _publish_delta(
+        catalog,
+        tmp_path,
+        sequence=1,
+        changes=(
+            _DeltaChange(
+                "upsert",
+                str(base_rows[0]["path"]),
+                "replacement body",
+                (9.0, 1.0),
+            ),
+            _DeltaChange("delete", str(base_rows[1]["path"])),
+        ),
+    )
+    unindexed_body = "unindexed child"
+    unindexed_content = f"prefix::{unindexed_body}::suffix"
+    unindexed_parent_uid = _digest("unindexed-parent")
+    with sqlite3.connect(catalog) as connection:
+        connection.execute(
+            """
+            INSERT INTO retrieval_parents (
+                parent_uid, report_id, profile_id, parent_order, content,
+                content_sha256
+            ) VALUES (?, 3, 'profile-1', 99, ?, ?)
+            """,
+            (
+                unindexed_parent_uid,
+                unindexed_content,
+                _digest(unindexed_content),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO retrieval_chunks (
+                chunk_uid, parent_uid, profile_id, child_order, span_start,
+                span_end, embedding_text_sha256
+            ) VALUES (?, ?, 'profile-1', 0, ?, ?, ?)
+            """,
+            (
+                _digest("unindexed-chunk"),
+                unindexed_parent_uid,
+                len("prefix::"),
+                len("prefix::") + len(unindexed_body),
+                _digest(unindexed_body),
+            ),
+        )
+        connection.commit()
+        authoritative_membership_count, authoritative_parent_count = connection.execute(
+            """
+            SELECT COUNT(*), COUNT(DISTINCT parent.parent_uid)
+            FROM active_vector_membership AS membership
+            JOIN retrieval_chunks AS chunk
+              ON chunk.chunk_uid = membership.chunk_uid
+            JOIN retrieval_parents AS parent
+              ON parent.parent_uid = chunk.parent_uid
+             AND parent.profile_id = chunk.profile_id
+            """
+        ).fetchone()
+    paths = SimpleNamespace(catalog=catalog, data_root=tmp_path)
+    selection = SimpleNamespace(
+        mode="native",
+        publication_generation=7,
+        write_epoch=1,
+        active_build_id="build-1",
+        active_snapshot_id="snapshot-1",
+        predecessor_snapshot_id=None,
+        v1_fallback_open=False,
+        compatibility_bundle_id=None,
+        degraded=False,
+        write_enabled=True,
+    )
+    monkeypatch.setattr(
+        status_module,
+        "_status_retrieval_paths",
+        lambda _db_path: (paths, tmp_path),
+    )
+    monkeypatch.setattr(
+        status_module,
+        "inspect_runtime",
+        lambda _db_path, **_kwargs: selection,
+    )
+
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def tracing_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(status_module.sqlite3, "connect", tracing_connect)
+
+    db, vector_db, retrieval = status_module._safe_native_info("unused.db")
+
+    assert db["total_reports"] == 5
+    assert db["embedded_reports"] == 4
+    assert db["pending_reports"] == 1
+    assert authoritative_parent_count == 4
+    assert authoritative_membership_count == 4
+    assert db["parent_chunks"] == authoritative_parent_count
+    assert retrieval["membership_count"] == authoritative_membership_count
+    assert vector_db["ntotal"] == 4
+    executed = "\n".join(statements).casefold()
+    assert "from active_reports" not in executed
+    assert "from active_vector_membership" not in executed
+
+
 def test_list_unembedded_reports_includes_ready_delta_failures_without_active_duplicates(
     tmp_path,
     monkeypatch,

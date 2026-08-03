@@ -5870,37 +5870,37 @@ def summarize_v2_data_integrity(
             "native_snapshot": {
                 "status": "pass" if snapshot_ready and build_ready else "fail",
                 "detail": (
-                    f"build={retrieval.get('build_state')}, "
-                    f"snapshot={retrieval.get('snapshot_state')}"
+                    f"빌드={retrieval.get('build_state')}, "
+                    f"스냅샷={retrieval.get('snapshot_state')}"
                 ),
             },
             "native_membership": {
                 "status": "pass" if membership == ntotal and ntotal > 0 else "fail",
-                "detail": f"{membership}/{ntotal} catalog members",
+                "detail": f"카탈로그 {membership}건 / 벡터 {ntotal}건",
             },
             "manifest_backlog": {
                 "status": "pass" if pending == 0 else "warning",
-                "detail": f"{pending} latest source objects outside the active manifest",
+                "detail": f"현재 검색 자료에 미반영 {pending}건",
             },
             "pdf_vs_manifest": {
                 "status": "pass" if downloaded >= embedded else "warning",
-                "detail": f"{downloaded} PDFs for {embedded} active reports",
+                "detail": f"원문 PDF {downloaded}건 / 활성 보고서 {embedded}건",
             },
             "search_coverage": {
                 "status": "pass" if total == 0 or embedded / total >= 0.95 else "warning",
-                "detail": f"{embedded}/{total} reports in the active snapshot",
+                "detail": f"활성 검색 자료 {embedded}건 / 전체 {total}건",
             },
             "runtime_health": {
                 "status": "warning" if retrieval.get("degraded") else "pass",
                 "detail": (
-                    f"generation={retrieval.get('publication_generation')}, "
-                    f"epoch={retrieval.get('write_epoch')}, "
-                    f"write_enabled={retrieval.get('write_enabled')}"
+                    f"세대={retrieval.get('publication_generation')}, "
+                    f"쓰기 epoch={retrieval.get('write_epoch')}, "
+                    f"쓰기 가능={retrieval.get('write_enabled')}"
                 ),
             },
             "cleanup_backlog": {
                 "status": "warning" if cleanup_count else "pass",
-                "detail": f"{cleanup_count} files waiting for cleanup",
+                "detail": f"정리 대기 파일 {cleanup_count}개",
             },
         }
     return {

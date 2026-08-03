@@ -7,6 +7,8 @@ without mutating the SQLite DB or FAISS index.
 
 from __future__ import annotations
 
+from collections import Counter
+import json
 import os
 import sqlite3
 import stat
@@ -37,9 +39,14 @@ USE_RERANKER = config.USE_RERANKER
 
 def _safe_count_pdfs(save_dir: str) -> int:
     path = Path(save_dir)
-    if not path.exists():
+    if not path.is_dir():
         return 0
-    return sum(1 for child in path.iterdir() if child.is_file() and child.suffix.lower() == ".pdf")
+    with os.scandir(path) as entries:
+        return sum(
+            1
+            for entry in entries
+            if entry.is_file() and entry.name.casefold().endswith(".pdf")
+        )
 
 
 def _safe_vector_info(faiss_dir: str) -> dict[str, Any]:
@@ -189,6 +196,245 @@ def _safe_db_info(db_path: str) -> dict[str, Any]:
     return info
 
 
+def _native_delta_status_from_manifest(
+    connection: sqlite3.Connection,
+    *,
+    active_build_id: str,
+    active_snapshot_id: str,
+    publication_generation: int,
+) -> dict[str, Any] | None:
+    """Summarize active delta state without repeatedly expanding active views.
+
+    The build manifest fixes the base report membership. Ready delta heads then
+    replace or delete reports by canonical path. Older or synthetic catalogs
+    that do not carry the structured manifest fall back to the view-based path.
+    """
+
+    build = connection.execute(
+        """
+        SELECT source_manifest_json, included_count
+        FROM retrieval_builds
+        WHERE build_id = ?
+        """,
+        (active_build_id,),
+    ).fetchone()
+    if build is None:
+        return None
+    try:
+        manifest = json.loads(str(build["source_manifest_json"]))
+    except (TypeError, ValueError):
+        return None
+    manifest_reports = manifest.get("reports") if isinstance(manifest, dict) else None
+    if not isinstance(manifest_reports, list):
+        return None
+    included_uids = {
+        str(entry.get("report_uid"))
+        for entry in manifest_reports
+        if (
+            isinstance(entry, dict)
+            and entry.get("status") == "included"
+            and entry.get("report_uid")
+        )
+    }
+    if len(included_uids) != int(build["included_count"]):
+        return None
+
+    report_rows = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT report_id, report_uid, canonical_relative_path,
+                   report_type, report_date
+            FROM reports
+            """
+        )
+    ]
+    reports_by_uid = {str(row["report_uid"]): row for row in report_rows}
+    if not included_uids <= reports_by_uid.keys():
+        return None
+
+    base_membership_rows = list(
+        connection.execute(
+            """
+            SELECT report.canonical_relative_path,
+                   COUNT(*) AS membership_count,
+                   COUNT(DISTINCT parent.parent_uid) AS parent_count
+            FROM snapshot_membership AS membership
+            JOIN retrieval_chunks AS chunk
+              ON chunk.chunk_uid = membership.chunk_uid
+            JOIN retrieval_parents AS parent
+              ON parent.parent_uid = chunk.parent_uid
+             AND parent.profile_id = chunk.profile_id
+            JOIN reports AS report ON report.report_id = parent.report_id
+            WHERE membership.snapshot_id = ?
+            GROUP BY report.canonical_relative_path
+            """,
+            (active_snapshot_id,),
+        )
+    )
+    base_membership_by_path = {
+        str(row["canonical_relative_path"]): int(row["membership_count"])
+        for row in base_membership_rows
+    }
+    base_parents_by_path = {
+        str(row["canonical_relative_path"]): int(row["parent_count"])
+        for row in base_membership_rows
+    }
+    active_by_path = {
+        str(reports_by_uid[report_uid]["canonical_relative_path"]): reports_by_uid[
+            report_uid
+        ]
+        for report_uid in included_uids
+        if base_membership_by_path.get(
+            str(reports_by_uid[report_uid]["canonical_relative_path"]),
+            0,
+        )
+        > 0
+    }
+
+    heads = [
+        dict(row)
+        for row in connection.execute(
+            """
+            WITH ready_segments AS (
+                SELECT segment.segment_id, segment.sequence,
+                       segment.relative_path
+                FROM retrieval_delta_segments AS segment
+                WHERE segment.base_snapshot_id = ?
+                  AND segment.base_publication_generation = ?
+                  AND segment.state = 'ready'
+            ),
+            ranked_heads AS (
+                SELECT action.canonical_relative_path, action.action,
+                       action.report_uid, action.segment_id,
+                       segment.sequence, segment.relative_path,
+                       row_number() OVER (
+                           PARTITION BY action.canonical_relative_path
+                           ORDER BY segment.sequence DESC, segment.segment_id DESC
+                       ) AS position
+                FROM retrieval_delta_reports AS action
+                JOIN ready_segments AS segment
+                  ON segment.segment_id = action.segment_id
+                WHERE action.action IN ('upsert', 'delete')
+            )
+            SELECT canonical_relative_path, action, report_uid, segment_id,
+                   sequence, relative_path
+            FROM ranked_heads
+            WHERE position = 1
+            """,
+            (active_snapshot_id, publication_generation),
+        )
+    ]
+    for head in heads:
+        canonical_path = str(head["canonical_relative_path"])
+        active_by_path.pop(canonical_path, None)
+        if head["action"] != "upsert":
+            continue
+        replacement = reports_by_uid.get(str(head["report_uid"]))
+        if replacement is None:
+            return None
+        active_by_path[canonical_path] = replacement
+
+    active_rows = list(active_by_path.values())
+    active_uids = {str(row["report_uid"]) for row in active_rows}
+    latest_by_path: dict[str, dict[str, Any]] = {}
+    for row in report_rows:
+        canonical_path = str(row["canonical_relative_path"])
+        previous = latest_by_path.get(canonical_path)
+        if previous is None or int(row["report_id"]) > int(previous["report_id"]):
+            latest_by_path[canonical_path] = row
+    latest_rows = list(latest_by_path.values())
+    embedded_count = sum(
+        1 for row in latest_rows if str(row["report_uid"]) in active_uids
+    )
+
+    report_types = Counter(str(row["report_type"]) for row in active_rows)
+    report_dates = Counter(str(row["report_date"]) for row in active_rows)
+    report_date_types: dict[str, Counter[str]] = {}
+    for row in active_rows:
+        report_date_types.setdefault(
+            str(row["report_date"]),
+            Counter(),
+        )[str(row["report_type"])] += 1
+
+    delta_membership = {
+        (str(row["segment_id"]), str(row["report_uid"])): (
+            int(row["membership_count"]),
+            int(row["parent_count"]),
+        )
+        for row in connection.execute(
+            """
+            SELECT membership.segment_id, report.report_uid,
+                   COUNT(*) AS membership_count,
+                   COUNT(DISTINCT parent.parent_uid) AS parent_count
+            FROM retrieval_delta_membership AS membership
+            JOIN retrieval_delta_segments AS segment
+              ON segment.segment_id = membership.segment_id
+             AND segment.base_snapshot_id = ?
+             AND segment.base_publication_generation = ?
+             AND segment.state = 'ready'
+            JOIN retrieval_chunks AS chunk
+              ON chunk.chunk_uid = membership.chunk_uid
+            JOIN retrieval_parents AS parent
+              ON parent.parent_uid = chunk.parent_uid
+             AND parent.profile_id = chunk.profile_id
+            JOIN reports AS report ON report.report_id = parent.report_id
+            GROUP BY membership.segment_id, report.report_uid
+            """,
+            (active_snapshot_id, publication_generation),
+        )
+    }
+    replaced_paths = {str(head["canonical_relative_path"]) for head in heads}
+    membership_count = sum(
+        count
+        for canonical_path, count in base_membership_by_path.items()
+        if canonical_path not in replaced_paths
+    )
+    parent_chunk_count = sum(
+        count
+        for canonical_path, count in base_parents_by_path.items()
+        if canonical_path not in replaced_paths
+    )
+    active_delta_paths: dict[str, int] = {}
+    for head in heads:
+        if head["action"] != "upsert":
+            continue
+        member_count, parent_count = delta_membership.get(
+            (str(head["segment_id"]), str(head["report_uid"])),
+            (0, 0),
+        )
+        membership_count += member_count
+        parent_chunk_count += parent_count
+        relative_path = head.get("relative_path")
+        if member_count and relative_path:
+            active_delta_paths[str(relative_path)] = int(head["sequence"])
+
+    active_dates = [str(row["report_date"]) for row in active_rows]
+    total_reports = len(latest_rows)
+    return {
+        "total_reports": total_reports,
+        "embedded_reports": embedded_count,
+        "pending_reports": max(total_reports - embedded_count, 0),
+        "parent_chunks": parent_chunk_count,
+        "min_report_date": min(active_dates) if active_dates else None,
+        "max_report_date": max(active_dates) if active_dates else None,
+        "report_types": dict(report_types),
+        "report_date_counts": dict(report_dates),
+        "report_date_type_counts": {
+            report_date: dict(counts)
+            for report_date, counts in report_date_types.items()
+        },
+        "membership_count": membership_count,
+        "delta_artifact_paths": [
+            relative_path
+            for relative_path, _sequence in sorted(
+                active_delta_paths.items(),
+                key=lambda item: (item[1], item[0]),
+            )
+        ],
+    }
+
+
 def _safe_native_info(
     db_path: str,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
@@ -277,82 +523,116 @@ def _safe_native_info(
                 "SELECT schema_version FROM retrieval_runtime WHERE runtime_id = 1"
             ).fetchone()
             retrieval["schema_version"] = int(runtime[0]) if runtime else None
-            summary = connection.execute(
-                """
-                WITH latest AS (
-                    SELECT canonical_relative_path, MAX(report_id) AS report_id
-                    FROM reports GROUP BY canonical_relative_path
+            manifest_status = None
+            if (
+                has_delta_schema
+                and selection.active_build_id
+                and selection.active_snapshot_id
+            ):
+                manifest_status = _native_delta_status_from_manifest(
+                    connection,
+                    active_build_id=str(selection.active_build_id),
+                    active_snapshot_id=str(selection.active_snapshot_id),
+                    publication_generation=int(selection.publication_generation),
                 )
-                SELECT COUNT(*) AS total_reports,
-                       COALESCE(SUM(CASE WHEN active.report_uid IS NOT NULL THEN 1 ELSE 0 END), 0)
-                           AS embedded_reports,
-                       MIN(CASE WHEN active.report_uid IS NOT NULL THEN report.report_date END)
-                           AS min_report_date,
-                       MAX(CASE WHEN active.report_uid IS NOT NULL THEN report.report_date END)
-                           AS max_report_date
-                FROM latest
-                JOIN reports AS report ON report.report_id = latest.report_id
-                LEFT JOIN active_reports AS active ON active.report_uid = report.report_uid
-                """
-            ).fetchone()
-            total = int(summary["total_reports"] or 0)
-            embedded = int(summary["embedded_reports"] or 0)
-            db.update(
-                {
-                    "total_reports": total,
-                    "embedded_reports": embedded,
-                    "pending_reports": max(total - embedded, 0),
-                    "min_report_date": summary["min_report_date"],
-                    "max_report_date": summary["max_report_date"],
+            if manifest_status is not None:
+                db.update(
+                    {
+                        key: manifest_status[key]
+                        for key in (
+                            "total_reports",
+                            "embedded_reports",
+                            "pending_reports",
+                            "parent_chunks",
+                            "min_report_date",
+                            "max_report_date",
+                            "report_types",
+                            "report_date_counts",
+                            "report_date_type_counts",
+                        )
+                    }
+                )
+            else:
+                summary = connection.execute(
+                    """
+                    WITH latest AS (
+                        SELECT canonical_relative_path, MAX(report_id) AS report_id
+                        FROM reports GROUP BY canonical_relative_path
+                    )
+                    SELECT COUNT(*) AS total_reports,
+                           COALESCE(SUM(CASE WHEN active.report_uid IS NOT NULL THEN 1 ELSE 0 END), 0)
+                               AS embedded_reports,
+                           MIN(CASE WHEN active.report_uid IS NOT NULL THEN report.report_date END)
+                               AS min_report_date,
+                           MAX(CASE WHEN active.report_uid IS NOT NULL THEN report.report_date END)
+                               AS max_report_date
+                    FROM latest
+                    JOIN reports AS report ON report.report_id = latest.report_id
+                    LEFT JOIN active_reports AS active ON active.report_uid = report.report_uid
+                    """
+                ).fetchone()
+                total = int(summary["total_reports"] or 0)
+                embedded = int(summary["embedded_reports"] or 0)
+                db.update(
+                    {
+                        "total_reports": total,
+                        "embedded_reports": embedded,
+                        "pending_reports": max(total - embedded, 0),
+                        "min_report_date": summary["min_report_date"],
+                        "max_report_date": summary["max_report_date"],
+                    }
+                )
+                membership_source = (
+                    "active_vector_membership"
+                    if has_delta_schema
+                    else "snapshot_membership"
+                )
+                membership_filter = (
+                    "" if has_delta_schema else "WHERE membership.snapshot_id = ?"
+                )
+                membership_parameters = (
+                    () if has_delta_schema else (selection.active_snapshot_id,)
+                )
+                db["parent_chunks"] = int(
+                    connection.execute(
+                        f"""
+                        SELECT COUNT(DISTINCT parent.parent_uid)
+                        FROM {membership_source} AS membership
+                        JOIN retrieval_chunks AS chunk
+                          ON chunk.chunk_uid = membership.chunk_uid
+                        JOIN retrieval_parents AS parent
+                          ON parent.parent_uid = chunk.parent_uid
+                        {membership_filter}
+                        """,
+                        membership_parameters,
+                    ).fetchone()[0]
+                )
+                type_rows = connection.execute(
+                    "SELECT report_type, COUNT(*) AS count "
+                    "FROM active_reports GROUP BY report_type"
+                ).fetchall()
+                db["report_types"] = {
+                    row["report_type"]: int(row["count"]) for row in type_rows
                 }
-            )
-            membership_source = (
-                "active_vector_membership"
-                if has_delta_schema
-                else "snapshot_membership"
-            )
-            membership_filter = (
-                "" if has_delta_schema else "WHERE membership.snapshot_id = ?"
-            )
-            membership_parameters = (
-                () if has_delta_schema else (selection.active_snapshot_id,)
-            )
-            db["parent_chunks"] = int(
-                connection.execute(
-                    f"""
-                    SELECT COUNT(DISTINCT parent.parent_uid)
-                    FROM {membership_source} AS membership
-                    JOIN retrieval_chunks AS chunk ON chunk.chunk_uid = membership.chunk_uid
-                    JOIN retrieval_parents AS parent ON parent.parent_uid = chunk.parent_uid
-                    {membership_filter}
-                    """,
-                    membership_parameters,
-                ).fetchone()[0]
-            )
-            type_rows = connection.execute(
-                "SELECT report_type, COUNT(*) AS count FROM active_reports GROUP BY report_type"
-            ).fetchall()
-            db["report_types"] = {
-                row["report_type"]: int(row["count"]) for row in type_rows
-            }
-            date_rows = connection.execute(
-                "SELECT report_date, COUNT(*) AS count FROM active_reports GROUP BY report_date"
-            ).fetchall()
-            db["report_date_counts"] = {
-                row["report_date"]: int(row["count"]) for row in date_rows
-            }
-            date_type_rows = connection.execute(
-                """
-                SELECT report_date, report_type, COUNT(*) AS count
-                FROM active_reports GROUP BY report_date, report_type
-                """
-            ).fetchall()
-            date_types: dict[str, dict[str, int]] = {}
-            for row in date_type_rows:
-                date_types.setdefault(row["report_date"], {})[row["report_type"]] = int(
-                    row["count"]
-                )
-            db["report_date_type_counts"] = date_types
+                date_rows = connection.execute(
+                    "SELECT report_date, COUNT(*) AS count "
+                    "FROM active_reports GROUP BY report_date"
+                ).fetchall()
+                db["report_date_counts"] = {
+                    row["report_date"]: int(row["count"]) for row in date_rows
+                }
+                date_type_rows = connection.execute(
+                    """
+                    SELECT report_date, report_type, COUNT(*) AS count
+                    FROM active_reports GROUP BY report_date, report_type
+                    """
+                ).fetchall()
+                date_types: dict[str, dict[str, int]] = {}
+                for row in date_type_rows:
+                    date_types.setdefault(row["report_date"], {})[
+                        row["report_type"]
+                    ] = int(row["count"])
+                db["report_date_type_counts"] = date_types
             snapshot = connection.execute(
                 """
                 SELECT snapshot.relative_path, snapshot.size_bytes, snapshot.ntotal,
@@ -409,11 +689,44 @@ def _safe_native_info(
                             selection.publication_generation,
                         ),
                     ).fetchone()
-                    active_membership_count = int(
-                        connection.execute(
-                            "SELECT COUNT(*) FROM active_vector_membership"
-                        ).fetchone()[0]
-                    )
+                    if manifest_status is None:
+                        active_membership_count = int(
+                            connection.execute(
+                                "SELECT COUNT(*) FROM active_vector_membership"
+                            ).fetchone()[0]
+                        )
+                        delta_artifacts = connection.execute(
+                            """
+                            SELECT segment.relative_path
+                            FROM retrieval_delta_segments AS segment
+                            WHERE segment.base_snapshot_id = ?
+                              AND segment.base_publication_generation = ?
+                              AND segment.state = 'ready'
+                              AND segment.relative_path IS NOT NULL
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM active_vector_membership AS membership
+                                  WHERE membership.artifact_kind = 'delta'
+                                    AND membership.artifact_id = segment.segment_id
+                              )
+                            ORDER BY segment.sequence, segment.segment_id
+                            """,
+                            (
+                                selection.active_snapshot_id,
+                                selection.publication_generation,
+                            ),
+                        ).fetchall()
+                        delta_artifact_paths = [
+                            str(artifact["relative_path"])
+                            for artifact in delta_artifacts
+                        ]
+                    else:
+                        active_membership_count = int(
+                            manifest_status["membership_count"]
+                        )
+                        delta_artifact_paths = list(
+                            manifest_status["delta_artifact_paths"]
+                        )
                     retrieval.update(
                         {
                             "delta_generation": int(delta_summary["generation"]),
@@ -422,30 +735,9 @@ def _safe_native_info(
                         }
                     )
                     vector_db["ntotal"] = active_membership_count
-                    delta_artifacts = connection.execute(
-                        """
-                        SELECT segment.relative_path
-                        FROM retrieval_delta_segments AS segment
-                        WHERE segment.base_snapshot_id = ?
-                          AND segment.base_publication_generation = ?
-                          AND segment.state = 'ready'
-                          AND segment.relative_path IS NOT NULL
-                          AND EXISTS (
-                              SELECT 1
-                              FROM active_vector_membership AS membership
-                              WHERE membership.artifact_kind = 'delta'
-                                AND membership.artifact_id = segment.segment_id
-                          )
-                        ORDER BY segment.sequence, segment.segment_id
-                        """,
-                        (
-                            selection.active_snapshot_id,
-                            selection.publication_generation,
-                        ),
-                    ).fetchall()
-                    for artifact in delta_artifacts:
+                    for relative_path in delta_artifact_paths:
                         artifact_path = paths.data_root.joinpath(
-                            *str(artifact["relative_path"]).split("/")
+                            *relative_path.split("/")
                         )
                         artifact_size = (
                             artifact_path.stat().st_size if artifact_path.is_file() else 0

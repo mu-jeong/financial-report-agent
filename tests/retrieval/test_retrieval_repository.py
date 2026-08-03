@@ -35,6 +35,7 @@ def _create_catalog(
     *,
     count: int = 5,
     generation: int = 7,
+    source_manifest_json: str = "{}",
 ) -> tuple[Path, list[dict[str, object]]]:
     rows = []
     vectors = []
@@ -157,7 +158,7 @@ def _create_catalog(
         (
             'build-1',
             'profile-1',
-            '{}',
+            source_manifest_json,
             _digest('manifest-1'),
             count,
             0,
