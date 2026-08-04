@@ -73,12 +73,15 @@ if _RUNTIME_SMOKE_REQUESTED:
 
 
 def _reload_loaded_application_modules() -> None:
-    """Retain hot reloads without importing cold modules just to reload them."""
+    """Retain safe hot reloads without mutating active worker dependencies.
+
+    ``src.core.monitoring`` is intentionally process-persistent because
+    Monitoring jobs can still be executing its functions during an app rerun.
+    """
     for module_name in (
         "src.core.data_update_jobs",
         "src.core.conversation_store",
         "src.core.issue_report_store",
-        "src.core.monitoring",
         "src.core.pdf_extraction",
         "src.core.compare_pdf_extractors",
         "src.core.metadata_filters",
@@ -167,12 +170,12 @@ chat_jobs.show_queued_chat_job_toasts()
 chat_jobs.render_chat_job_notifications(current_id)
 
 with st.sidebar:
-    sidebar_views.render_sidebar(current_id)
+    sidebar_status = sidebar_views.render_sidebar(current_id)
 
 if MONITORING_MODE:
     active_page = st.session_state.get("active_monitoring_page", "Chat")
     if active_page == "Monitoring":
-        monitoring_views.render_global_monitoring_page()
+        monitoring_views.render_global_monitoring_page(sidebar_status)
     else:
         chat_tab, chat_monitoring_tab = st.tabs(["Chat", "답변 모니터링"])
         with chat_tab:
