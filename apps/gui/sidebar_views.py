@@ -4,10 +4,10 @@ import streamlit as st
 
 from apps.gui import chat_jobs
 from apps.gui import data_views
+from apps.gui import status_cache
 from src.configs import config as config_module
 from src.core import conversation_store
 from src.core import monitoring
-from src.core import status as status_module
 
 
 def _sidebar_rerun() -> None:
@@ -152,7 +152,7 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
         _delete_thread_and_select_next(thread_id)
 
 
-def render_sidebar(current_id: str) -> None:
+def render_sidebar(current_id: str) -> dict:
     threads = load_threads()
 
     st.title("Finance Report Agent")
@@ -178,7 +178,7 @@ def render_sidebar(current_id: str) -> None:
 
     with st.container(key="sidebar_data_status_bottom"):
         st.divider()
-        status = status_module.get_data_status()
+        status = status_cache.get_data_status()
         db_status = status["db"]
         data_views.render_report_calendar(db_status)
         data_views.render_data_update_controls(db_status)
@@ -187,3 +187,4 @@ def render_sidebar(current_id: str) -> None:
         col1, col2 = st.columns(2)
         col1.metric("리포트", f"{db_status['total_reports']}건")
         col2.metric("처리됨", f"{db_status['embedded_reports']}건")
+    return status

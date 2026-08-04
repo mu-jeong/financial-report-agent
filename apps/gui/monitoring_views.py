@@ -7,7 +7,9 @@ from pathlib import Path
 import streamlit as st
 
 from apps.gui import data_views
+from apps.gui import monitoring_jobs
 from apps.gui import search_engine
+from apps.gui import status_cache
 from src.configs import config as config_module
 from src.core import compare_pdf_extractors
 from src.core import conversation_store
@@ -27,6 +29,9 @@ MONITORING_EVAL_RUN_DIR = Path("debug") / "evaluation_runs"
 MONITORING_REGRESSION_CANDIDATE_DIR = Path("debug") / "regression_candidates"
 MONITORING_CANDIDATE_RUN_DIR = Path("debug") / "candidate_evaluation_runs"
 MONITORING_CODEX_HANDOFF_DIR = Path("debug") / "codex_handoffs"
+
+_EVALUATION_JOB_KEY = "native-v2-evaluation"
+_REGRESSION_CANDIDATE_JOB_KEY = "native-v2-regression-candidates"
 
 _PROBLEM_AREA_LABELS = {
     "summary": "현재 문제",
@@ -294,7 +299,7 @@ def _render_experiment_monitoring(status: dict | None = None) -> None:
     execution_mode = "native_v2"
     try:
         data_source = monitoring.build_native_v2_evaluation_data_source(
-            status or status_module.get_native_v2_data_status()
+            status or status_cache.get_native_v2_data_status()
         )
     except monitoring.CandidateValidationError as exc:
         data_source = None
@@ -316,31 +321,50 @@ def _render_experiment_monitoring(status: dict | None = None) -> None:
         ),
         help="개수가 아니라 실제로 실행할 테스트 케이스를 선택합니다.",
     )
-    latency_threshold = st.number_input("Latency threshold seconds", min_value=1.0, max_value=300.0, value=30.0, step=1.0)
+    latency_threshold = st.number_input(
+        "Latency threshold seconds",
+        min_value=1.0,
+        max_value=300.0,
+        value=30.0,
+        step=1.0,
+    )
     selected_cases = monitoring.select_evaluation_cases(dataset, selected_case_ids)
     st.caption(f"선택된 테스트: {len(selected_cases)}개")
+    evaluation_job_key = monitoring_jobs.session_job_key(_EVALUATION_JOB_KEY)
+    evaluation_job = monitoring_jobs.get_job(evaluation_job_key)
+    evaluation_running = bool(
+        evaluation_job and evaluation_job["state"] == "running"
+    )
+    monitoring_jobs.render_job_status(
+        evaluation_job_key,
+        result_state_key="latest_evaluation_run",
+        running_message=(
+            "Evaluation을 백그라운드에서 실행 중입니다. 다른 화면을 사용해도 작업은 계속됩니다."
+        ),
+        success_message="Evaluation run이 저장되었습니다.",
+        failure_prefix="Evaluation run failed",
+    )
     if st.button(
         "Run selected evaluation cases",
         use_container_width=True,
-        disabled=not selected_cases or data_source is None,
+        disabled=(
+            not selected_cases or data_source is None or evaluation_running
+        ),
     ):
         assert data_source is not None
-        with st.spinner("Evaluation dataset 실행 중..."):
-            try:
-                run = monitoring.run_evaluation_dataset(
-                    dataset,
-                    search_engine.invoke_graph,
-                    output_dir=MONITORING_EVAL_RUN_DIR,
-                    selected_case_ids=selected_case_ids,
-                    latency_threshold_seconds=float(latency_threshold),
-                    execution_mode=execution_mode,
-                    data_source=data_source,
-                )
-            except Exception as exc:
-                st.error(f"Evaluation run failed: {exc}")
-            else:
-                st.session_state.latest_evaluation_run = run
-                st.success("Evaluation run saved.")
+        _job_id, started = monitoring_jobs.start_evaluation_job(
+            evaluation_job_key,
+            dataset=dataset,
+            invoke_graph=search_engine.invoke_graph,
+            output_dir=MONITORING_EVAL_RUN_DIR,
+            selected_case_ids=selected_case_ids,
+            latency_threshold_seconds=float(latency_threshold),
+            execution_mode=execution_mode,
+            data_source=data_source,
+        )
+        if started:
+            st.toast("Evaluation run을 시작했습니다.", icon="⏳")
+            st.rerun(scope="app")
 
     run = _latest_v2_accuracy_run()
     if not run:
@@ -387,26 +411,22 @@ def _render_experiment_monitoring(status: dict | None = None) -> None:
         if st.button(
             "Rerun failed cases only",
             use_container_width=True,
-            disabled=data_source is None,
+            disabled=data_source is None or evaluation_running,
         ):
             assert data_source is not None
-            with st.spinner("Failed cases 재실행 중..."):
-                try:
-                    rerun = monitoring.run_evaluation_dataset(
-                        dataset,
-                        search_engine.invoke_graph,
-                        output_dir=MONITORING_EVAL_RUN_DIR,
-                        selected_case_ids=failed_case_ids,
-                        latency_threshold_seconds=float(latency_threshold),
-                        execution_mode=execution_mode,
-                        data_source=data_source,
-                    )
-                except Exception as exc:
-                    st.error(f"Failed-case rerun failed: {exc}")
-                else:
-                    st.session_state.latest_evaluation_run = rerun
-                    st.success("Failed cases rerun saved.")
-                    st.rerun()
+            _job_id, started = monitoring_jobs.start_evaluation_job(
+                evaluation_job_key,
+                dataset=dataset,
+                invoke_graph=search_engine.invoke_graph,
+                output_dir=MONITORING_EVAL_RUN_DIR,
+                selected_case_ids=failed_case_ids,
+                latency_threshold_seconds=float(latency_threshold),
+                execution_mode=execution_mode,
+                data_source=data_source,
+            )
+            if started:
+                st.toast("Failed cases rerun을 시작했습니다.", icon="⏳")
+                st.rerun(scope="app")
     else:
         st.success("현재 run에는 triage가 필요한 fail 케이스가 없습니다.")
 
@@ -1968,29 +1988,50 @@ def _render_issue_report_monitoring() -> None:
     if selected_dataset["cases"]:
         with st.expander("선택된 evaluation case draft JSON", expanded=False):
             st.json(selected_dataset)
-    if st.button("Run selected regression candidates", use_container_width=True, disabled=not selected_dataset["cases"]):
-        with st.spinner("Regression candidate draft 실행 중..."):
-            try:
-                candidate_data_source = (
-                    monitoring.build_native_v2_evaluation_data_source(
-                        status_module.get_native_v2_data_status(),
-                        candidate_ids=selected_candidate_ids,
-                    )
-                )
-                run = monitoring.run_evaluation_dataset(
-                    selected_dataset,
-                    search_engine.invoke_graph,
-                    output_dir=MONITORING_EVAL_RUN_DIR,
-                    selected_case_ids=[case.get("id") for case in selected_dataset["cases"]],
-                    execution_mode="regression_candidate_native_v2",
-                    data_source=candidate_data_source,
-                )
-            except Exception as exc:
-                st.error(f"Regression candidate run failed: {exc}")
-            else:
-                st.session_state.latest_regression_candidate_run = run
-                st.success("Regression candidate run saved.")
-                st.code(run.get("json_path") or "", language="text")
+    regression_job_key = monitoring_jobs.session_job_key(
+        _REGRESSION_CANDIDATE_JOB_KEY
+    )
+    regression_job = monitoring_jobs.get_job(regression_job_key)
+    regression_running = bool(
+        regression_job and regression_job["state"] == "running"
+    )
+    monitoring_jobs.render_job_status(
+        regression_job_key,
+        result_state_key="latest_regression_candidate_run",
+        running_message=(
+            "Regression candidate를 백그라운드에서 실행 중입니다. "
+            "다른 화면을 사용해도 작업은 계속됩니다."
+        ),
+        success_message="Regression candidate run이 저장되었습니다.",
+        failure_prefix="Regression candidate run failed",
+    )
+    if st.button(
+        "Run selected regression candidates",
+        use_container_width=True,
+        disabled=not selected_dataset["cases"] or regression_running,
+    ):
+        try:
+            candidate_data_source = monitoring.build_native_v2_evaluation_data_source(
+                status_cache.get_native_v2_data_status(),
+                candidate_ids=selected_candidate_ids,
+            )
+        except Exception as exc:
+            st.error(f"Regression candidate run failed: {exc}")
+        else:
+            _job_id, started = monitoring_jobs.start_evaluation_job(
+                regression_job_key,
+                dataset=selected_dataset,
+                invoke_graph=search_engine.invoke_graph,
+                output_dir=MONITORING_EVAL_RUN_DIR,
+                selected_case_ids=[
+                    str(case.get("id")) for case in selected_dataset["cases"]
+                ],
+                execution_mode="regression_candidate_native_v2",
+                data_source=candidate_data_source,
+            )
+            if started:
+                st.toast("Regression candidate run을 시작했습니다.", icon="⏳")
+                st.rerun(scope="app")
 
     latest_candidate_run = st.session_state.get("latest_regression_candidate_run")
     if latest_candidate_run:
@@ -2282,7 +2323,16 @@ def _render_global_monitoring_area(
         _render_issue_report_monitoring()
 
 
-def render_global_monitoring_page() -> None:
+def _resolve_global_monitoring_status(status: dict | None) -> dict:
+    """Reuse Native status, but keep legacy installs fail-closed."""
+
+    retrieval_mode = ((status or {}).get("retrieval") or {}).get("mode")
+    if not status or retrieval_mode in {None, "legacy_v1"}:
+        return status_cache.get_native_v2_data_status()
+    return status
+
+
+def render_global_monitoring_page(status: dict | None = None) -> None:
     """Render the V2-only speed/accuracy dashboard and problem tools."""
     st.header("답변 모니터링")
     st.caption(
@@ -2290,7 +2340,7 @@ def render_global_monitoring_page() -> None:
         "성능 개선 실험을 나누어 선택합니다."
     )
 
-    status = status_module.get_native_v2_data_status()
+    status = _resolve_global_monitoring_status(status)
     thread_messages = _all_thread_messages()
     summary = monitoring.summarize_all_chat_threads(thread_messages)
     integrity = monitoring.summarize_v2_data_integrity(status)
