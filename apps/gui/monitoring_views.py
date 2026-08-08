@@ -128,8 +128,7 @@ def _engine_summary_rows(summary: dict) -> list[dict]:
 def _render_parsing_engine_evaluation() -> None:
     st.subheader("Parsing engine evaluation")
     st.caption(
-        "Run the same PDF sample through multiple parsing engines and compare extraction quality metrics. "
-        "Marker is opt-in because it can be heavy on CPU-only machines."
+        "Run the same PDF sample through multiple parsing engines and compare extraction quality metrics."
     )
 
     default_path = str(Path(config_module.REPORT_PDF_DIR).expanduser())
@@ -151,8 +150,8 @@ def _render_parsing_engine_evaluation() -> None:
             default=default_engines,
             help=(
                 "Optional parsers are opt-in: opendataloader requires Java, "
-                "docling requires `pip install docling`, marker can be heavy, "
-                "and pdf-to-markdown requires the @pspdfkit/pdf-to-markdown CLI on PATH."
+                "docling requires `pip install docling`, and pdf-to-markdown "
+                "requires the @pspdfkit/pdf-to-markdown CLI on PATH."
             ),
         )
         col1, col2, col3 = st.columns(3)
@@ -181,7 +180,7 @@ def _render_parsing_engine_evaluation() -> None:
             step=500,
             help="0 saves full extracted text when samples are enabled.",
         )
-        submitted = st.form_submit_button("Run parsing evaluation", use_container_width=True)
+        submitted = st.form_submit_button("Run parsing evaluation", width="stretch")
 
     if submitted:
         paths = _parse_monitoring_paths(path_text)
@@ -221,7 +220,7 @@ def _render_parsing_engine_evaluation() -> None:
     st.markdown("#### Engine summary")
     st.dataframe(
         _engine_summary_rows(result.get("summary") or {}),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -237,11 +236,11 @@ def _render_parsing_engine_evaluation() -> None:
     rows = result.get("rows") or []
     st.markdown("#### Per-PDF rows")
     if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
         error_rows = [row for row in rows if row.get("status") != "ok"]
         if error_rows:
             with st.expander(f"Errors ({len(error_rows)})", expanded=True):
-                st.dataframe(error_rows, use_container_width=True, hide_index=True)
+                st.dataframe(error_rows, width="stretch", hide_index=True)
     else:
         st.caption("No row data.")
 
@@ -342,7 +341,7 @@ def _render_experiment_monitoring(status: dict | None = None) -> None:
     )
     if st.button(
         "Run selected evaluation cases",
-        use_container_width=True,
+        width="stretch",
         disabled=(
             not selected_cases or data_source is None or evaluation_running
         ),
@@ -390,23 +389,23 @@ def _render_experiment_monitoring(status: dict | None = None) -> None:
     if comparison:
         st.markdown("#### Previous run comparison")
         st.caption("같은 execution mode의 이전 run과만 비교합니다.")
-        st.dataframe([comparison], use_container_width=True, hide_index=True)
+        st.dataframe([comparison], width="stretch", hide_index=True)
 
     st.markdown("#### Run artifacts")
     st.code(run.get("json_path") or "", language="text")
     st.markdown("#### Case results")
     results = run.get("results") or []
-    st.dataframe(results, use_container_width=True, hide_index=True)
+    st.dataframe(results, width="stretch", hide_index=True)
 
     failure_actions = monitoring.build_evaluation_failure_actions(results)
     st.markdown("#### Failure triage")
     if failure_actions:
         st.warning("Fail 케이스는 아래 권장 조치 기준으로 다음 작업을 선택하세요.")
-        st.dataframe(failure_actions, use_container_width=True, hide_index=True)
+        st.dataframe(failure_actions, width="stretch", hide_index=True)
         failed_case_ids = [str(row["case_id"]) for row in failure_actions if row.get("case_id")]
         if st.button(
             "Rerun failed cases only",
-            use_container_width=True,
+            width="stretch",
             disabled=data_source is None or evaluation_running,
         ):
             assert data_source is not None
@@ -553,7 +552,7 @@ def _render_v2_data_diagnostics(status: dict) -> None:
                     }
                     for key, value in integrity["checks"].items()
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         return
@@ -597,7 +596,7 @@ def _render_v2_data_diagnostics(status: dict) -> None:
                 }
                 for key, value in integrity["checks"].items()
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -787,7 +786,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                 }
                 for warning in run_recovery["warnings"]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     for run in run_recovery["attachable"]:
@@ -797,7 +796,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             f"미연결 실행 결과 연결: {run.get('run_id')}",
             key=f"candidate_attach_run_{run['run_id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=status != required_status,
             help=(
                 "현재 후보 상태와 실행 종류가 맞을 때만 연결할 수 있습니다."
@@ -846,7 +845,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                 }
                 for warning in handoff_artifacts["warnings"]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     for item in handoff_artifacts["items"]:
@@ -855,7 +854,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             f"전달 문서 재생성: {item.get('handoff_id')}",
             key=f"candidate_repair_handoff_{item['handoff_id']}",
-            use_container_width=True,
+            width="stretch",
         ):
             _rerun_candidate_action(
                 lambda item=item: feedback_handoff.repair_codex_handoff_markdown(
@@ -867,7 +866,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             f"미연결 전달물 연결: {item.get('handoff_id')}",
             key=f"candidate_attach_handoff_{item['handoff_id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=status not in {"reproduced", "fixing"},
         ):
             _rerun_candidate_action(
@@ -957,7 +956,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                 if st.button(
                     "Codex 전달물 저장 및 후보에 연결",
                     key=f"candidate_handoff_save_{candidate['id']}",
-                    use_container_width=True,
+                    width="stretch",
                     disabled=(
                         not handoff_confirmed or not approval_reason.strip()
                     ),
@@ -978,7 +977,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             "기대 결과 다시 편집",
             key=f"candidate_edit_contract_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=not edit_contract_reason.strip(),
             help=(
                 "승인을 취소하고 검증 계약 개정을 올립니다. "
@@ -1044,7 +1043,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             )
             save_triage = st.form_submit_button(
                 "분류 저장",
-                use_container_width=True,
+                width="stretch",
             )
         if save_triage:
             _rerun_candidate_action(
@@ -1064,7 +1063,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             "분류 완료",
             key=f"candidate_mark_triaged_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=not actions["mark_triaged"]["enabled"],
             help=actions["mark_triaged"]["reason"],
         ):
@@ -1131,7 +1130,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                 )
                 save_followup = st.form_submit_button(
                     "추가 정보 반영",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if save_followup:
                 _rerun_candidate_action(
@@ -1156,7 +1155,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             if st.button(
                 "기대 결과 작성으로 이동",
                 key=f"candidate_needs_expectation_{candidate['id']}",
-                use_container_width=True,
+                width="stretch",
                 disabled=not actions["request_expectation"]["enabled"],
                 help=actions["request_expectation"]["reason"],
             ):
@@ -1176,7 +1175,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             if st.button(
                 "처리 제외 확정",
                 key=f"candidate_reject_{candidate['id']}",
-                use_container_width=True,
+                width="stretch",
                 disabled=not rejection_reason.strip(),
             ):
                 _rerun_candidate_action(
@@ -1217,7 +1216,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             "LLM으로 최소 조건 제안",
             key=f"candidate_suggest_expectation_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=not supports_answer_requirements,
             help=(
                 "신고된 질문·답변·검색 메타데이터를 기존 생성 모델로 분석합니다. "
@@ -1398,7 +1397,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                 )
             save_contract = st.form_submit_button(
                 "최소 조건 저장",
-                use_container_width=True,
+                width="stretch",
             )
         if save_contract:
             populated_requirements = [
@@ -1527,7 +1526,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             "기대 결과 승인",
             key=f"candidate_approve_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=not actions["approve_expectation"]["enabled"],
             help=actions["approve_expectation"]["reason"],
         ):
@@ -1542,7 +1541,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             "수정 전 재현 준비 완료",
             key=f"candidate_ready_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=not actions["mark_ready"]["enabled"],
             help=actions["mark_ready"]["reason"],
         ):
@@ -1618,7 +1617,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             if st.button(
                 "수동 검사 결과 저장",
                 key=f"candidate_record_manual_{status}_{candidate['id']}",
-                use_container_width=True,
+                width="stretch",
                 disabled=(
                     not actions[manual_action_key]["enabled"]
                     or not manual_confirmed
@@ -1647,7 +1646,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             if st.button(
                 "오류 재현 확정",
                 key=f"candidate_mark_reproduced_{candidate['id']}",
-                use_container_width=True,
+                width="stretch",
                 disabled=not actions["mark_reproduced"]["enabled"],
                 help=actions["mark_reproduced"]["reason"],
             ):
@@ -1668,7 +1667,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             if st.button(
                 "재현되지 않음으로 종료",
                 key=f"candidate_not_reproducible_{candidate['id']}",
-                use_container_width=True,
+                width="stretch",
                 disabled=(
                     not actions["mark_not_reproducible"]["enabled"]
                     or not not_reproduced_reason.strip()
@@ -1688,7 +1687,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         elif st.button(
             "수정 후 검증 완료",
             key=f"candidate_mark_verified_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=not actions["mark_verified"]["enabled"],
             help=actions["mark_verified"]["reason"],
         ):
@@ -1706,7 +1705,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             "수정 시작",
             key=f"candidate_fixing_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
         ):
             _rerun_candidate_action(
                 lambda: monitoring.transition_regression_candidate(
@@ -1738,7 +1737,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
             )
             save_closure = st.form_submit_button(
                 "종료 근거 저장",
-                use_container_width=True,
+                width="stretch",
             )
         if save_closure:
             _rerun_candidate_action(
@@ -1758,7 +1757,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             "후보 종료",
             key=f"candidate_close_action_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=not actions["close"]["enabled"],
             help=actions["close"]["reason"],
         ):
@@ -1780,7 +1779,7 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         if st.button(
             "후보 다시 열기",
             key=f"candidate_reopen_{candidate['id']}",
-            use_container_width=True,
+            width="stretch",
             disabled=not reopen_reason.strip(),
         ):
             _rerun_candidate_action(
@@ -1815,7 +1814,7 @@ def _render_issue_report_monitoring() -> None:
         height=220,
         placeholder="Finance LLM 문제 신고\n====================\nReport ID: ...",
     )
-    if st.button("Import emailed issue report", use_container_width=True, disabled=not imported_text.strip()):
+    if st.button("Import emailed issue report", width="stretch", disabled=not imported_text.strip()):
         try:
             imported_report = issue_report_store.import_issue_report_text(imported_text)
         except ValueError as exc:
@@ -1837,7 +1836,7 @@ def _render_issue_report_monitoring() -> None:
                 }
                 for warning in report_artifacts["warnings"]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         for warning_index, warning in enumerate(report_artifacts["warnings"]):
@@ -1847,7 +1846,7 @@ def _render_issue_report_monitoring() -> None:
                 f"신고 설명 파일 재생성: "
                 f"{Path(str(warning.get('path') or '')).name}",
                 key=f"repair_issue_report_text_{warning_index}",
-                use_container_width=True,
+                width="stretch",
             ):
                 _rerun_candidate_action(
                     lambda warning=warning: (
@@ -1868,14 +1867,14 @@ def _render_issue_report_monitoring() -> None:
         st.markdown("#### Category counts")
         st.dataframe(
             [{"category": category, "count": count} for category, count in sorted(summary["categories"].items(), key=lambda item: (-item[1], item[0]))],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
     rows = monitoring.build_issue_report_rows(reports, thread_names=thread_names)
     st.markdown("#### Report rows")
     if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
         selected_report_id = st.selectbox("상세 보기", options=[row["id"] for row in rows])
         selected = next((report for report in reports if report.get("id") == selected_report_id), None)
         if selected:
@@ -1885,7 +1884,7 @@ def _render_issue_report_monitoring() -> None:
                 f"Draft readiness: {selected_row.get('draft_readiness', '-')} · "
                 f"Next: {selected_row.get('recommended_next_step', '-')}"
             )
-            if st.button("Promote selected report to regression candidate", use_container_width=True):
+            if st.button("Promote selected report to regression candidate", width="stretch"):
                 candidate = monitoring.promote_issue_report_to_eval_candidate(
                     selected,
                     output_dir=MONITORING_REGRESSION_CANDIDATE_DIR,
@@ -1906,7 +1905,7 @@ def _render_issue_report_monitoring() -> None:
         st.warning("일부 개선 후보 파일을 안전하게 읽을 수 없습니다.")
         st.dataframe(
             candidate_artifacts["warnings"],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     candidate_rows = monitoring.build_regression_candidate_rows(candidates)
@@ -1914,7 +1913,7 @@ def _render_issue_report_monitoring() -> None:
         st.caption("저장된 regression candidate가 없습니다.")
         return
 
-    st.dataframe(candidate_rows, use_container_width=True, hide_index=True)
+    st.dataframe(candidate_rows, width="stretch", hide_index=True)
     lifecycle_candidate_id = st.selectbox(
         "상태를 관리할 개선 후보",
         options=[str(candidate.get("id")) for candidate in candidates],
@@ -1978,7 +1977,7 @@ def _render_issue_report_monitoring() -> None:
     )
     if st.button(
         "Run selected regression candidates",
-        use_container_width=True,
+        width="stretch",
         disabled=not selected_dataset["cases"] or regression_running,
     ):
         try:
@@ -2008,7 +2007,7 @@ def _render_issue_report_monitoring() -> None:
     if latest_candidate_run:
         st.markdown("#### Latest regression candidate run")
         st.json(latest_candidate_run.get("summary") or {})
-        st.dataframe(latest_candidate_run.get("results") or [], use_container_width=True, hide_index=True)
+        st.dataframe(latest_candidate_run.get("results") or [], width="stretch", hide_index=True)
 
 
 def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> None:
@@ -2057,7 +2056,7 @@ def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> No
                 }
                 for row in rows
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -2143,7 +2142,7 @@ def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> No
         if detail["used_documents"]:
             st.dataframe(
                 detail["used_documents"],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -2152,7 +2151,7 @@ def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> No
         if detail["used_chunks"]:
             st.dataframe(
                 detail["used_chunks"],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -2161,7 +2160,7 @@ def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> No
             st.markdown("**RDB 참고 문서**")
             st.dataframe(
                 detail["rdb_evidence"],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         st.caption("청크 본문은 저장하지 않고 안정적 ID·순위·점수만 표시합니다.")
@@ -2199,7 +2198,7 @@ def _render_chat_latency_table(messages: list[dict]) -> None:
             }
             for row in reversed(rows)
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 

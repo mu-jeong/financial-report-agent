@@ -8,11 +8,10 @@ Finance LLM은 PDF에서 텍스트 또는 Markdown을 추출하기 위해 여러
 | --- | --- | --- |
 | `pymupdf` | 빠르고 설치 부담이 낮은 기본 추출 엔진 | 기본 `find_tables()`로 표 영역을 찾고, 면적의 50%를 초과해 겹치는 텍스트 block만 제외합니다. |
 | `opendataloader` | LangChain OpenDataLoader PDF 연동. JSON 출력에서 table node를 제거한 뒤 텍스트화합니다. | Java 11+와 `PATH`, `JAVA_HOME`, `JDK_HOME`, `JRE_HOME` 환경 설정이 필요할 수 있습니다. |
-| `marker` | 시각 구조 기반 Markdown 추출을 목표로 하는 Marker 연동 | CPU 환경에서는 무겁고 느릴 수 있습니다. table 관련 Marker processor는 제외하고 실행합니다. |
 | `docling` | Docling PDF pipeline 기반 Markdown 추출 | 기본 requirements에는 포함하지 않는 선택형 엔진입니다. 사용 전 `pip install docling`이 필요하고, 코드에서는 `do_table_structure=False`로 표 구조 인식을 끕니다. |
 | `pdf-to-markdown` | Nutrient/PSPDFKit `pdf-to-markdown` CLI stdout을 사용 | Python 패키지가 아니라 CLI가 `PATH`에 있어야 합니다. 예: `npm install -g @pspdfkit/pdf-to-markdown`. |
 
-지원 alias: `datalab-marker`, `marker-pdf` → `marker`; `pspdfkit`, `nutrient`, `nutrient-pdf-to-markdown` → `pdf-to-markdown`.
+지원 alias: `pspdfkit`, `nutrient`, `nutrient-pdf-to-markdown` → `pdf-to-markdown`.
 
 ## production 엔진 설정
 
@@ -26,17 +25,16 @@ PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader
 UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 ```
 
-런타임 기본값과 배포 템플릿 값은 `src/configs/settings.py`에 정의되어 있고, 실제 실행값은 `src/configs/config.py`를 통해 로드됩니다. 배포 템플릿은 OpenDataLoader fallback을 명시하지만 새 키가 없는 기존 `.env`는 fallback을 사용하지 않습니다. 기존 `EXTRACTION_ENGINE`, `EXTRACTION_FALLBACK_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 계속 동작합니다. `marker`, `opendataloader`, `docling`, `pdf-to-markdown`는 선택형 엔진이므로 로컬 런타임 요구사항을 확인한 뒤 사용하세요.
+런타임 기본값과 배포 템플릿 값은 `src/configs/settings.py`에 정의되어 있고, 실제 실행값은 `src/configs/config.py`를 통해 로드됩니다. 배포 템플릿은 OpenDataLoader fallback을 명시하지만 새 키가 없는 기존 `.env`는 fallback을 사용하지 않습니다. 기존 `EXTRACTION_ENGINE`, `EXTRACTION_FALLBACK_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE`도 alias로 계속 동작합니다. `opendataloader`, `docling`, `pdf-to-markdown`는 선택형 엔진이므로 로컬 런타임 요구사항을 확인한 뒤 사용하세요.
 
 ## 표 제거 계약
 
 현재 색인 파이프라인은 모든 PDF 추출 옵션에서 표 데이터를 줄이기 위한 엔진별 처리와 공통 후처리를 적용합니다.
 
 1. `pymupdf`: 페이지마다 기본 line 기반 `page.find_tables()`를 한 번 호출합니다. `strategy="text"`는 사용하지 않으며, 표 BBox와 텍스트 block 면적의 50%를 초과해 겹치는 block만 제외합니다. 그 밖의 식별 가능한 표는 공통 후처리에서 제거합니다.
-2. `marker`: Marker의 processor override hook을 사용해 `TableProcessor`, `LLMTableProcessor`, `LLMTableMergeProcessor`를 제외합니다.
-3. `opendataloader`: `format="json"`으로 받은 구조에서 `table`, `table row`, `table cell` 및 연결된 table caption을 건너뜁니다.
-4. `docling`: `PdfPipelineOptions.do_table_structure=False`로 표 구조 인식을 비활성화합니다.
-5. `pdf-to-markdown`: CLI 자체에 table-off 옵션이 없으므로 공통 후처리에서 Markdown/HTML/plain-text table block을 제거합니다.
+2. `opendataloader`: `format="json"`으로 받은 구조에서 `table`, `table row`, `table cell` 및 연결된 table caption을 건너뜁니다.
+3. `docling`: `PdfPipelineOptions.do_table_structure=False`로 표 구조 인식을 비활성화합니다.
+4. `pdf-to-markdown`: CLI 자체에 table-off 옵션이 없으므로 공통 후처리에서 Markdown/HTML/plain-text table block을 제거합니다.
 
 그 후 모든 엔진 출력은 `drop_markdown_tables()`와 `clean_extracted_text()`를 통과합니다. `--raw` 비교 모드에서도 table 제거는 유지되고, 금융 리포트 cleanup filter만 생략됩니다.
 
@@ -71,13 +69,13 @@ python -m src.core.compare_pdf_extractors data/downloaded --limit 20
 설치 부담이 낮은 엔진 위주 비교:
 
 ```bash
-python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker --limit 5
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader --limit 5
 ```
 
 선택형 엔진까지 모두 비교하려면 `docling` 패키지와 `pdf-to-markdown` CLI를 먼저 준비한 뒤 실행합니다.
 
 ```bash
-python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker docling pdf-to-markdown --limit 5
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader docling pdf-to-markdown --limit 5
 ```
 
 cleanup filter 적용 전 raw 출력 비교:

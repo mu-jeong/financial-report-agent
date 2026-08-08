@@ -19,14 +19,11 @@ logger = config.get_logger(__name__)
 
 SUPPORTED_EXTRACTION_ENGINES = {
     "pymupdf",
-    "marker",
     "opendataloader",
     "docling",
     "pdf-to-markdown",
 }
 ENGINE_ALIASES = {
-    "datalab-marker": "marker",
-    "marker-pdf": "marker",
     "pspdfkit": "pdf-to-markdown",
     "nutrient": "pdf-to-markdown",
     "nutrient-pdf-to-markdown": "pdf-to-markdown",
@@ -34,12 +31,6 @@ ENGINE_ALIASES = {
 _OPENDATALOADER_JAR_NAME = "opendataloader-pdf-cli.jar"
 _OPENDATALOADER_TIMEOUT_SECONDS = 300
 
-_MARKER_MODELS = None
-_MARKER_TABLE_PROCESSORS = {
-    "TableProcessor",
-    "LLMTableProcessor",
-    "LLMTableMergeProcessor",
-}
 _PLAIN_TABLE_HEADING_RE = re.compile(
     r"(?i)\b("
     r"consensus\s*data|financial\s*data|financial\s*summary|earnings\s*forecast|"
@@ -61,24 +52,6 @@ class ExtractionResult:
     requested_engine: str
     used_engine: str
     text: str
-
-
-def get_marker_models():
-    """Load Marker models lazily so pymupdf/opendataloader paths stay light."""
-    global _MARKER_MODELS
-    if _MARKER_MODELS is None:
-        try:
-            from marker.models import create_model_dict
-
-            logger.info(
-                "  [Extraction] Loading Marker models "
-                "(first run may download several GB)..."
-            )
-            _MARKER_MODELS = create_model_dict()
-        except Exception as exc:
-            logger.error("  Marker model load failed: %s", exc)
-            raise
-    return _MARKER_MODELS
 
 
 def extract_pdf_text(
@@ -411,8 +384,6 @@ def _collect_opendataloader_text(
 
 
 def _extract_pdf_text(pdf_path: Path, engine: str) -> str:
-    if engine == "marker":
-        return _extract_marker_markdown(pdf_path)
     if engine == "opendataloader":
         return _extract_opendataloader_markdown(pdf_path)
     if engine == "docling":
@@ -420,42 +391,6 @@ def _extract_pdf_text(pdf_path: Path, engine: str) -> str:
     if engine == "pdf-to-markdown":
         return _extract_pspdfkit_pdf_to_markdown(pdf_path)
     return _extract_pymupdf_text(pdf_path)
-
-
-def _extract_marker_markdown(pdf_path: Path) -> str:
-    from marker.config.parser import ConfigParser
-    from marker.converters.pdf import PdfConverter
-
-    config_dict = {
-        "output_format": "markdown",
-        "use_llm": False,
-        "force_ocr": False,
-    }
-    config_parser = ConfigParser(config_dict)
-    processor_list = (
-        config_parser.get_processors()
-        or _marker_processor_list_without_table_processors(PdfConverter)
-    )
-
-    converter = PdfConverter(
-        config=config_parser.generate_config_dict(),
-        artifact_dict=get_marker_models(),
-        processor_list=processor_list,
-        renderer=config_parser.get_renderer(),
-        llm_service=config_parser.get_llm_service(),
-    )
-
-    rendered = converter(str(pdf_path))
-    return rendered.markdown
-
-
-def _marker_processor_list_without_table_processors(pdf_converter_cls) -> list[str]:
-    """Use Marker's processor override hook while omitting table processors."""
-    return [
-        f"{processor.__module__}.{processor.__name__}"
-        for processor in getattr(pdf_converter_cls, "default_processors", ())
-        if processor.__name__ not in _MARKER_TABLE_PROCESSORS
-    ]
 
 
 def _extract_docling_markdown(pdf_path: Path) -> str:

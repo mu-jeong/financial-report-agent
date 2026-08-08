@@ -10,7 +10,6 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_WARMUP_TIMEOUT_SECONDS = 120.0
-POST_RENDER_WARMUP_DELAY_SECONDS = 5.0
 
 
 class SearchEngineUnavailable(RuntimeError):
@@ -96,12 +95,9 @@ def _import_graph_app():
 
 def _load_search_engine(registry: dict[str, Any]) -> None:
     # Do not compete with the first Streamlit render. A submitted question
-    # bypasses both the render gate and the short post-render settle window.
+    # bypasses the render gate so its worker can proceed immediately.
     while not registry["demand_event"].is_set():
         if registry["ui_ready_event"].wait(timeout=0.05):
-            registry["demand_event"].wait(
-                timeout=POST_RENDER_WARMUP_DELAY_SECONDS
-            )
             break
     try:
         graph_app = _import_graph_app()

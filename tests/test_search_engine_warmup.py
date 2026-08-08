@@ -61,7 +61,6 @@ def test_graph_import_requests_zero_scan_read_startup(monkeypatch):
 def test_warmup_starts_one_background_import_and_reuses_ready_graph(monkeypatch):
     registry = search_engine._new_search_engine_registry()
     monkeypatch.setattr(search_engine, "_search_engine_registry", lambda: registry)
-    monkeypatch.setattr(search_engine, "POST_RENDER_WARMUP_DELAY_SECONDS", 0)
 
     import_started = threading.Event()
     allow_import = threading.Event()
@@ -103,7 +102,6 @@ def test_warmup_starts_one_background_import_and_reuses_ready_graph(monkeypatch)
 def test_failed_warmup_can_retry_and_queued_invoke_runs_automatically(monkeypatch):
     registry = search_engine._new_search_engine_registry()
     monkeypatch.setattr(search_engine, "_search_engine_registry", lambda: registry)
-    monkeypatch.setattr(search_engine, "POST_RENDER_WARMUP_DELAY_SECONDS", 0)
 
     class FakeGraph:
         def __init__(self):
@@ -129,7 +127,6 @@ def test_failed_warmup_can_retry_and_queued_invoke_runs_automatically(monkeypatc
     registry["worker"].join(timeout=2)
     assert search_engine.get_search_engine_status()["state"] == "failed"
 
-    monkeypatch.setattr(search_engine, "POST_RENDER_WARMUP_DELAY_SECONDS", 60)
     result = search_engine.invoke_graph(
         {"question": "질문"},
         config={"configurable": {"thread_id": "thread-1"}},

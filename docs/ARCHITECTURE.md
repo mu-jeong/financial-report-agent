@@ -8,7 +8,7 @@ Finance LLM은 증권사 PDF 리포트를 수집, 추출, 색인하고 질문에
 | --- | --- |
 | 데이터 수집 | `src/core/report_crawler.py` |
 | GUI 백그라운드 업데이트 | `src/core/data_update_jobs.py` |
-| PDF 추출 | `src/core/pdf_extraction.py`, `src/core/compare_pdf_extractors.py` (`pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown`) |
+| PDF 추출 | `src/core/pdf_extraction.py`, `src/core/compare_pdf_extractors.py` (`pymupdf`, `opendataloader`, `docling`, `pdf-to-markdown`) |
 | 리포트/검색 메타데이터 | SQLite `DATA_ROOT/retrieval/v2/catalog.sqlite3` |
 | 대화 저장 | SQLite `data/conversations.db` |
 | 임베딩 색인 | Immutable `DATA_ROOT/retrieval/v2/snapshots/<snapshot_id>.faiss` + catalog membership |
@@ -46,8 +46,8 @@ Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 �
 추출과 chunking은 다음 순서로 처리합니다.
 
 1. `extract_pdf_text()`로 PDF 텍스트 또는 Markdown을 추출합니다.
-   - 지원 엔진은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown`입니다.
-   - 모든 엔진 출력은 색인 전에 표 제거 계약을 통과합니다. PyMuPDF는 기본 `find_tables()`로 찾은 표 BBox와 면적의 50%를 초과해 겹치는 텍스트 block만 제외하고, Marker는 table processor를 빼며, OpenDataLoader JSON table node와 Docling table structure는 비활성/제거합니다. 별도 off 옵션이 없는 CLI 출력도 공통 Markdown/HTML/plain-text table 제거 후처리를 거칩니다.
+   - 지원 엔진은 `pymupdf`, `opendataloader`, `docling`, `pdf-to-markdown`입니다.
+   - 모든 엔진 출력은 색인 전에 표 제거 계약을 통과합니다. PyMuPDF는 기본 `find_tables()`로 찾은 표 BBox와 면적의 50%를 초과해 겹치는 텍스트 block만 제외하고, OpenDataLoader JSON table node와 Docling table structure는 비활성/제거합니다. 별도 off 옵션이 없는 CLI 출력도 공통 Markdown/HTML/plain-text table 제거 후처리를 거칩니다.
    - 배포 템플릿의 production embedding은 기본 `pymupdf`가 실패하면 명시된 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 한 번 시도합니다. 새 키가 없는 기존 설정, 빈 값, 또는 primary와 다른 pending extractor override는 자동 fallback하지 않습니다. Native V2 incremental build는 active embedding profile과 동일한 추출 정책만 재사용합니다.
 2. `MarkdownHeaderTextSplitter`와 `RecursiveCharacterTextSplitter`로 문서를 chunk로 나눕니다.
 3. 신규·변경 문서만 처리해 작은 immutable FAISS segment를 catalog transaction과 함께 활성화합니다. reader와 SQL projection은 base snapshot과 현재 segment head를 같은 revision으로 읽습니다. 이전 버전은 새 버전이 성공할 때까지 유지되며 삭제는 provider 호출 없이 즉시 overlay에서 제외됩니다. 작업 종료 시 기존 parent/chunk/vector를 재사용해 완전한 candidate catalog와 새 immutable FAISS snapshot을 한 번 검증·게시합니다. 검색에서 제외된 segment artifact는 열린 lazy request를 보호하기 위해 소유 base의 GC까지 보존한 뒤 공용 snapshot garbage collector가 게시 후와 정상 시작 시 재조정하며, 운영 상태에는 사용자 용어로 정리 대기 파일 수·용량·최장 보존 시간을 표시합니다.

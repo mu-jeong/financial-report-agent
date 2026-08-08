@@ -46,7 +46,7 @@ V1의 `reports.db`와 `vector_db`를 사용 중인 기존 사용자는 업데이
 - 증권사 리포트 PDF 다운로드 및 파일명 기반 메타데이터 파싱
 - `company`, `industry`, `economy` 카테고리별 리포트 수집
 - Native V2 SQLite catalog(`DATA_ROOT/retrieval/v2/catalog.sqlite3`)와 immutable FAISS snapshot의 membership·publication 동기화
-- PyMuPDF, OpenDataLoader, Marker, Docling, pdf-to-markdown 중 선택 가능한 PDF 텍스트 추출 엔진
+- PyMuPDF, OpenDataLoader, Docling, pdf-to-markdown 중 선택 가능한 PDF 텍스트 추출 엔진
 - Parent-Child Chunking 기반 문맥 확장 검색
 - LangGraph 기반 query rewrite, routing, RDB 검색, VectorDB 검색, 답변 생성
 - SQL guardrail: `SELECT`와 `reports` 테이블 중심의 read-only SQLite 접근
@@ -225,13 +225,13 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## PDF 추출 엔진 비교
 
-`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있으며 기본값은 `pymupdf`입니다. 배포용 `.env.example`은 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하지만, 이 키가 없거나 빈 값이면 fallback을 사용하지 않습니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`은 미임베딩 문서에 적용할 primary 엔진이며 배포 템플릿에서는 `pymupdf`를 사용합니다. 이 값이 primary와 다르면 명시적 override로 간주해 자동 fallback하지 않습니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다. Native V2 incremental update는 active profile에 기록된 primary/fallback 정책과 현재 설정이 정확히 같을 때만 실행되며, 정책 변경에는 검증된 full-corpus successor가 필요합니다.
+`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있으며 기본값은 `pymupdf`입니다. 배포용 `.env.example`은 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하지만, 이 키가 없거나 빈 값이면 fallback을 사용하지 않습니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`은 미임베딩 문서에 적용할 primary 엔진이며 배포 템플릿에서는 `pymupdf`를 사용합니다. 이 값이 primary와 다르면 명시적 override로 간주해 자동 fallback하지 않습니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다. Native V2 incremental update는 active profile에 기록된 primary/fallback 정책과 현재 설정이 정확히 같을 때만 실행되며, 정책 변경에는 검증된 full-corpus successor가 필요합니다.
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10
-python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker --limit 5
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader --limit 5
 # 선택형 엔진까지 비교하려면 런타임 요구사항을 설치한 뒤 실행합니다.
-python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marker docling pdf-to-markdown --limit 5
+python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader docling pdf-to-markdown --limit 5
 ```
 
 자세한 내용은 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.

@@ -325,7 +325,7 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 parser=as_lower_str,
                 description=(
                     "PDF parsing/extraction engine for normal embedding runs: "
-                    "pymupdf, marker, opendataloader, docling, or pdf-to-markdown. "
+                    "pymupdf, opendataloader, docling, or pdf-to-markdown. "
                     "Legacy env alias: EXTRACTION_ENGINE."
                 ),
                 section="Embedding",

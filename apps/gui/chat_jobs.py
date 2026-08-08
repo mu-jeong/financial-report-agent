@@ -1,5 +1,6 @@
 """Background chat execution and cross-rerun job state."""
 
+import queue
 import threading
 import time
 import uuid
@@ -15,10 +16,14 @@ from src.core.followup_scope import build_answer_scope_index
 
 append_pending_exchange = conversation_store.append_pending_exchange
 compact_graph_monitoring_metadata = monitoring.compact_graph_monitoring_metadata
+get_chat_history = conversation_store.get_chat_history
 mark_interrupted_running_messages_failed = (
     conversation_store.mark_interrupted_running_messages_failed
 )
 update_message = conversation_store.update_message
+
+
+CHAT_RESPONSE_TIMEOUT_SECONDS = 180.0
 
 
 class _LazyGraphApp:
@@ -44,6 +49,10 @@ class PendingSearchEngineQuestionError(RuntimeError):
     """Raised when a second question targets an engine that is still warming."""
 
 
+class ChatResponseTimeout(TimeoutError):
+    """Raised when a graph invocation exceeds the user-visible answer deadline."""
+
+
 # This registry is process-local. Deploy a change that moves this cached function
 # only while no answer jobs are in flight; normal reruns retain its qualified key.
 @st.cache_resource
@@ -52,7 +61,6 @@ def _chat_job_registry() -> dict:
         "running_job_ids": set(),
         "events": [],
         "lock": threading.Lock(),
-        "graph_lock": threading.Lock(),
     }
 
 
@@ -159,6 +167,46 @@ def chat_message_anchor_id(
     return f"chat_message_{fallback_index}"
 
 
+def _invoke_graph_with_timeout(
+    graph_input: dict,
+    *,
+    config: dict,
+    job_id: str,
+    timeout_seconds: float = CHAT_RESPONSE_TIMEOUT_SECONDS,
+) -> dict:
+    """Run one graph call without letting it monopolize later chat jobs.
+
+    Python cannot stop a running synchronous call safely. If the deadline wins,
+    the daemon may finish later, but only this coordinator persists its result.
+    """
+    outcome: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+    def invoke() -> None:
+        try:
+            outcome.put(("result", graph_app.invoke(graph_input, config=config)))
+        except Exception as exc:
+            outcome.put(("error", exc))
+
+    threading.Thread(
+        target=invoke,
+        name=f"chat-graph-{job_id[:8]}",
+        daemon=True,
+    ).start()
+    try:
+        outcome_type, value = outcome.get(timeout=max(0.0, timeout_seconds))
+    except queue.Empty as exc:
+        raise ChatResponseTimeout(
+            f"Chat response timed out after {timeout_seconds:g} seconds."
+        ) from exc
+    if outcome_type == "error":
+        if not isinstance(value, BaseException):
+            raise TypeError("Chat graph returned an invalid error result.")
+        raise value
+    if not isinstance(value, dict):
+        raise TypeError("Chat graph returned a non-dictionary result.")
+    return value
+
+
 def _run_chat_response_job(
     *,
     job_id: str,
@@ -166,6 +214,7 @@ def _run_chat_response_job(
     thread_name: str,
     assistant_message_id: int,
     user_query: str,
+    chat_history: list[tuple[str, str]],
     prior_search_scope: dict | None,
     registry: dict,
     queued_while_warming: bool = False,
@@ -199,8 +248,16 @@ def _run_chat_response_job(
         return was_pending
 
     try:
-        config = {"configurable": {"thread_id": thread_id}}
-        graph_input = {"question": user_query}
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": job_id,
+            }
+        }
+        graph_input = {
+            "question": user_query,
+            "chat_history": chat_history,
+        }
         if prior_search_scope:
             graph_input["prior_search_scope"] = prior_search_scope
         prepare_graph = getattr(graph_app, "prepare", None)
@@ -224,11 +281,11 @@ def _run_chat_response_job(
                 },
             )
         release_engine_queue()
-        with registry["graph_lock"]:
-            final_state = graph_app.invoke(
-                graph_input,
-                config=config,
-            )
+        final_state = _invoke_graph_with_timeout(
+            graph_input,
+            config=config,
+            job_id=job_id,
+        )
         answer = final_state.get("generation", "응답을 생성하지 못했습니다.")
         if "Error" in answer or "차단" in answer:
             answer = f"주의: {answer}"
@@ -312,6 +369,7 @@ def start_chat_response_job(
     prior_search_scope: dict | None = None,
 ) -> int:
     job_id = str(uuid.uuid4())
+    chat_history = get_chat_history(thread_id)
     engine_state = search_engine.get_search_engine_status()["state"]
     waiting_for_engine = engine_state != "ready"
     registry = _chat_job_registry()
@@ -355,6 +413,7 @@ def start_chat_response_job(
                 "thread_name": thread_name,
                 "assistant_message_id": assistant_message_id,
                 "user_query": user_query,
+                "chat_history": chat_history,
                 "prior_search_scope": prior_search_scope,
                 "registry": registry,
                 "queued_while_warming": waiting_for_engine,

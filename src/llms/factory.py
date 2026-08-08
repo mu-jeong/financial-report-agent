@@ -17,6 +17,10 @@ from src.configs.config import (
 )
 
 
+DEFAULT_CHAT_REQUEST_TIMEOUT_MS = 60_000
+DEFAULT_CHAT_MAX_RETRIES = 0
+
+
 def build_chat_model(temperature: float = 0.2, **kwargs: Any):
     """Build the OpenRouter-backed LangChain chat model."""
     if not OPENROUTER_API_KEY:
@@ -30,6 +34,12 @@ def build_chat_model(temperature: float = 0.2, **kwargs: Any):
     openrouter_provider = kwargs.pop("openrouter_provider", None)
     if openrouter_provider is None and OPENROUTER_DATA_COLLECTION:
         openrouter_provider = {"data_collection": OPENROUTER_DATA_COLLECTION}
+    kwargs.setdefault("timeout", DEFAULT_CHAT_REQUEST_TIMEOUT_MS)
+    kwargs.setdefault("max_retries", DEFAULT_CHAT_MAX_RETRIES)
+    if kwargs["max_retries"] == 0 and "retries" not in kwargs:
+        model_kwargs = dict(kwargs.get("model_kwargs") or {})
+        model_kwargs.setdefault("retries", None)
+        kwargs["model_kwargs"] = model_kwargs
 
     return ChatOpenRouter(
         model=GENERATION_MODEL,

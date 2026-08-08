@@ -178,7 +178,7 @@ def render_report_calendar(db_status: dict) -> None:
         [0.25, 0.50, 0.25],
         vertical_alignment="center",
     )
-    if nav_prev_col.button("◀ 이전", key="report_calendar_prev", disabled=current_index == 0, use_container_width=True):
+    if nav_prev_col.button("◀ 이전", key="report_calendar_prev", disabled=current_index == 0, width="stretch"):
         _set_calendar_month(values[current_index - 1])
         st.rerun()
     nav_label_col.markdown(
@@ -191,7 +191,7 @@ def render_report_calendar(db_status: dict) -> None:
         "다음 ▶",
         key="report_calendar_next",
         disabled=current_index == len(values) - 1,
-        use_container_width=True,
+        width="stretch",
     ):
         _set_calendar_month(values[current_index + 1])
         st.rerun()
@@ -388,7 +388,7 @@ def render_data_update_controls(db_status: dict) -> None:
                 "선택 기간 업데이트",
                 key="update_selected_range",
                 disabled=job_active,
-                use_container_width=True,
+                width="stretch",
             ):
                 data_update_jobs.start_update_job(
                     selected_dates=target_dates,
@@ -457,7 +457,7 @@ def render_unembedded_reports(status: dict) -> None:
         )
     )
     if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
     elif list_error:
         st.error(
             "미임베딩 문서 목록을 읽지 못했습니다. 데이터 상태의 native "
@@ -492,7 +492,7 @@ def render_unembedded_reports(status: dict) -> None:
             or pending_count == 0
             or not native_retry_ready
         ),
-        use_container_width=True,
+        width="stretch",
     ):
         data_update_jobs.start_embedding_job(
             label=button_label,

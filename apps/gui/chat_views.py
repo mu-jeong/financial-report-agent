@@ -64,7 +64,7 @@ def render_search_engine_status() -> None:
         if status["state"] == "failed" and st.button(
             "검색 엔진 다시 준비",
             key="retry_search_engine_warmup",
-            use_container_width=True,
+            width="stretch",
         ):
             search_engine.retry_search_engine_warmup()
             st.rerun(scope="app")
@@ -102,7 +102,7 @@ def _render_issue_report_control(
             "신고",
             key=f"toggle_issue_report_{current_thread['id']}",
             help="채팅 화면에서 문제를 빠르게 보고할 수 있습니다.",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.show_issue_report_form = not st.session_state.get(
                 "show_issue_report_form",
@@ -194,7 +194,7 @@ def _render_issue_report_control(
         submitted = st.button(
             "신고 제출",
             key=f"issue_report_submit_{current_thread['id']}",
-            use_container_width=True,
+            width="stretch",
         )
 
         if submitted:
@@ -341,7 +341,7 @@ def _render_sources(
             if open_col.button(
                 "열기",
                 key=f"{key_prefix}_open_pdf_{index}",
-                use_container_width=True,
+                width="stretch",
             ):
                 opened, error_message = _open_report_pdf(file_name)
                 if not opened:
@@ -363,7 +363,7 @@ def _render_no_result_actions(message: dict, *, index: int) -> None:
         if column.button(
             suggestion["label"],
             key=f"no_result_suggestion_{message.get('id', index)}_{suggestion['label']}",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.pending_suggested_query = suggestion["query"]
             st.rerun(scope="app")

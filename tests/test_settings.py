@@ -29,11 +29,11 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
 
 def test_pdf_extraction_engine_can_be_set_with_friendly_env_names(monkeypatch):
     monkeypatch.setenv("PDF_EXTRACTION_ENGINE", "docling")
-    monkeypatch.setenv("PDF_EXTRACTION_FALLBACK_ENGINE", "marker")
+    monkeypatch.setenv("PDF_EXTRACTION_FALLBACK_ENGINE", "opendataloader")
     monkeypatch.setenv("UNEMBEDDED_PDF_EXTRACTION_ENGINE", "pdf-to-markdown")
 
     assert get_config_value("PDF_EXTRACTION_ENGINE") == "docling"
-    assert get_config_value("PDF_EXTRACTION_FALLBACK_ENGINE") == "marker"
+    assert get_config_value("PDF_EXTRACTION_FALLBACK_ENGINE") == "opendataloader"
     assert get_config_value("UNEMBEDDED_PDF_EXTRACTION_ENGINE") == "pdf-to-markdown"
 
 
@@ -41,11 +41,11 @@ def test_pdf_extraction_engine_accepts_legacy_env_names(monkeypatch):
     monkeypatch.delenv("PDF_EXTRACTION_ENGINE", raising=False)
     monkeypatch.delenv("PDF_EXTRACTION_FALLBACK_ENGINE", raising=False)
     monkeypatch.delenv("UNEMBEDDED_PDF_EXTRACTION_ENGINE", raising=False)
-    monkeypatch.setenv("EXTRACTION_ENGINE", "marker")
+    monkeypatch.setenv("EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setenv("EXTRACTION_FALLBACK_ENGINE", "docling")
     monkeypatch.setenv("UNEMBEDDED_EXTRACTION_ENGINE", "opendataloader")
 
-    assert get_config_value("PDF_EXTRACTION_ENGINE") == "marker"
+    assert get_config_value("PDF_EXTRACTION_ENGINE") == "pymupdf"
     assert get_config_value("PDF_EXTRACTION_FALLBACK_ENGINE") == "docling"
     assert get_config_value("UNEMBEDDED_PDF_EXTRACTION_ENGINE") == "opendataloader"
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import calendar
+import queue
 import threading
 from datetime import date, datetime, timedelta
 from html import escape
@@ -31,6 +32,7 @@ CHAT_JOB_FUNCTIONS = {
     "thread_has_running_job",
     "has_pending_search_engine_job",
     "chat_message_anchor_id",
+    "_invoke_graph_with_timeout",
     "_run_chat_response_job",
     "start_chat_response_job",
     "render_chat_job_notifications",
@@ -789,7 +791,6 @@ def test_warming_engine_queues_exactly_one_chat_worker():
         "pending_engine_job_ids": set(),
         "events": [],
         "lock": threading.Lock(),
-        "graph_lock": threading.Lock(),
     }
     worker_target = object()
     namespace = _load_helpers(
@@ -802,6 +803,7 @@ def test_warming_engine_queues_exactly_one_chat_worker():
             "append_pending_exchange": (
                 lambda *args: exchanges.append(args) or (3, 7)
             ),
+            "get_chat_history": lambda thread_id: [("사용자", "이전 질문")],
             "_chat_job_registry": lambda: registry,
             "_run_chat_response_job": worker_target,
             "PendingSearchEngineQuestionError": PendingQuestionError,
@@ -835,6 +837,7 @@ def test_warming_engine_queues_exactly_one_chat_worker():
     assert worker.started is True
     assert worker.daemon is True
     assert worker.name == "chat-response-job-1234"
+    assert worker.kwargs["chat_history"] == [("사용자", "이전 질문")]
 
     render_tree = ast.parse(
         CHAT_VIEWS_PATH.read_text(encoding="utf-8-sig"),
@@ -903,7 +906,6 @@ def test_chat_worker_start_failure_releases_queue_and_marks_message_failed():
         "pending_engine_job_ids": set(),
         "events": [],
         "lock": threading.Lock(),
-        "graph_lock": threading.Lock(),
     }
     namespace = _load_helpers(
         CHAT_JOBS_PATH,
@@ -915,6 +917,7 @@ def test_chat_worker_start_failure_releases_queue_and_marks_message_failed():
             "append_pending_exchange": (
                 lambda *args: exchanges.append(args) or (3, 7)
             ),
+            "get_chat_history": lambda thread_id: [],
             "update_message": lambda *args: updates.append(args),
             "_record_chat_job_event": (
                 lambda event, target_registry=None: events.append(event)
@@ -978,7 +981,6 @@ def test_warmup_queue_slot_releases_before_graph_answering():
         "pending_engine_job_ids": {"job-1"},
         "events": [],
         "lock": threading.Lock(),
-        "graph_lock": threading.Lock(),
     }
     namespace = _load_helpers(
         _helper_owner("_run_chat_response_job"),
@@ -990,6 +992,12 @@ def test_warmup_queue_slot_releases_before_graph_answering():
                 {"perf_counter": staticmethod(lambda: next(clock_values))},
             ),
             "graph_app": PreparedGraph(),
+            "_invoke_graph_with_timeout": (
+                lambda graph_input, *, config, job_id: PreparedGraph.invoke(
+                    graph_input,
+                    config=config,
+                )
+            ),
             "update_message": lambda *args: updates.append(args),
             "_record_chat_job_event": (
                 lambda event, target_registry=None: events.append(event)
@@ -1003,6 +1011,7 @@ def test_warmup_queue_slot_releases_before_graph_answering():
         thread_name="테스트 대화",
         assistant_message_id=7,
         user_query="질문",
+        chat_history=[],
         prior_search_scope=None,
         registry=registry,
         queued_while_warming=True,
@@ -1024,6 +1033,78 @@ def test_warmup_queue_slot_releases_before_graph_answering():
     assert registry["running_job_ids"] == set()
 
 
+def test_timed_out_graph_invocation_does_not_serialize_later_questions():
+    first_invocation_started = threading.Event()
+    release_first_invocation = threading.Event()
+
+    class ConcurrentGraph:
+        @staticmethod
+        def invoke(graph_input, *, config):
+            if graph_input["question"] == "stuck":
+                first_invocation_started.set()
+                release_first_invocation.wait(timeout=2)
+                return {"generation": "late"}
+            return {
+                "generation": "fast",
+                "checkpoint_ns": config["configurable"]["checkpoint_ns"],
+            }
+
+    namespace = _load_helpers(
+        CHAT_JOBS_PATH,
+        "_invoke_graph_with_timeout",
+        extra_namespace={
+            "queue": queue,
+            "threading": threading,
+            "graph_app": ConcurrentGraph(),
+            "ChatResponseTimeout": TimeoutError,
+            "CHAT_RESPONSE_TIMEOUT_SECONDS": 180.0,
+        },
+    )
+    invoke_with_timeout = namespace["_invoke_graph_with_timeout"]
+    outcomes: dict[str, object] = {}
+
+    def run_stuck_invocation():
+        try:
+            invoke_with_timeout(
+                {"question": "stuck"},
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "job-1",
+                    }
+                },
+                job_id="job-1",
+                timeout_seconds=0.05,
+            )
+        except Exception as exc:
+            outcomes["stuck"] = exc
+
+    first_job = threading.Thread(target=run_stuck_invocation, daemon=True)
+    first_job.start()
+    assert first_invocation_started.wait(timeout=1)
+
+    fast_result = invoke_with_timeout(
+        {"question": "fast"},
+        config={
+            "configurable": {
+                "thread_id": "thread-2",
+                "checkpoint_ns": "job-2",
+            }
+        },
+        job_id="job-2",
+        timeout_seconds=0.5,
+    )
+    first_job.join(timeout=1)
+    release_first_invocation.set()
+
+    assert fast_result == {"generation": "fast", "checkpoint_ns": "job-2"}
+    assert isinstance(outcomes.get("stuck"), TimeoutError)
+
+    run_source = CHAT_JOBS_PATH.read_text(encoding="utf-8-sig")
+    assert 'registry["graph_lock"]' not in run_source
+    assert "_invoke_graph_with_timeout(" in run_source
+
+
 def test_warmup_queue_release_survives_progress_update_failure():
     class PreparedGraph:
         @staticmethod
@@ -1042,7 +1123,6 @@ def test_warmup_queue_release_survives_progress_update_failure():
         "pending_engine_job_ids": {"job-1"},
         "events": [],
         "lock": threading.Lock(),
-        "graph_lock": threading.Lock(),
     }
 
     def update_message(*args):
@@ -1061,6 +1141,11 @@ def test_warmup_queue_release_survives_progress_update_failure():
                 {"perf_counter": staticmethod(lambda: next(clock_values))},
             ),
             "graph_app": PreparedGraph(),
+            "_invoke_graph_with_timeout": (
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("graph must not run after the update failure")
+                )
+            ),
             "update_message": update_message,
             "_record_chat_job_event": (
                 lambda event, target_registry=None: events.append(event)
@@ -1074,6 +1159,7 @@ def test_warmup_queue_release_survives_progress_update_failure():
         thread_name="테스트 대화",
         assistant_message_id=7,
         user_query="질문",
+        chat_history=[],
         prior_search_scope=None,
         registry=registry,
         queued_while_warming=True,
@@ -1102,7 +1188,6 @@ def test_chat_job_failure_is_persisted_and_unlocks_the_job():
         "running_job_ids": {"job-1"},
         "events": [],
         "lock": threading.Lock(),
-        "graph_lock": threading.Lock(),
     }
     namespace = _load_helpers(
         _helper_owner("_run_chat_response_job"),
@@ -1114,6 +1199,12 @@ def test_chat_job_failure_is_persisted_and_unlocks_the_job():
                 {"perf_counter": staticmethod(lambda: next(clock_values))},
             ),
             "graph_app": FailingGraph(),
+            "_invoke_graph_with_timeout": (
+                lambda graph_input, *, config, job_id: FailingGraph.invoke(
+                    graph_input,
+                    config=config,
+                )
+            ),
             "update_message": lambda *args: updates.append(args),
             "_record_chat_job_event": (
                 lambda event, target_registry=None: events.append(event)
@@ -1127,6 +1218,7 @@ def test_chat_job_failure_is_persisted_and_unlocks_the_job():
         thread_name="테스트 대화",
         assistant_message_id=7,
         user_query="질문",
+        chat_history=[],
         prior_search_scope=None,
         registry=registry,
     )
@@ -1207,7 +1299,6 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
         "running_job_ids": {"job-1"},
         "events": [],
         "lock": threading.Lock(),
-        "graph_lock": threading.Lock(),
     }
     namespace = _load_helpers(
         _helper_owner("_run_chat_response_job"),
@@ -1220,6 +1311,12 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
                 {"perf_counter": staticmethod(lambda: next(clock_values))},
             ),
             "graph_app": SuccessfulGraph(),
+            "_invoke_graph_with_timeout": (
+                lambda graph_input, *, config, job_id: SuccessfulGraph.invoke(
+                    graph_input,
+                    config=config,
+                )
+            ),
             "build_answer_scope_index": (
                 lambda scope, rerank_info: {
                     "file_names": list(scope.get("file_names") or []),
@@ -1241,6 +1338,7 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
         thread_name="테스트 대화",
         assistant_message_id=7,
         user_query="질문",
+        chat_history=[("사용자", "이전 질문"), ("AI", "이전 답변")],
         prior_search_scope={"file_names": ["prior.pdf"]},
         registry=registry,
     )
@@ -1249,9 +1347,15 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
         (
             {
                 "question": "질문",
+                "chat_history": [("사용자", "이전 질문"), ("AI", "이전 답변")],
                 "prior_search_scope": {"file_names": ["prior.pdf"]},
             },
-            {"configurable": {"thread_id": "thread-1"}},
+            {
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "job-1",
+                }
+            },
         )
     ]
     assert len(updates) == 1
@@ -1287,7 +1391,6 @@ def test_chat_job_events_are_drained_once_and_repair_uses_active_ids():
         "running_job_ids": {"job-1", "job-2"},
         "events": [{"status": "succeeded", "thread_id": "thread-1"}],
         "lock": threading.Lock(),
-        "graph_lock": threading.Lock(),
     }
     repair_calls: list[set[str]] = []
     namespace = _load_helpers(

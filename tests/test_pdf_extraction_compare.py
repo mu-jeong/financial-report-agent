@@ -54,45 +54,20 @@ def test_summarize_groups_success_and_errors_by_engine():
     assert summary["opendataloader"]["errors"] == 1
 
 
-def test_normalize_engine_accepts_opendataloader():
+def test_normalize_engine_accepts_supported_engines_and_rejects_marker():
     assert normalize_engine(" OpenDataLoader ") == "opendataloader"
     assert normalize_engine(" docling ") == "docling"
     assert normalize_engine("pdf-to-markdown") == "pdf-to-markdown"
     assert normalize_engine("PSPDFKit") == "pdf-to-markdown"
     assert normalize_engine("nutrient") == "pdf-to-markdown"
-    assert normalize_engine("datalab-marker") == "marker"
+    with pytest.raises(ValueError, match="Unsupported extraction engine"):
+        normalize_engine("marker")
+    with pytest.raises(ValueError, match="Unsupported extraction engine"):
+        normalize_engine("datalab-marker")
 
 
 def test_compare_config_engine_accepts_pdf_to_markdown_alias():
     assert compare_pdf_extractors.config_engine("pspdfkit") == "pdf-to-markdown"
-
-
-def test_marker_processor_list_omits_table_processors():
-    class TextProcessor:
-        __module__ = "marker.processors.text"
-
-    class TableProcessor:
-        __module__ = "marker.processors.table"
-
-    class LLMTableProcessor:
-        __module__ = "marker.processors.llm.llm_table"
-
-    class LLMTableMergeProcessor:
-        __module__ = "marker.processors.llm.llm_table_merge"
-
-    class FakePdfConverter:
-        default_processors = (
-            TextProcessor,
-            TableProcessor,
-            LLMTableProcessor,
-            LLMTableMergeProcessor,
-        )
-
-    processors = pdf_extraction._marker_processor_list_without_table_processors(
-        FakePdfConverter
-    )
-
-    assert processors == ["marker.processors.text.TextProcessor"]
 
 
 def test_docling_extraction_uses_document_converter(tmp_path, monkeypatch):
@@ -403,7 +378,11 @@ def test_extract_pdf_text_drops_tables_even_for_raw_comparison_path(tmp_path, mo
         lambda pdf_path, engine: "Before\n\n<table><tr><td>table value</td></tr></table>\n\nAfter",
     )
 
-    result = pdf_extraction.extract_pdf_text(pdf_path, "marker", clean=False)
+    result = pdf_extraction.extract_pdf_text(
+        pdf_path,
+        "opendataloader",
+        clean=False,
+    )
 
     assert result.text == "Before\n\nAfter"
     assert "table value" not in result.text
@@ -499,16 +478,16 @@ def test_extract_pdf_text_without_fallback_keyword_preserves_legacy_pymupdf_poli
 
     def fake_extract(path, engine):
         calls.append((path, engine))
-        if engine == "marker":
-            raise RuntimeError("marker failed")
+        if engine == "docling":
+            raise RuntimeError("docling failed")
         return "legacy fallback text"
 
     monkeypatch.setattr(pdf_extraction.config, "EXTRACTION_FALLBACK_ENGINE", "opendataloader")
     monkeypatch.setattr(pdf_extraction, "_extract_pdf_text", fake_extract)
 
-    result = pdf_extraction.extract_pdf_text(pdf_path, "marker")
+    result = pdf_extraction.extract_pdf_text(pdf_path, "docling")
 
-    assert calls == [(pdf_path, "marker"), (pdf_path, "pymupdf")]
+    assert calls == [(pdf_path, "docling"), (pdf_path, "pymupdf")]
     assert result.used_engine == "pymupdf-fallback"
 
 

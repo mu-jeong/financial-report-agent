@@ -39,11 +39,11 @@ def test_configured_policy_uses_native_pdf_settings(tmp_path: Path) -> None:
 
 def test_pending_extractor_override_disables_global_fallback(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    config.UNEMBEDDED_PDF_EXTRACTION_ENGINE = "marker"
+    config.UNEMBEDDED_PDF_EXTRACTION_ENGINE = "docling"
 
     policy = rebuild_v2_successor.configured_extraction_policy(config)
 
-    assert policy.primary == "marker"
+    assert policy.primary == "docling"
     assert policy.fallback is None
     assert not policy.allow_fallback
 

@@ -85,7 +85,7 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
         if st.button(
             "저장",
             key=f"save_thread_{thread_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             clean_name = new_name.strip() or "새로운 대화"
             conversation_store.rename_thread(thread_id, clean_name)
@@ -97,7 +97,7 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
         if st.button(
             "취소",
             key=f"cancel_thread_{thread_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.editing_thread_id = None
             _sidebar_rerun()
@@ -121,7 +121,7 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
     if pin_col.button(
         pin_label,
         key=f"pin_thread_{thread_id}",
-        use_container_width=True,
+        width="stretch",
         help=pin_help,
     ):
         conversation_store.set_thread_pinned(
@@ -132,13 +132,13 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
     if thread_col.button(
         label,
         key=f"thread_{thread_id}",
-        use_container_width=True,
+        width="stretch",
     ):
         _set_current_thread(thread_id)
     if edit_col.button(
         "✎",
         key=f"edit_thread_{thread_id}",
-        use_container_width=True,
+        width="stretch",
         help="이름 변경",
     ):
         st.session_state.editing_thread_id = thread_id
@@ -146,7 +146,7 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
     if delete_col.button(
         "×",
         key=f"delete_thread_{thread_id}",
-        use_container_width=True,
+        width="stretch",
         help="삭제",
     ):
         _delete_thread_and_select_next(thread_id)
@@ -165,7 +165,7 @@ def render_sidebar(current_id: str) -> dict:
             label_visibility="collapsed",
         )
 
-    if st.button("새 대화 시작", use_container_width=True):
+    if st.button("새 대화 시작", width="stretch"):
         st.session_state.current_thread_id = conversation_store.create_thread(
             f"대화 {len(threads) + 1}"
         )

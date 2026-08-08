@@ -52,7 +52,7 @@ def test_canonical_json_and_profile_hash_ignore_mapping_insertion_order():
         {'metric': 'inner_product'},
         {'normalization': 'l2'},
         {'prefix_template': '[Target: {target_name}]\n'},
-        {'extractor': 'marker'},
+        {'extractor': 'docling'},
         {'child_policy': {'size': 501, 'overlap': 50}},
     ],
 )
