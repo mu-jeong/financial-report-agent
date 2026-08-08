@@ -1,7 +1,7 @@
 """Cross-process fence shared by supported retrieval update entrypoints.
 
 The lock lives directly under the stable data root, outside ``retrieval/``, so
-it continues to fence V1 writers while a staged V2 directory is activated.
+it remains stable while a native retrieval directory is updated.
 The small guard file is persistent; operating-system ownership is released
 automatically if the owning process exits.
 """
@@ -15,7 +15,7 @@ from typing import BinaryIO
 
 
 class RetrievalUpdateLockError(RuntimeError):
-    """Raised when another supported updater or migration owns the fence."""
+    """Raised when another supported updater or maintenance task owns the fence."""
 
 
 class RetrievalUpdateLock(AbstractContextManager["RetrievalUpdateLock"]):
@@ -59,7 +59,7 @@ class RetrievalUpdateLock(AbstractContextManager["RetrievalUpdateLock"]):
         except OSError as exc:
             stream.close()
             raise RetrievalUpdateLockError(
-                "another retrieval update or V2 migration is already running"
+                "another retrieval update or maintenance task is already running"
             ) from exc
         self._stream = stream
         return self

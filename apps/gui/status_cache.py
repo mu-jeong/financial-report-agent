@@ -24,7 +24,6 @@ _STATUS_CONFIG_FIELDS = (
     "EXTRACTION_ENGINE",
     "GENERATION_MODEL",
     "SEARCH_TOP_K",
-    "TEST_LIMIT",
     "UNEMBEDDED_EXTRACTION_ENGINE",
     "USE_PARENT_CHILD",
     "USE_RERANKER",
@@ -49,7 +48,7 @@ def _path_revision(path: Path) -> tuple[str, bool, int, int, int]:
 def _sqlite_file_revisions(
     path: Path,
 ) -> tuple[tuple[str, bool, int, int, int], ...]:
-    """Fallback fingerprint for missing, legacy, or unreadable catalogs."""
+    """Fallback fingerprint for missing or unreadable catalogs."""
 
     return tuple(
         _path_revision(Path(f"{path}{suffix}"))
@@ -189,8 +188,7 @@ def _native_catalog_revision(
             """
             SELECT schema_version, active_snapshot_id, active_build_id,
                    predecessor_snapshot_id, publication_generation,
-                   write_epoch, v1_fallback_open, degraded, write_enabled,
-                   updated_at
+                   write_epoch, degraded, write_enabled, updated_at
             FROM retrieval_runtime WHERE runtime_id = 1
             """
         ).fetchone()
@@ -287,8 +285,8 @@ def _native_catalog_revision(
         connection.close()
 
 
-def _catalog_revision(db_path: str) -> tuple[Any, ...]:
-    paths, _data_root = status_module._status_retrieval_paths(db_path)
+def _catalog_revision(data_root: str) -> tuple[Any, ...]:
+    paths, _data_root = status_module._status_retrieval_paths(data_root)
     if paths.catalog.is_file():
         try:
             return _native_catalog_revision(paths.catalog, paths.data_root)
@@ -301,8 +299,8 @@ def _catalog_revision(db_path: str) -> tuple[Any, ...]:
                 _evidence_revision(paths.data_root),
             )
     return (
-        "legacy",
-        _sqlite_file_revisions(Path(db_path)),
+        "uninitialized",
+        _sqlite_file_revisions(paths.catalog),
         _path_revision(paths.v2_root),
     )
 
@@ -325,26 +323,16 @@ def _update_job_revision() -> tuple[Any, ...]:
 
 def _status_revision(
     *,
-    db_path: str,
-    faiss_dir: str,
+    data_root: str,
 ) -> tuple[Any, ...]:
-    catalog_revision = _catalog_revision(db_path)
+    catalog_revision = _catalog_revision(data_root)
     source_path = Path(status_module.__file__ or "")
     config_revision = tuple(
         getattr(status_module, field, None) for field in _STATUS_CONFIG_FIELDS
     )
-    legacy_vector_revision: tuple[Any, ...] = ()
-    if catalog_revision[0] == "legacy":
-        vector_dir = Path(faiss_dir)
-        legacy_vector_revision = (
-            _path_revision(vector_dir),
-            _path_revision(vector_dir / "index.faiss"),
-            _path_revision(vector_dir / "index.pkl"),
-        )
     return (
         _CACHE_SCHEMA_VERSION,
         catalog_revision,
-        legacy_vector_revision,
         _path_revision(source_path),
         _update_job_revision(),
         config_revision,
@@ -354,21 +342,19 @@ def _status_revision(
 @lru_cache(maxsize=_CACHE_SIZE)
 def _cached_status(
     save_dir: str,
-    db_path: str,
-    faiss_dir: str,
+    data_root: str,
     native_only: bool,
     _revision: tuple[Any, ...],
 ) -> dict[str, Any]:
     if native_only:
         result = status_module.get_native_v2_data_status(
             save_dir=save_dir,
-            db_path=db_path,
+            data_root=data_root,
         )
     else:
         result = status_module.get_data_status(
             save_dir=save_dir,
-            db_path=db_path,
-            faiss_dir=faiss_dir,
+            data_root=data_root,
         )
     return deepcopy(result)
 
@@ -383,9 +369,9 @@ def _refresh_volatile_fields(
 
     paths = snapshot.get("paths")
     db = snapshot.get("db")
-    if isinstance(paths, dict) and isinstance(db, dict) and paths.get("db_path"):
+    if isinstance(paths, dict) and isinstance(db, dict) and paths.get("catalog_path"):
         try:
-            db["size_bytes"] = Path(str(paths["db_path"])).stat().st_size
+            db["size_bytes"] = Path(str(paths["catalog_path"])).stat().st_size
         except OSError:
             db["size_bytes"] = 0
 
@@ -409,27 +395,20 @@ def _refresh_volatile_fields(
 def get_data_status(
     *,
     save_dir: str | None = None,
-    db_path: str | None = None,
-    faiss_dir: str | None = None,
+    data_root: str | None = None,
 ) -> dict[str, Any]:
     """Return an isolated snapshot, reusing work for an unchanged data revision."""
 
     resolved_save_dir = save_dir or status_module.SAVE_DIR
-    resolved_db_path = db_path or status_module.DB_PATH
-    resolved_faiss_dir = faiss_dir or status_module.FAISS_DIR
+    resolved_data_root = data_root or status_module.DATA_ROOT
     revision = _status_revision(
-        db_path=resolved_db_path,
-        faiss_dir=resolved_faiss_dir,
-    )
-    cache_faiss_dir = (
-        resolved_faiss_dir if revision[1][0] == "legacy" else ""
+        data_root=resolved_data_root,
     )
     with _CACHE_LOCK:
         snapshot = deepcopy(
             _cached_status(
                 resolved_save_dir,
-                resolved_db_path,
-                cache_faiss_dir,
+                resolved_data_root,
                 False,
                 revision,
             )
@@ -440,28 +419,24 @@ def get_data_status(
 def get_native_v2_data_status(
     *,
     save_dir: str | None = None,
-    db_path: str | None = None,
+    data_root: str | None = None,
 ) -> dict[str, Any]:
     """Return the cached Native V2-only monitoring snapshot."""
 
     resolved_save_dir = save_dir or status_module.SAVE_DIR
-    resolved_db_path = db_path or status_module.DB_PATH
-    resolved_faiss_dir = status_module.FAISS_DIR
+    resolved_data_root = data_root or status_module.DATA_ROOT
     revision = _status_revision(
-        db_path=resolved_db_path,
-        faiss_dir=resolved_faiss_dir,
+        data_root=resolved_data_root,
     )
     # A present native catalog has the same fail-closed result on both core
     # entry points. Reuse the sidebar snapshot instead of aggregating it again
     # when the user opens Monitoring.
-    native_only = revision[1][0] == "legacy"
-    cache_faiss_dir = resolved_faiss_dir if native_only else ""
+    native_only = revision[1][0] != "native"
     with _CACHE_LOCK:
         snapshot = deepcopy(
             _cached_status(
                 resolved_save_dir,
-                resolved_db_path,
-                cache_faiss_dir,
+                resolved_data_root,
                 native_only,
                 revision,
             )

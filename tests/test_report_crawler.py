@@ -14,13 +14,9 @@ from src.core.report_crawler import (
     download_naver_reports,
     normalize_report_categories,
 )
-from src.retrieval.build_service import materialize_candidate, publish_candidate
+from src.retrieval.publication import PublicationCoordinator
 from src.retrieval.recovery import RecoveryDisposition, StartupReconciler
-from tests.retrieval.test_retrieval_build_service import (
-    DeterministicEmbeddings,
-    _native_seed,
-    _prepare,
-)
+from tests.retrieval.test_retrieval_publication import make_native_install
 
 
 def test_download_holds_cutover_fence_for_guard_and_source_writes(
@@ -51,7 +47,7 @@ def test_download_holds_cutover_fence_for_guard_and_source_writes(
         events.append("downloaded")
         return 3
 
-    monkeypatch.setattr("src.configs.config.DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr("src.configs.config.DATA_ROOT", str(data_root))
     monkeypatch.setattr(report_crawler, "RetrievalUpdateLock", FakeUpdateLock)
     monkeypatch.setattr(report_crawler, "guard_before_report_download", guarded)
     monkeypatch.setattr(report_crawler, "_download_naver_reports_locked", download)
@@ -150,8 +146,8 @@ def test_download_guard_blocks_before_crawler_dependencies_or_source_writes(
         blocked_guard,
     )
     monkeypatch.setattr(
-        "src.configs.config.DB_PATH",
-        str(data_root / "reports.db"),
+        "src.configs.config.DATA_ROOT",
+        str(data_root),
     )
     monkeypatch.setattr(
         "os.makedirs",
@@ -167,19 +163,17 @@ def test_download_guard_blocks_before_crawler_dependencies_or_source_writes(
 def test_direct_crawler_command_fails_before_source_mutation_when_degraded(tmp_path):
     native_fixture = tmp_path / "native"
     native_fixture.mkdir()
-    data_root, sources = _native_seed(native_fixture)
-    plan = _prepare(data_root, sources, DeterministicEmbeddings())
-    candidate = materialize_candidate(plan, data_root)
-    publish_candidate(candidate, data_root)
-    active_snapshot = data_root.joinpath(
-        *candidate.snapshot_relative_path.split("/")
+    data_root, request = make_native_install(native_fixture)
+    PublicationCoordinator(data_root).publish(request)
+    active_snapshot = (
+        data_root / "retrieval" / "v2" / "snapshots" / "snapshot-successor.faiss"
     )
     active_snapshot.write_bytes(b"corrupt-active-snapshot")
     recovery = StartupReconciler(data_root).reconcile()
     assert recovery.disposition == RecoveryDisposition.PREDECESSOR_DEGRADED
     save_dir = tmp_path / "must-not-be-created"
     environment = os.environ.copy()
-    environment["DB_PATH"] = str(data_root / "reports.db")
+    environment["DATA_ROOT"] = str(data_root)
     environment["SAVE_DIR"] = str(save_dir)
     root = Path(__file__).resolve().parents[1]
 

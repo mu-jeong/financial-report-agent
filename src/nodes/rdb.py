@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 
-from src.configs.config import DB_PATH, get_logger
+from src.configs.config import get_logger
 from src.core.db_manager import get_connection
 from src.llms.factory import build_chat_model
 from src.configs.prompts import RDB_ANSWER_PROMPT, RDB_SQL_GEN_PROMPT
@@ -149,7 +149,7 @@ def sql_guardrail(func):
 
 @sql_guardrail
 def execute_sql(query: str):
-    conn = get_connection(DB_PATH)
+    conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(query)

@@ -42,7 +42,7 @@ UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 
 ## downstream 처리 계약
 
-추출·표 제거·chunking 계약은 공통이지만 저장 단계는 backend별로 다릅니다.
+추출·표 제거·chunking은 다음 순서로 처리합니다.
 
 1. PDF에서 텍스트 또는 Markdown 추출
 2. 표 제거 및 금융 리포트 cleanup filter 적용
@@ -50,7 +50,7 @@ UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 4. `USE_PARENT_CHILD=true`이면 parent-child chunking 적용
 5. `USE_PARENT_CHILD=false`이면 recursive chunking 사용
 6. OpenRouter 임베딩 모델로 벡터 생성
-7. V1은 SQLite parent와 mutable `data/vector_db`를 갱신하고, V2는 신규·변경 문서만 처리해 unchanged vector를 재사용한 완전한 immutable snapshot/catalog successor를 게시
+7. 신규·변경 문서만 처리하고 unchanged vector를 재사용한 완전한 immutable Native V2 snapshot/catalog successor 게시
 
 배포 템플릿의 production embedding은 신규·미임베딩 문서를 먼저 `pymupdf`로 처리하고, 실패하면 명시된 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`로 한 번 재시도합니다. fallback도 실패하면 두 엔진의 오류를 함께 보존해 해당 문서를 실패로 기록합니다. 서로 다른 `UNEMBEDDED_PDF_EXTRACTION_ENGINE` override와 비교 CLI는 fallback하지 않습니다. fallback 설정을 누락·비우거나 `allow_fallback=False`로 호출해도 primary 오류를 그대로 기록합니다. Native V2는 active profile에 기록된 fallback과 설정이 다르면 incremental publication 전에 중단합니다.
 
@@ -124,22 +124,13 @@ Streamlit Monitoring Mode의 Parsing engine evaluation은 `run_id`별 파일을 
 
 JSON summary로 엔진별 경향을 먼저 보고, CSV row로 특정 PDF의 이상치를 확인하세요.
 
-## Profile 변경과 재구축
+## Profile 변경과 Native V2 재구축
 
-활성 V2에서는 아래 V1 수동 reset 절차를 사용하지 않습니다. Extraction engine, embedding model, chunk policy가 active profile과 다르면 incremental update는 fail closed합니다. 변경된 profile은 별도로 완전한 native successor를 만들고 검증·게시해야 하며 `data/vector_db` 삭제나 legacy `reports.db` 수정으로 V2가 재구축되지는 않습니다.
+Extraction engine, embedding model, chunk policy가 active profile과 다르면 incremental update는 fail closed합니다. 앱과 데이터 업데이트 창을 닫은 뒤 다음 명령으로 현재 설정과 목표 profile을 확인하고, 필요한 경우 완전한 Native V2 successor를 만들어 검증·게시하세요.
 
-아래 절차는 canonical authority가 legacy V1이고 V2 migration/rollback artifact가 없는 설치에만 적용됩니다.
-
-```powershell
-Remove-Item -Recurse -Force data\vector_db
-@'
-from src.core.db_manager import get_connection
-
-conn = get_connection()
-conn.execute("UPDATE reports SET is_embedded = 0")
-conn.execute("DELETE FROM parent_chunks")
-conn.commit()
-conn.close()
-'@ | python -
-python -m src.core.embed_pipeline --all
+```bat
+tools\recovery\REBUILD_V2.bat --check
+tools\recovery\REBUILD_V2.bat
 ```
+
+현재 활성 데이터는 `DATA_ROOT/retrieval/v2` 아래에 유지되며, 새 snapshot은 검증을 통과한 뒤에만 활성화됩니다. 자세한 절차는 [Native V2 전체 재구축](migrations/v2/V2_REBUILD.md)을 참고하세요.

@@ -5,14 +5,12 @@ Flow:
 1. Extract PDF text or Markdown with the configured extraction engine.
 2. Split extracted content into LangChain documents.
 3. Embed chunks with the configured OpenRouter embedding model.
-4. Store vectors in FAISS and mark source reports as embedded in SQLite.
+4. Publish chunks through the Native V2 continuous-update service.
 """
 
 import argparse
-import json
 import os
 import sys
-import time
 import uuid
 from pathlib import Path
 
@@ -23,18 +21,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
-from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 from src.configs import config
-from src.core.db_manager import (
-    fetch_unembedded,
-    init_db,
-    insert_parent_chunks,
-    mark_embedded,
-    mark_embedding_failed,
-    sync_from_directory,
-)
+from src.retrieval.bootstrap import reconcile_and_inspect_runtime
 from src.retrieval.runtime_guard import guard_before_retrieval_write
 from src.retrieval.update_lock import RetrievalUpdateLock
 
@@ -252,315 +242,148 @@ def node_split_documents(state: dict) -> dict:
     return {**state, "documents": docs}
 
 
-def node_embed_and_store(state: dict, embeddings_fn) -> dict:
-    """Embed chunks, persist parent chunks if needed, and update the FAISS index."""
-    logger.info("  [3/3] Updating FAISS index")
-
-    docs = state["documents"]
-    texts = [doc.page_content for doc in docs]
-    metadatas = [doc.metadata for doc in docs]
-
-    if config.USE_PARENT_CHILD and "parent_documents" in state:
-        logger.info(f"  [3/3] Saving {len(state['parent_documents'])} parent chunks to SQLite...")
-        parent_data = []
-        for p_doc in state["parent_documents"]:
-            parent_data.append(
-                {
-                    "id": p_doc.metadata["parent_id"],
-                    "content": p_doc.page_content,
-                    "file_name": p_doc.metadata["file_name"],
-                    "metadata": json.dumps(p_doc.metadata, ensure_ascii=False),
-                }
-            )
-        insert_parent_chunks(parent_data)
-
-    logger.info(f"  [3/3] Embedding {len(docs)} chunks...")
-    vectors = [[float(x) for x in vector] for vector in embeddings_fn.embed_documents(texts)]
-    text_embeddings = list(zip(texts, vectors))
-
-    faiss_index_file = os.path.join(config.FAISS_DIR, "index.faiss")
-    if os.path.exists(faiss_index_file):
-        logger.info("  [3/3] Loading existing FAISS index...")
-        faiss_store = FAISS.load_local(
-            config.FAISS_DIR,
-            embeddings_fn,
-            allow_dangerous_deserialization=True,
-        )
-        faiss_store.add_embeddings(text_embeddings, metadatas=metadatas)
-    else:
-        logger.info("  [3/3] Creating new FAISS index...")
-        os.makedirs(config.FAISS_DIR, exist_ok=True)
-        faiss_store = FAISS.from_embeddings(
-            text_embeddings,
-            embeddings_fn,
-            metadatas=metadatas,
-        )
-
-    faiss_store.save_local(config.FAISS_DIR)
-    logger.info(f"  [3/3] Saved {len(docs)} chunks to {config.FAISS_DIR}/")
-    return {**state, "stored_count": len(docs)}
-
-
-def node_mark_complete(state: dict) -> dict:
-    """Mark a source report as embedded in SQLite."""
-    mark_embedded(
-        state["file_name"],
-        extraction_engine=state.get("extraction_engine"),
-    )
-    logger.info("  SQLite updated: is_embedded=1")
-    return state
-
-
 def build_embeddings_fn():
     """Initialize the configured embeddings model."""
     return build_embeddings_model()
 
 
 def run_pipeline(
-    test_limit: int = config.TEST_LIMIT,
     *,
-    continue_on_extraction_error: bool = False,
     retry_extraction_failures: bool = False,
 ) -> int:
-    """Run one supported update while holding the V1/V2 cutover fence."""
+    """Run one Native V2 update while holding the retrieval update lock."""
 
-    with RetrievalUpdateLock(Path(config.DB_PATH).parent):
+    reconcile_and_inspect_runtime(config.DATA_ROOT)
+    with RetrievalUpdateLock(config.DATA_ROOT):
         return _run_pipeline_locked(
-            test_limit,
-            continue_on_extraction_error=continue_on_extraction_error,
             retry_extraction_failures=retry_extraction_failures,
         )
 
 
 def _run_pipeline_locked(
-    test_limit: int = config.TEST_LIMIT,
     *,
-    continue_on_extraction_error: bool = False,
     retry_extraction_failures: bool = False,
 ) -> int:
     """Run the embedding pipeline for pending reports. Return process-style exit code."""
     runtime = guard_before_retrieval_write(
-        config.DB_PATH,
+        config.DATA_ROOT,
         allow_degraded_forward_recovery=True,
+        allow_empty_preflight=True,
     )
-    if runtime.is_native:
-        from src.retrieval.build_service import NativeSourceExtractionError
-        from src.retrieval.continuous_update import (
-            DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE,
-            execute_continuous_update,
-        )
+    if not runtime.is_native:
+        raise RuntimeError("Native V2 retrieval runtime is required for embedding updates")
 
-        extraction_engine = unembedded_extraction_engine()
-        fallback_engine = extraction_fallback_engine()
-        allow_extraction_fallback = extraction_engine == config.EXTRACTION_ENGINE
-        print("=" * 60)
-        print("  Finance LLM Native V2 Incremental Update")
-        print("=" * 60)
-        if test_limit and test_limit > 0:
-            logger.info(
-                "Native V2 ignores --limit, scans the complete source inventory, "
-                "and publishes at most %s changed reports per searchable delta.",
-                DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE,
-            )
-        try:
-            embeddings = build_embeddings_fn()
-            attempted_report_uids: set[str] = set()
-            completed_batch_count = 0
+    from src.retrieval.build_service import NativeSourceExtractionError
+    from src.retrieval.continuous_update import (
+        DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE,
+        execute_continuous_update,
+    )
 
-            def report_delta(result) -> None:
-                nonlocal completed_batch_count
-                completed_batch_count += 1
-                attempted_report_uids.update(result.attempted_report_uids)
-                logger.info(
-                    "Native V2 delta publication complete: batch=%s "
-                    "delta_generation=%s batch_attempted=%s processed=%s "
-                    "published=%s failed=%s deferred=%s",
-                    completed_batch_count,
-                    result.sequence,
-                    len(result.attempted_report_uids),
-                    len(attempted_report_uids),
-                    len(result.published_report_uids),
-                    len(result.failed_report_uids),
-                    result.deferred_report_count,
-                )
-
-            completed = execute_continuous_update(
-                config.DB_PATH,
-                config.SAVE_DIR,
-                data_root=runtime.paths.data_root,
-                embeddings=embeddings,
-                model=config.EMBEDDING_MODEL,
-                extractor_name=extraction_engine,
-                fallback_extractor_name=fallback_engine,
-                allow_extraction_fallback=allow_extraction_fallback,
-                use_parent_child=config.USE_PARENT_CHILD,
-                single_chunk_size=config.CHUNK_SIZE,
-                parent_chunk_size=config.PARENT_CHUNK_SIZE,
-                child_chunk_size=config.CHILD_CHUNK_SIZE,
-                metric="l2",
-                normalization="none",
-                retry_extraction_failures=retry_extraction_failures,
-                batch_size=DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE,
-                progress_callback=report_delta,
-            )
-        except NativeSourceExtractionError as exc:
-            logger.error(
-                "Native V2 extraction failure escaped per-document recording: %s: %s",
-                type(exc).__name__,
-                exc,
-            )
-            return 1
-        except Exception as exc:
-            logger.error(f"Native V2 incremental update failed: {type(exc).__name__}: {exc}")
-            return 1
-        if completed is None:
-            logger.info("Native V2 is already current; no PDFs required processing.")
-            return 0
-        result = completed.candidate_result
-        outcome = completed.publication_outcome
+    extraction_engine = unembedded_extraction_engine()
+    fallback_engine = extraction_fallback_engine()
+    allow_extraction_fallback = extraction_engine == config.EXTRACTION_ENGINE
+    print("=" * 60)
+    print("  Finance LLM Native V2 Incremental Update")
+    print("=" * 60)
+    if getattr(runtime, "is_empty", False) and not _has_source_pdfs(config.SAVE_DIR):
         logger.info(
-            "Native V2 final compaction complete: generation=%s epoch=%s "
-            "reports=%s chunks=%s",
-            outcome.publication_generation,
-            outcome.write_epoch,
-            result.report_count,
-            result.chunk_count,
-        )
-        if getattr(outcome, "cleanup_pending", False):
-            logger.warning(
-                "Native V2 publication succeeded; artifact cleanup remains "
-                "pending and will be retried: %s",
-                getattr(outcome, "cleanup_error", None),
-            )
-        logger.info(
-            "Native V2 update complete: deltas=%s compactions=1 generation=%s "
-            "epoch=%s reports=%s chunks=%s failed=%s",
-            completed_batch_count,
-            outcome.publication_generation,
-            outcome.write_epoch,
-            result.report_count,
-            result.chunk_count,
-            len(completed.failed_report_uids),
+            "Native V2 is initialized and no source PDFs exist; no update is required."
         )
         return 0
-    print("=" * 60)
-    print("  Finance LLM Embedding Pipeline")
-    print("=" * 60)
+    try:
+        embeddings = build_embeddings_fn()
+        attempted_report_uids: set[str] = set()
+        completed_batch_count = 0
 
-    init_db()
-    sync_report_pdf_dir_env(config.SAVE_DIR)
-    sync_from_directory(config.SAVE_DIR)
-
-    pending = fetch_unembedded()
-    if not pending:
-        logger.info("\nAll files are already embedded.")
-        return
-
-    targets = pending[:test_limit] if test_limit and test_limit > 0 else pending
-    print(f"\nPending targets: {len(targets)} / total pending: {len(pending)}\n")
-
-    embeddings_fn = build_embeddings_fn()
-
-    success, failed, extraction_failed = 0, 0, 0
-
-    for idx, row in enumerate(targets, 1):
-        file_name = row["file_name"]
-        print(f"\n[{idx}/{len(targets)}] {row['target_name']} - {row['title'][:40]}")
-
-        if not os.path.exists(os.path.join(config.SAVE_DIR, file_name)):
-            logger.warning("  File is missing; skipping.\n")
-            mark_embedding_failed(
-                file_name,
-                "FileNotFoundError: PDF file is missing",
-                extraction_engine=unembedded_extraction_engine(),
+        def report_delta(result) -> None:
+            nonlocal completed_batch_count
+            completed_batch_count += 1
+            attempted_report_uids.update(result.attempted_report_uids)
+            logger.info(
+                "Native V2 delta publication complete: batch=%s "
+                "delta_generation=%s batch_attempted=%s processed=%s "
+                "published=%s failed=%s deferred=%s",
+                completed_batch_count,
+                result.sequence,
+                len(result.attempted_report_uids),
+                len(attempted_report_uids),
+                len(result.published_report_uids),
+                len(result.failed_report_uids),
+                result.deferred_report_count,
             )
-            failed += 1
-            continue
 
-        state: dict = {
-            "file_name": file_name,
-            "target_name": row["target_name"],
-            "title": row["title"],
-            "report_date": row["report_date"],
-            "report_type": row["report_type"],
-            "broker": row["broker"],
-            "extraction_engine": unembedded_extraction_engine(),
-        }
-
-        try:
-            state = node_extract_pdf(state)
-            state = node_split_documents(state)
-            state = node_embed_and_store(state, embeddings_fn)
-            state = node_mark_complete(state)
-            success += 1
-        except KeyboardInterrupt:
-            logger.warning("[Interrupted] Stopping at user request.")
-            break
-        except Exception as exc:
-            error_message = f"{type(exc).__name__}: {exc}"
-            logger.error(f"  Error ({error_message})")
-            mark_embedding_failed(
-                file_name,
-                error_message,
-                extraction_engine=state.get("extraction_engine") or unembedded_extraction_engine(),
-            )
-            failed += 1
-            if isinstance(exc, PdfExtractionError):
-                extraction_failed += 1
-
-        if idx < len(targets):
-            print()
-            time.sleep(2)
-
-    print("\n" + "=" * 60)
-    print(f"  Done: {success} succeeded / {failed} failed")
-    faiss_size = (
-        sum(
-            os.path.getsize(os.path.join(config.FAISS_DIR, file_name))
-            for file_name in os.listdir(config.FAISS_DIR)
-            if os.path.isfile(os.path.join(config.FAISS_DIR, file_name))
+        completed = execute_continuous_update(
+            config.DATA_ROOT,
+            config.SAVE_DIR,
+            embeddings=embeddings,
+            model=config.EMBEDDING_MODEL,
+            extractor_name=extraction_engine,
+            fallback_extractor_name=fallback_engine,
+            allow_extraction_fallback=allow_extraction_fallback,
+            use_parent_child=config.USE_PARENT_CHILD,
+            single_chunk_size=config.CHUNK_SIZE,
+            parent_chunk_size=config.PARENT_CHUNK_SIZE,
+            child_chunk_size=config.CHILD_CHUNK_SIZE,
+            metric="l2",
+            normalization="none",
+            retry_extraction_failures=retry_extraction_failures,
+            batch_size=DEFAULT_CONTINUOUS_REPORT_BATCH_SIZE,
+            progress_callback=report_delta,
         )
-        if os.path.exists(config.FAISS_DIR)
-        else 0
-    )
-    print(f"  FAISS index size: {faiss_size / 1024:.1f} KB")
-    print(f"  Saved at: {os.path.abspath(config.FAISS_DIR)}/")
-    print("=" * 60)
-    if continue_on_extraction_error and extraction_failed:
-        logger.warning(
-            "Quick Start is continuing after %s PDF parsing failure(s).",
-            extraction_failed,
+    except NativeSourceExtractionError as exc:
+        logger.error(
+            "Native V2 extraction failure escaped per-document recording: %s: %s",
+            type(exc).__name__,
+            exc,
         )
-    fatal_failures = failed - extraction_failed
-    if fatal_failures or (extraction_failed and not continue_on_extraction_error):
         return 1
+    except Exception as exc:
+        logger.error(f"Native V2 incremental update failed: {type(exc).__name__}: {exc}")
+        return 1
+    if completed is None:
+        logger.info("Native V2 is already current; no PDFs required processing.")
+        return 0
+    result = completed.candidate_result
+    outcome = completed.publication_outcome
+    logger.info(
+        "Native V2 final compaction complete: generation=%s epoch=%s "
+        "reports=%s chunks=%s",
+        outcome.publication_generation,
+        outcome.write_epoch,
+        result.report_count,
+        result.chunk_count,
+    )
+    if getattr(outcome, "cleanup_pending", False):
+        logger.warning(
+            "Native V2 publication succeeded; artifact cleanup remains "
+            "pending and will be retried: %s",
+            getattr(outcome, "cleanup_error", None),
+        )
+    logger.info(
+        "Native V2 update complete: deltas=%s compactions=1 generation=%s "
+        "epoch=%s reports=%s chunks=%s failed=%s",
+        completed_batch_count,
+        outcome.publication_generation,
+        outcome.write_epoch,
+        result.report_count,
+        result.chunk_count,
+        len(completed.failed_report_uids),
+    )
     return 0
+
+
+def _has_source_pdfs(source_directory: str | os.PathLike) -> bool:
+    root = Path(source_directory)
+    if not root.is_dir() or root.is_symlink():
+        return False
+    return any(
+        path.is_file() and not path.is_symlink() and path.suffix.lower() == ".pdf"
+        for path in root.rglob("*")
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Finance LLM PDF embedding pipeline")
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=config.TEST_LIMIT,
-        help=(
-            "Maximum number of pending files to process in this run. "
-            "Use 0 to process every pending file. Default: config.TEST_LIMIT."
-        ),
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Process every pending file. Equivalent to --limit 0.",
-    )
-    parser.add_argument(
-        "--continue-on-extraction-error",
-        action="store_true",
-        help=(
-            "Continue legacy V1 processing when individual PDF parsing fails. "
-            "Native V2 records these failures in its source manifest."
-        ),
-    )
     parser.add_argument(
         "--retry-extraction-failures",
         action="store_true",
@@ -572,8 +395,6 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     raise SystemExit(
         run_pipeline(
-            test_limit=0 if args.all else args.limit,
-            continue_on_extraction_error=args.continue_on_extraction_error,
             retry_extraction_failures=args.retry_extraction_failures,
         )
     )

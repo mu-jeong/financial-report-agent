@@ -1,20 +1,17 @@
-"""Lease-safe cleanup for retired native snapshots and the epoch-zero bridge."""
+"""Lease-safe cleanup for retired native retrieval artifacts."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import sqlite3
 import stat
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
 
-from src.retrieval.identity import canonical_json
-from src.retrieval.publication import PublicationError, read_durable_floors
+from src.retrieval.publication import PublicationError
 from src.retrieval.repository import (
     SnapshotCache,
     SnapshotInUseError,
@@ -54,16 +51,7 @@ class CompactedArtifactGCOutcome:
     reason: str
 
 
-@dataclass(frozen=True)
-class CompatibilityGCOutcome:
-    bundle_id: str
-    state: str
-    deleted: bool
-    reason: str
-
-
 FileRemover = Callable[[Path], None]
-DirectoryRemover = Callable[[Path], None]
 
 
 class RetrievalGarbageCollector:
@@ -75,13 +63,11 @@ class RetrievalGarbageCollector:
         *,
         cache: SnapshotCache | None = None,
         remove_file: FileRemover | None = None,
-        remove_directory: DirectoryRemover | None = None,
     ) -> None:
         self.data_root = Path(data_root).resolve(strict=True)
         self.catalog_path = self.data_root / "retrieval" / "v2" / "catalog.sqlite3"
         self.cache = cache or shared_snapshot_cache(self.data_root)
         self._remove_file = remove_file or _remove_file
-        self._remove_directory = remove_directory or _remove_directory
 
     def collect_snapshot(
         self,
@@ -493,99 +479,6 @@ class RetrievalGarbageCollector:
         finally:
             connection.close()
 
-    def collect_compatibility_bundle(
-        self,
-        bundle_id: str,
-        *,
-        validation_window_elapsed: bool = False,
-        writer_lease: WriterLease | None = None,
-    ) -> CompatibilityGCOutcome:
-        """Delete the closed V1 bridge only after explicit retention approval."""
-
-        if writer_lease is None:
-            with NativeWriterLock(self.data_root) as owned_lease:
-                return self.collect_compatibility_bundle(
-                    bundle_id,
-                    validation_window_elapsed=validation_window_elapsed,
-                    writer_lease=owned_lease,
-                )
-        assert_writer_lease_owned(writer_lease, self.data_root)
-        self._validate_catalog_for_mutation()
-        _validate_digest(bundle_id, "compatibility bundle")
-        complete_path = self._compatibility_evidence_path(bundle_id, "complete")
-        bundle = self.data_root / "retrieval" / "compat" / "v1" / bundle_id
-        if complete_path.is_file() and not bundle.exists():
-            _validate_gc_evidence(_read_json(complete_path), bundle_id, "complete")
-            return CompatibilityGCOutcome(
-                bundle_id,
-                "garbage_collected",
-                True,
-                "compatibility bundle was already collected",
-            )
-        if not validation_window_elapsed:
-            return CompatibilityGCOutcome(
-                bundle_id,
-                "retained",
-                False,
-                "validation and backup retention window has not been approved",
-            )
-
-        intent_path = self._compatibility_evidence_path(bundle_id, "intent")
-        intent = _read_json(intent_path) if intent_path.exists() else None
-        if intent is None:
-            marker = self._validate_compatibility_marker(bundle_id, bundle)
-            intent = {
-                "schema_version": 1,
-                "kind": "compatibility_gc_intent",
-                "state": "intent",
-                "bundle_id": bundle_id,
-                "closing_publication_id": marker["closing_publication_id"],
-                "publication_generation": marker["publication_generation"],
-                "write_epoch": marker["write_epoch"],
-            }
-            self._validate_closed_floor(intent)
-            _atomic_json_once(intent_path, intent)
-        else:
-            _validate_gc_evidence(intent, bundle_id, "intent")
-            self._validate_closed_floor(intent)
-
-        if bundle.exists():
-            if bundle.is_symlink() or not bundle.is_dir():
-                raise GarbageCollectionError("compatibility bundle path is unsafe")
-            children = tuple(bundle.iterdir())
-            if any(child.is_symlink() or not child.is_file() for child in children):
-                raise GarbageCollectionError(
-                    "compatibility bundle contains a linked or non-file entry"
-                )
-            # Keep the in-bundle marker until every other file is gone.  The
-            # external intent makes a final rmdir failure safely replayable.
-            ordered = sorted(
-                children,
-                key=lambda child: (child.name == "cleanup-pending.json", child.name),
-            )
-            try:
-                for child in ordered:
-                    self._remove_file(child)
-                self._remove_directory(bundle)
-            except (PermissionError, OSError) as exc:
-                return CompatibilityGCOutcome(
-                    bundle_id,
-                    "garbage_pending",
-                    False,
-                    f"compatibility deletion is pending: {exc}",
-                )
-
-        complete = dict(intent)
-        complete["kind"] = "compatibility_gc_complete"
-        complete["state"] = "complete"
-        _atomic_json_once(complete_path, complete)
-        return CompatibilityGCOutcome(
-            bundle_id,
-            "garbage_collected",
-            True,
-            "closed compatibility bundle deleted after retention approval",
-        )
-
     def _validate_catalog_for_mutation(self) -> None:
         """Run one full suite at a standalone GC trust boundary."""
 
@@ -657,109 +550,6 @@ class RetrievalGarbageCollector:
                 raise
         finally:
             connection.close()
-
-    def _validate_compatibility_marker(
-        self,
-        bundle_id: str,
-        bundle: Path,
-    ) -> Mapping[str, Any]:
-        if not bundle.is_dir() or bundle.is_symlink():
-            raise GarbageCollectionError("compatibility bundle is unavailable or unsafe")
-        marker = _read_json(bundle / "cleanup-pending.json")
-        required = {
-            "schema_version",
-            "state",
-            "bundle_id",
-            "closing_publication_id",
-            "publication_generation",
-            "write_epoch",
-        }
-        if (
-            set(marker) != required
-            or marker.get("schema_version") != 1
-            or marker.get("state") != "cleanup_pending"
-            or marker.get("bundle_id") != bundle_id
-        ):
-            raise GarbageCollectionError("compatibility cleanup marker is invalid")
-        self._validate_closed_floor(marker)
-        return marker
-
-    def _validate_closed_floor(self, evidence: Mapping[str, Any]) -> None:
-        generation = evidence.get("publication_generation")
-        write_epoch = evidence.get("write_epoch")
-        publication_id = evidence.get("closing_publication_id")
-        if (
-            not isinstance(generation, int)
-            or isinstance(generation, bool)
-            or generation <= 0
-            or not isinstance(write_epoch, int)
-            or isinstance(write_epoch, bool)
-            or write_epoch <= 0
-            or not isinstance(publication_id, str)
-            or not publication_id
-        ):
-            raise GarbageCollectionError("compatibility GC generation evidence is invalid")
-        try:
-            floors = read_durable_floors(self.data_root)
-        except PublicationError as exc:
-            raise GarbageCollectionError("committed floor chain is invalid") from exc
-        floor = next(
-            (
-                item
-                for item in floors
-                if item.publication_id == publication_id
-                and item.publication_generation == generation
-            ),
-            None,
-        )
-        if (
-            floor is None
-            or floor.write_epoch != write_epoch
-            or floor.fallback_open
-        ):
-            raise GarbageCollectionError(
-                "matching closed committed floor is unavailable"
-            )
-        checkpoint = _resolve_relative(
-            self.data_root,
-            floor.checkpoint_relative_path,
-        )
-        if (
-            not checkpoint.is_file()
-            or checkpoint.is_symlink()
-            or _sha256_file(checkpoint) != floor.checkpoint_sha256
-        ):
-            raise GarbageCollectionError(
-                "matching committed-generation checkpoint is unavailable"
-            )
-        connection = _open_catalog(self.catalog_path, read_only=True)
-        try:
-            runtime = connection.execute(
-                """
-                SELECT publication_generation, write_epoch, v1_fallback_open
-                FROM retrieval_runtime WHERE runtime_id = 1
-                """
-            ).fetchone()
-        finally:
-            connection.close()
-        if (
-            runtime is None
-            or runtime[0] < generation
-            or runtime[1] < write_epoch
-            or runtime[2] != 0
-        ):
-            raise GarbageCollectionError("runtime has not durably closed V1 fallback")
-
-    def _compatibility_evidence_path(self, bundle_id: str, phase: str) -> Path:
-        return (
-            self.data_root
-            / "retrieval"
-            / "v2"
-            / "evidence"
-            / "compatibility-gc"
-            / f"{bundle_id}-{phase}.json"
-        )
-
 
 def _open_catalog(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
     if not path.is_file() or path.is_symlink():
@@ -957,60 +747,6 @@ def _remove_file(path: Path) -> None:
     path.unlink()
 
 
-def _remove_directory(path: Path) -> None:
-    path.rmdir()
-
-
-def _atomic_json_once(path: Path, value: Mapping[str, Any]) -> None:
-    encoded = (canonical_json(dict(value)) + "\n").encode("utf-8")
-    if path.exists():
-        if path.is_symlink() or not path.is_file() or path.read_bytes() != encoded:
-            raise GarbageCollectionError("immutable GC evidence conflicts")
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.parent / f".gc-{uuid.uuid4().hex[:12]}.tmp"
-    try:
-        with temporary.open("xb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            if path.read_bytes() != encoded:
-                raise GarbageCollectionError("immutable GC evidence conflicts")
-        temporary.unlink(missing_ok=True)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _read_json(path: Path) -> Mapping[str, Any]:
-    if not path.is_file() or path.is_symlink():
-        raise GarbageCollectionError("GC evidence is missing or unsafe")
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise GarbageCollectionError("GC evidence is unreadable") from exc
-    if not isinstance(value, dict):
-        raise GarbageCollectionError("GC evidence must be a JSON object")
-    return value
-
-
-def _validate_gc_evidence(
-    evidence: Mapping[str, Any],
-    bundle_id: str,
-    phase: str,
-) -> None:
-    expected_kind = f"compatibility_gc_{phase}"
-    if (
-        evidence.get("schema_version") != 1
-        or evidence.get("kind") != expected_kind
-        or evidence.get("state") != phase
-        or evidence.get("bundle_id") != bundle_id
-    ):
-        raise GarbageCollectionError("compatibility GC evidence is invalid")
-
-
 def _validate_digest(value: str, label: str) -> None:
     if (
         not isinstance(value, str)
@@ -1031,7 +767,6 @@ def _sha256_file(path: Path) -> str:
 
 __all__ = [
     "CompactedArtifactGCOutcome",
-    "CompatibilityGCOutcome",
     "GarbageCollectionBlocked",
     "GarbageCollectionError",
     "RetrievalGarbageCollector",

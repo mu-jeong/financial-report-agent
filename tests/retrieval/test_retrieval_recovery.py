@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import shutil
 from pathlib import Path
@@ -10,10 +11,15 @@ from src.retrieval.bootstrap import RetrievalBootstrapError, inspect_runtime
 from src.retrieval.publication import (
     PublicationCoordinator,
     PublicationCrash,
+    PublicationError,
     PublicationRequest,
     read_durable_floors,
 )
-from src.retrieval.recovery import RecoveryDisposition, StartupReconciler
+from src.retrieval.recovery import (
+    RecoveryDisposition,
+    StartupReconciler,
+    _validate_recovery_intent,
+)
 from src.retrieval.runtime_guard import guard_before_retrieval_write
 from tests.retrieval.test_retrieval_publication import make_native_install
 
@@ -102,8 +108,7 @@ def _assert_live_wal_boundary(
         assert live.execute("PRAGMA foreign_key_check").fetchall() == []
         assert live.execute(
             """
-            SELECT publication_generation, write_epoch, v1_fallback_open,
-                   active_snapshot_id
+            SELECT publication_generation, write_epoch, active_snapshot_id
             FROM retrieval_runtime WHERE runtime_id = 1
             """
         ).fetchone() == expected_runtime
@@ -121,11 +126,10 @@ def _assert_live_wal_boundary(
     try:
         assert main_only.execute(
             """
-            SELECT publication_generation, write_epoch, v1_fallback_open,
-                   active_snapshot_id
+            SELECT publication_generation, write_epoch, active_snapshot_id
             FROM retrieval_runtime WHERE runtime_id = 1
             """
-        ).fetchone() == (1, 0, 1, "snapshot-seed")
+        ).fetchone() == (1, 1, "snapshot-seed")
         assert main_only.execute(
             """SELECT phase FROM publication_runs
                WHERE publication_id = 'publication-successor'"""
@@ -160,7 +164,7 @@ def _runtime(data_root: Path) -> tuple[object, ...]:
             """
             SELECT active_snapshot_id, active_build_id,
                    predecessor_snapshot_id, publication_generation,
-                   write_epoch, v1_fallback_open, degraded, write_enabled
+                   write_epoch, degraded, write_enabled
             FROM retrieval_runtime WHERE runtime_id = 1
             """
         ).fetchone()
@@ -181,23 +185,21 @@ def _running_publication(data_root: Path) -> tuple[str, str]:
         connection.close()
 
 
-def test_readable_stale_catalog_restores_highest_closed_floor(tmp_path: Path):
+def test_readable_stale_catalog_restores_highest_floor(tmp_path: Path):
     data_root, request = make_native_install(tmp_path)
     catalog = _catalog(data_root)
     stale = tmp_path / "catalog-generation-1.sqlite3"
     _online_backup(catalog, stale)
     published = PublicationCoordinator(data_root).publish(request)
-    assert published.write_epoch == 1
-    assert published.v1_fallback_open is False
+    assert published.write_epoch == 2
 
     _replace_catalog_with_backup(catalog, stale)
     outcome = StartupReconciler(data_root).reconcile()
-    selection = inspect_runtime(data_root / "reports.db", data_root=data_root)
+    selection = inspect_runtime(data_root)
 
     assert outcome.disposition is RecoveryDisposition.CHECKPOINT_RESTORED
     assert selection.publication_generation == 2
-    assert selection.write_epoch == 1
-    assert selection.v1_fallback_open is False
+    assert selection.write_epoch == 2
     assert selection.active_snapshot_id == "snapshot-successor"
 
 
@@ -216,16 +218,15 @@ def test_unmatched_newer_intent_forbids_readable_stale_catalog(tmp_path: Path):
     outcome = StartupReconciler(data_root).reconcile()
 
     assert outcome.disposition is RecoveryDisposition.FAIL_CLOSED
-    assert outcome.v1_fallback_open is False
     with pytest.raises(RetrievalBootstrapError, match="durable recovery evidence"):
-        inspect_runtime(data_root / "reports.db", data_root=data_root)
+        inspect_runtime(data_root)
 
 
 def _corrupt(path: Path) -> None:
     path.write_bytes(b"deliberately corrupt\x00")
 
 
-def test_epoch_positive_active_corruption_promotes_verified_predecessor_once(
+def test_active_corruption_promotes_verified_predecessor_once(
     tmp_path: Path,
 ) -> None:
     data_root, request = make_native_install(tmp_path)
@@ -242,8 +243,7 @@ def test_epoch_positive_active_corruption_promotes_verified_predecessor_once(
         "build-seed",
         None,
         3,
-        1,
-        0,
+        2,
         1,
         0,
     )
@@ -257,10 +257,69 @@ def test_epoch_positive_active_corruption_promotes_verified_predecessor_once(
         connection.close()
     floors = read_durable_floors(data_root)
     assert [floor.publication_generation for floor in floors] == [1, 2, 3]
-    assert floors[0].v1_fallback_floor == "open"
-    assert all(
-        floor.v1_fallback_floor == "closed" for floor in floors[1:]
+    recovery_floor = floors[-1]
+    floor_payload = json.loads(recovery_floor.path.read_text(encoding="utf-8"))
+    intent_path = (
+        data_root
+        / "retrieval"
+        / "v2"
+        / "evidence"
+        / recovery_floor.publication_id
+        / "commit-intent.json"
     )
+    intent_payload = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert floor_payload == {
+        "schema_version": 2,
+        "publication_id": recovery_floor.publication_id,
+        "publication_generation": 3,
+        "write_epoch": 2,
+        "active_snapshot_id": "snapshot-seed",
+        "checkpoint_relative_path": recovery_floor.checkpoint_relative_path,
+        "checkpoint_sha256": recovery_floor.checkpoint_sha256,
+    }
+    assert intent_payload == {
+        "schema_version": 2,
+        "kind": "active_recovery",
+        "publication_id": recovery_floor.publication_id,
+        "target_publication_generation": 3,
+        "write_epoch": 2,
+        "from_snapshot_id": "snapshot-successor",
+        "to_snapshot_id": "snapshot-seed",
+        "to_build_id": "build-seed",
+    }
+
+
+def test_schema_one_recovery_intent_accepts_historical_extra_fields() -> None:
+    _validate_recovery_intent(
+        {
+            "schema_version": 1,
+            "kind": "active_recovery",
+            "publication_id": "historical-recovery",
+            "target_publication_generation": 4,
+            "write_epoch": 2,
+            "from_snapshot_id": "snapshot-bad",
+            "to_snapshot_id": "snapshot-good",
+            "to_build_id": "build-good",
+            "historical_extension": "preserved",
+        }
+    )
+
+
+def test_schema_two_recovery_intent_rejects_unknown_fields() -> None:
+    with pytest.raises(PublicationError, match="intent is invalid"):
+        _validate_recovery_intent(
+            {
+                "schema_version": 2,
+                "kind": "active_recovery",
+                "publication_id": "current-recovery",
+                "target_publication_generation": 4,
+                "write_epoch": 2,
+                "from_snapshot_id": "snapshot-bad",
+                "to_snapshot_id": "snapshot-good",
+                "to_build_id": "build-good",
+                "unknown": True,
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -312,13 +371,12 @@ def test_active_recovery_replays_each_crash_boundary(
 
     assert first.disposition is RecoveryDisposition.PREDECESSOR_DEGRADED
     assert second.disposition is RecoveryDisposition.ACTIVE
-    assert _runtime(data_root)[0:8] == (
+    assert _runtime(data_root) == (
         "snapshot-seed",
         "build-seed",
         None,
         3,
-        1,
-        0,
+        2,
         1,
         0,
     )
@@ -347,8 +405,7 @@ def test_corrupt_catalog_restores_only_matching_floor_checkpoint(
         "build-successor",
         "snapshot-seed",
         2,
-        1,
-        0,
+        2,
         0,
         1,
     )
@@ -387,13 +444,13 @@ def test_checkpoint_restore_does_not_retain_stale_sqlite_sidecars(
         (
             "commit_intent_durable",
             "main",
-            (1, 0, 1, "snapshot-seed"),
+            (1, 1, "snapshot-seed"),
             "commit_intent_durable",
         ),
         (
             "committed_pending_checkpoint",
             "wal",
-            (2, 1, 0, "snapshot-successor"),
+            (2, 2, "snapshot-successor"),
             "committed_pending_checkpoint",
         ),
     ],
@@ -431,17 +488,13 @@ def test_live_wal_corruption_before_matching_floor_fails_closed(
     assert outcome.publication_generation is None
     assert outcome.write_epoch is None
     assert outcome.active_snapshot_id is None
-    assert outcome.v1_fallback_open is False
     assert outcome.write_enabled is False
     assert outcome.restored_checkpoint is False
     assert decoy.is_file()
     with pytest.raises(RetrievalBootstrapError):
-        inspect_runtime(data_root / "reports.db", data_root=data_root)
+        inspect_runtime(data_root)
     with pytest.raises(RetrievalBootstrapError):
-        guard_before_retrieval_write(
-            data_root / "reports.db",
-            data_root=data_root,
-        )
+        guard_before_retrieval_write(data_root)
 
 
 @pytest.mark.parametrize("corrupt_file", ["main", "wal"])
@@ -458,7 +511,7 @@ def test_live_wal_corruption_after_floor_restores_only_same_floor_checkpoint(
     )
     _assert_live_wal_boundary(
         catalog,
-        expected_runtime=(2, 1, 0, "snapshot-successor"),
+        expected_runtime=(2, 2, "snapshot-successor"),
         expected_phase="committed_floor_durable",
     )
     backups = data_root / "retrieval" / "v2" / "backups"
@@ -478,20 +531,18 @@ def test_live_wal_corruption_after_floor_restores_only_same_floor_checkpoint(
         _corrupt_first_wal_frame(wal)
 
     restored = StartupReconciler(data_root).reconcile()
-    selection = inspect_runtime(data_root / "reports.db", data_root=data_root)
+    selection = inspect_runtime(data_root)
     highest_floor = read_durable_floors(data_root)[-1]
 
     assert restored.disposition is RecoveryDisposition.CHECKPOINT_RESTORED
     assert restored.restored_checkpoint is True
     assert restored.publication_generation == highest_floor.publication_generation == 2
-    assert restored.write_epoch == highest_floor.write_epoch == 1
+    assert restored.write_epoch == highest_floor.write_epoch == 2
     assert restored.active_snapshot_id == highest_floor.active_snapshot_id
     assert restored.active_snapshot_id == "snapshot-successor"
-    assert restored.v1_fallback_open is highest_floor.fallback_open is False
     assert selection.publication_generation == 2
-    assert selection.write_epoch == 1
+    assert selection.write_epoch == 2
     assert selection.active_snapshot_id == "snapshot-successor"
-    assert selection.v1_fallback_open is False
     assert decoy_checkpoint.is_file()
     assert decoy_snapshot.is_file()
 
@@ -508,7 +559,7 @@ def test_corrupt_live_wal_and_floor_checkpoint_ignore_unreferenced_copy(
     )
     _assert_live_wal_boundary(
         catalog,
-        expected_runtime=(2, 1, 0, "snapshot-successor"),
+        expected_runtime=(2, 2, "snapshot-successor"),
         expected_phase="committed_floor_durable",
     )
     highest_floor = read_durable_floors(data_root)[-1]
@@ -525,12 +576,11 @@ def test_corrupt_live_wal_and_floor_checkpoint_ignore_unreferenced_copy(
     assert outcome.publication_generation is None
     assert outcome.write_epoch is None
     assert outcome.active_snapshot_id is None
-    assert outcome.v1_fallback_open is False
     assert outcome.write_enabled is False
     assert outcome.restored_checkpoint is False
     assert unreferenced.is_file()
     with pytest.raises(RetrievalBootstrapError):
-        inspect_runtime(data_root / "reports.db", data_root=data_root)
+        inspect_runtime(data_root)
 
 
 def test_unresolved_commit_intent_forbids_rollback_backup_restore(
@@ -557,7 +607,7 @@ def test_unresolved_commit_intent_forbids_rollback_backup_restore(
     assert _catalog(data_root).read_bytes() == b"deliberately corrupt\x00"
 
 
-def test_corrupt_active_and_predecessor_fails_closed_without_v1_reopen(
+def test_corrupt_active_and_predecessor_fails_closed(
     tmp_path: Path,
 ) -> None:
     data_root, request = make_native_install(tmp_path)
@@ -568,8 +618,7 @@ def test_corrupt_active_and_predecessor_fails_closed_without_v1_reopen(
     outcome = StartupReconciler(data_root).reconcile()
 
     assert outcome.disposition is RecoveryDisposition.FAIL_CLOSED
-    assert outcome.v1_fallback_open is False
-    assert outcome.write_epoch == 1
+    assert outcome.write_epoch == 2
     assert outcome.degraded is True
     assert outcome.write_enabled is False
     assert _runtime(data_root) == (
@@ -577,19 +626,18 @@ def test_corrupt_active_and_predecessor_fails_closed_without_v1_reopen(
         "build-successor",
         "snapshot-seed",
         2,
-        1,
-        0,
+        2,
         1,
         0,
     )
 
 
-def test_restore_never_drops_below_closed_recovery_floor(tmp_path: Path) -> None:
+def test_restore_never_drops_below_recovery_floor(tmp_path: Path) -> None:
     data_root, request = make_native_install(tmp_path)
     PublicationCoordinator(data_root).publish(request)
     _corrupt(_snapshot_path(data_root, "snapshot-successor"))
     StartupReconciler(data_root).reconcile()
-    assert _runtime(data_root)[3:6] == (3, 1, 0)
+    assert _runtime(data_root)[3:5] == (3, 2)
     _corrupt(_catalog(data_root))
 
     restored = StartupReconciler(data_root).reconcile()
@@ -600,10 +648,8 @@ def test_restore_never_drops_below_closed_recovery_floor(tmp_path: Path) -> None
         "build-seed",
         None,
         3,
-        1,
-        0,
+        2,
         1,
         0,
     )
     assert read_durable_floors(data_root)[-1].publication_generation == 3
-    assert read_durable_floors(data_root)[-1].fallback_open is False

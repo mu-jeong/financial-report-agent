@@ -26,9 +26,9 @@ def test_runtime_smoke_reconciles_before_interactive_cli(monkeypatch, capsys):
             active_snapshot_id="snapshot-successor",
             publication_generation=3,
             write_epoch=2,
-            v1_fallback_open=False,
             degraded=False,
             write_enabled=True,
+            initialization_state="ready",
         ),
     )
     monkeypatch.setattr(
@@ -43,4 +43,4 @@ def test_runtime_smoke_reconciles_before_interactive_cli(monkeypatch, capsys):
     assert '"surface": "cli"' in output
     assert '"active_snapshot_id": "snapshot-successor"' in output
     assert '"write_epoch": 2' in output
-    assert '"v1_fallback_open": false' in output
+    assert '"initialization_state": "ready"' in output

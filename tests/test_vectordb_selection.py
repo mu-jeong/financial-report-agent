@@ -384,7 +384,7 @@ def test_build_temporal_preflight_plan_selects_month_representatives_when_over_t
     assert plan["metrics"]["selection_reason"] == "month_bucket_representatives"
 
 
-def test_native_dispatch_embeds_once_uses_one_scoped_reader_request_and_never_loads_v1(
+def test_native_dispatch_embeds_once_and_uses_one_scoped_reader_request(
     monkeypatch,
 ):
     from types import SimpleNamespace
@@ -468,14 +468,6 @@ def test_native_dispatch_embeds_once_uses_one_scoped_reader_request_and_never_lo
             selection=None,
         ),
     )
-    monkeypatch.setattr(
-        vectordb.FAISS,
-        "load_local",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("native V2 must not load index.pkl")
-        ),
-    )
-
     docs_with_scores, metrics = vectordb._retrieve_docs_with_scores(
         "native query",
         scope,
@@ -500,7 +492,7 @@ def test_native_dispatch_embeds_once_uses_one_scoped_reader_request_and_never_lo
     assert second_metrics == metrics
 
 
-def test_native_repository_failure_returns_no_results_without_legacy_fallback(
+def test_native_repository_failure_returns_no_results(
     monkeypatch,
 ):
     from types import SimpleNamespace
@@ -526,14 +518,6 @@ def test_native_repository_failure_returns_no_results_without_legacy_fallback(
             selection=None,
         ),
     )
-    monkeypatch.setattr(
-        vectordb.FAISS,
-        "load_local",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("native failure must not fall back to V1")
-        ),
-    )
-
     result = vectordb.vectordb_node(
         {"question": "query", "search_filters": {"report_type": "company"}}
     )
@@ -543,7 +527,7 @@ def test_native_repository_failure_returns_no_results_without_legacy_fallback(
     assert result["monitoring_metrics"]["retrieval"]["error_code"] == "RetrievalDispatchError"
 
 
-def test_bootstrap_failure_returns_no_results_before_embedding_or_v1_load(monkeypatch):
+def test_bootstrap_failure_returns_no_results_before_embedding(monkeypatch):
     import src.nodes.vectordb as vectordb
 
     def fail_bootstrap(path):
@@ -557,14 +541,6 @@ def test_bootstrap_failure_returns_no_results_before_embedding_or_v1_load(monkey
             AssertionError("bootstrap must complete before embedding")
         ),
     )
-    monkeypatch.setattr(
-        vectordb.FAISS,
-        "load_local",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("bootstrap failure must not fall back to V1")
-        ),
-    )
-
     result = vectordb.vectordb_node(
         {"question": "query", "search_filters": {"report_type": "company"}}
     )
@@ -573,16 +549,9 @@ def test_bootstrap_failure_returns_no_results_before_embedding_or_v1_load(monkey
     assert result["monitoring_metrics"]["retrieval"]["error_code"] == "RetrievalBootstrapError"
 
 
-def test_native_parent_slice_deduplicates_without_legacy_parent_lookup(monkeypatch):
+def test_native_parent_slice_deduplicates_by_parent_uid():
     import src.nodes.vectordb as vectordb
 
-    monkeypatch.setattr(
-        vectordb,
-        "fetch_parent_content",
-        lambda parent_id: (_ for _ in ()).throw(
-            AssertionError("native parent slices must not query the legacy parent table")
-        ),
-    )
     docs_with_scores = [
         (
             Document(
@@ -735,137 +704,3 @@ def test_vectordb_passes_matching_prior_files_into_single_retrieval_scope(monkey
             "file_names": [file_name],
         }
     ]
-
-
-def test_legacy_store_is_loaded_only_for_legacy_v1_selection(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
-    import src.nodes.vectordb as vectordb
-
-    selection = SimpleNamespace(
-        mode="legacy_v1",
-        paths=SimpleNamespace(catalog=tmp_path / "catalog.sqlite3", data_root=tmp_path),
-    )
-    monkeypatch.setattr(
-        vectordb,
-        "resolve_retrieval_dispatch",
-        lambda _path: SimpleNamespace(
-            mode="legacy_v1",
-            native=None,
-            selection=selection,
-        ),
-    )
-    embed_calls = []
-    monkeypatch.setattr(
-        vectordb,
-        "build_embeddings_fn",
-        lambda: SimpleNamespace(
-            embed_query=lambda query: embed_calls.append(query) or [1.0, 2.0]
-        ),
-    )
-    monkeypatch.setattr(vectordb.os.path, "exists", lambda path: True)
-    document = Document(page_content="legacy", metadata={"file_name": "legacy.pdf"})
-
-    class FakeLegacyStore:
-        index_to_docstore_id = {0: "doc-0"}
-
-        def similarity_search_with_score_by_vector(self, vector, *, k):
-            assert vector == [1.0, 2.0]
-            assert k >= vectordb.SEARCH_TOP_K
-            return [(document, 0.25)]
-
-    load_calls = []
-
-    def fake_load(path, embeddings, *, allow_dangerous_deserialization):
-        load_calls.append((path, embeddings, allow_dangerous_deserialization))
-        return FakeLegacyStore()
-
-    monkeypatch.setattr(vectordb.FAISS, "load_local", fake_load)
-
-    docs_with_scores, metrics = vectordb._retrieve_docs_with_scores("legacy query", None)
-
-    assert embed_calls == ["legacy query"]
-    assert len(load_calls) == 1
-    assert load_calls[0][2] is True
-    assert docs_with_scores == [(document, 0.25)]
-    assert metrics["runtime_mode"] == "legacy_v1"
-
-
-def test_epoch_zero_compatibility_uses_only_validated_bundle_dispatch(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
-    import src.nodes.vectordb as vectordb
-    import src.migrations.v2.compatibility as compatibility
-
-    selection = SimpleNamespace(
-        mode="epoch_zero_compatibility",
-        paths=SimpleNamespace(catalog=tmp_path / "catalog.sqlite3", data_root=tmp_path),
-        compatibility_bundle_id="bundle-1",
-        write_epoch=0,
-        v1_fallback_open=True,
-    )
-    monkeypatch.setattr(
-        vectordb,
-        "resolve_retrieval_dispatch",
-        lambda _path: SimpleNamespace(
-            mode="epoch_zero_compatibility",
-            native=None,
-            selection=selection,
-        ),
-    )
-    monkeypatch.setattr(
-        vectordb,
-        "build_embeddings_fn",
-        lambda: SimpleNamespace(embed_query=lambda query: [0.5, 0.5]),
-    )
-    monkeypatch.setattr(
-        vectordb.FAISS,
-        "load_local",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("compatibility dispatch must not open arbitrary V1 files")
-        ),
-    )
-    constructor_calls = []
-    search_calls = []
-
-    class FakeCompatibilityReader:
-        ntotal = 2
-
-        def __init__(self, root, bundle_id):
-            constructor_calls.append((root, bundle_id))
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def search(self, vector, *, k, fetch_k):
-            search_calls.append((vector.tolist(), k, fetch_k))
-            return [
-                SimpleNamespace(
-                    embedding_text="sealed legacy text",
-                    metadata={"file_name": "prior.pdf"},
-                    score=0.75,
-                )
-            ]
-
-    monkeypatch.setattr(compatibility, "V1CompatibilityReader", FakeCompatibilityReader)
-
-    docs_with_scores, metrics = vectordb._retrieve_docs_with_scores(
-        "compat query",
-        {"file_names": ["prior.pdf"]},
-    )
-    vectordb._retrieve_docs_with_scores(
-        "compat query",
-        {"file_names": ["prior.pdf"]},
-    )
-
-    assert constructor_calls == [
-        (tmp_path, "bundle-1"),
-        (tmp_path, "bundle-1"),
-    ]
-    assert search_calls == [([0.5, 0.5], 2, 2), ([0.5, 0.5], 2, 2)]
-    assert docs_with_scores[0][0].page_content == "sealed legacy text"
-    assert metrics["runtime_mode"] == "epoch_zero_compatibility"
-    assert metrics["compatibility_bundle_id"] == "bundle-1"

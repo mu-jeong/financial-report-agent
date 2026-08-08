@@ -8,120 +8,30 @@ from src.core import issue_report_store, status as status_module
 from src.core.data_update_jobs import build_crawler_env, missing_update_dates_by_category
 from src.core.status import (
     assess_readiness,
-    build_unembedded_report_rows,
     format_readiness_text,
     format_duration,
-    format_status_text,
     get_data_status,
     get_native_v2_data_status,
     list_unembedded_reports,
 )
-from src.migrations.v2.evidence import seal_compatibility_bundle
-from src.migrations.v2.import_v1 import convert_v1_seed
 from src.retrieval.delta_schema import install_delta_schema
-from tests.migrations.v2.fixtures_factory.v1 import build_v1_fixture
 from tests.retrieval.test_retrieval_delta_reader import _DeltaChange, _publish_delta
 from tests.retrieval.test_retrieval_repository import _create_catalog, _digest
 
 
-def test_native_v2_monitoring_status_never_reads_legacy_db_or_vector(
-    tmp_path,
-    monkeypatch,
-):
-    legacy_db = tmp_path / "reports.db"
-    legacy_db.write_bytes(b"legacy")
-
-    monkeypatch.setattr(status_module, "_safe_native_info", lambda _path: None)
-    monkeypatch.setattr(
-        status_module,
-        "_safe_db_info",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("legacy DB status must not be read")
-        ),
-    )
-    monkeypatch.setattr(
-        status_module,
-        "_safe_vector_info",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("legacy vector status must not be read")
-        ),
-    )
+def test_native_v2_monitoring_status_reports_missing_runtime_as_unavailable(tmp_path):
+    source = Path(status_module.__file__).read_text(encoding="utf-8")
+    assert "_safe_db_info" not in source
+    assert "_safe_vector_info" not in source
 
     status = get_native_v2_data_status(
         save_dir=str(tmp_path / "downloaded"),
-        db_path=str(legacy_db),
+        data_root=str(tmp_path),
     )
 
     assert status["retrieval"]["mode"] == "unavailable"
     assert status["db"]["total_reports"] == 0
     assert status["vector_db"]["ntotal"] == 0
-
-
-def test_get_data_status_reports_db_pdf_and_vector_counts(tmp_path):
-    save_dir = tmp_path / "downloaded"
-    save_dir.mkdir()
-    (save_dir / "a.pdf").write_bytes(b"%PDF")
-    (save_dir / "ignore.txt").write_text("x")
-
-    faiss_dir = tmp_path / "vector_db"
-    faiss_dir.mkdir()
-    (faiss_dir / "index.faiss").write_bytes(b"1234")
-    (faiss_dir / "index.pkl").write_bytes(b"12")
-
-    db_path = tmp_path / "reports.db"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_type TEXT NOT NULL,
-                report_date TEXT NOT NULL,
-                target_name TEXT,
-                title TEXT NOT NULL,
-                broker TEXT NOT NULL,
-                file_name TEXT NOT NULL UNIQUE,
-                is_embedded INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-        conn.execute("CREATE TABLE parent_chunks (id TEXT PRIMARY KEY, content TEXT, file_name TEXT, metadata TEXT)")
-        conn.execute(
-            """
-            INSERT INTO reports
-                (report_type, report_date, target_name, title, broker, file_name, is_embedded)
-            VALUES
-                ('company', '2026-02-05', '삼성전자', 'HBM', '미래에셋증권', 'a.pdf', 1),
-                ('industry', '2026-02-05', '반도체', '업황', '미래에셋증권', 'c.pdf', 1),
-                ('company', ' 2026-02-06 12:34:56 ', 'SK하이닉스', 'DRAM', '하나증권', 'b.pdf', 0)
-            """
-        )
-        conn.execute("INSERT INTO parent_chunks VALUES ('p1', 'content', 'a.pdf', '{}')")
-
-    status = get_data_status(
-        save_dir=str(save_dir),
-        db_path=str(db_path),
-        faiss_dir=str(faiss_dir),
-    )
-
-    assert status["downloaded_pdfs"] == 1
-    assert status["db"]["total_reports"] == 3
-    assert status["db"]["embedded_reports"] == 2
-    assert status["db"]["pending_reports"] == 1
-    assert status["db"]["parent_chunks"] == 1
-    assert status["db"]["min_report_date"] == "2026-02-05"
-    assert status["db"]["max_report_date"] == "2026-02-06"
-    assert status["db"]["report_date_counts"] == {
-        "2026-02-05": 2,
-    }
-    assert status["db"]["report_date_type_counts"] == {
-        "2026-02-05": {
-            "company": 1,
-            "industry": 1,
-        },
-    }
-    assert status["vector_db"]["has_faiss_index"] is True
-    assert status["vector_db"]["total_size_bytes"] == 6
-    assert "SQLite 리포트: 3건" in format_status_text(status)
 
 
 def test_format_duration_uses_compact_operator_units():
@@ -180,47 +90,6 @@ def test_pending_cleanup_summary_tolerates_concurrent_file_disappearance(
     }
 
 
-def test_get_data_status_uses_native_membership_without_pickle_assumptions(tmp_path):
-    copied = tmp_path / "copied"
-    fixture = build_v1_fixture(copied)
-    data_root = tmp_path / "native data 한글"
-    bundle = seal_compatibility_bundle(copied, data_root)
-    result = convert_v1_seed(
-        copied,
-        data_root,
-        expected_hashes=fixture.artifact_hashes,
-        profile=fixture.embedding_profile(),
-        source_hashes=fixture.source_hashes,
-        compatibility_bundle_id=bundle.bundle_id,
-    )
-
-    status = get_data_status(
-        save_dir=str(data_root / "downloaded"),
-        db_path=str(data_root / "reports.db"),
-        faiss_dir=str(data_root / "legacy-vector-db"),
-    )
-
-    assert status["retrieval"]["mode"] == "native"
-    assert status["retrieval"]["write_epoch"] == 0
-    assert status["retrieval"]["membership_count"] == fixture.symbolic_n
-    assert "delta_generation" not in status["retrieval"]
-    assert "delta_segment_count" not in status["retrieval"]
-    assert status["vector_db"]["ntotal"] == fixture.symbolic_n
-    assert status["vector_db"]["has_faiss_index"] is True
-    assert status["vector_db"]["has_pickle_index"] is False
-    assert status["db"]["total_reports"] == 4
-    assert status["db"]["embedded_reports"] == 3
-    assert status["db"]["pending_reports"] == 1
-    assert Path(status["paths"]["db_path"]) == (
-        data_root / "retrieval" / "v2" / "catalog.sqlite3"
-    )
-    pending_rows = list_unembedded_reports(status["paths"]["db_path"])
-    assert [row["file_name"] for row in pending_rows] == [
-        fixture.file_names["excluded"]
-    ]
-    assert result.snapshot_id == status["retrieval"]["active_snapshot_id"]
-
-
 def test_native_status_includes_active_delta_membership_and_artifacts(
     tmp_path,
     monkeypatch,
@@ -266,25 +135,24 @@ def test_native_status_includes_active_delta_membership_and_artifacts(
     paths = SimpleNamespace(catalog=catalog, data_root=tmp_path)
     selection = SimpleNamespace(
         mode="native",
+        is_native=True,
         publication_generation=7,
         write_epoch=1,
         active_build_id="build-1",
         active_snapshot_id="snapshot-1",
         predecessor_snapshot_id=None,
-        v1_fallback_open=False,
-        compatibility_bundle_id=None,
         degraded=False,
         write_enabled=True,
     )
     monkeypatch.setattr(
         status_module,
         "_status_retrieval_paths",
-        lambda _db_path: (paths, tmp_path),
+        lambda _data_root: (paths, tmp_path),
     )
     monkeypatch.setattr(
         status_module,
         "inspect_runtime",
-        lambda _db_path, **_kwargs: selection,
+        lambda _data_root, **_kwargs: selection,
     )
 
     db, vector_db, retrieval = status_module._safe_native_info("unused.db")
@@ -321,7 +189,7 @@ def test_native_status_uses_build_manifest_instead_of_recomputing_active_views(
             "excluded": 0,
         },
         "exclusion_policy": {
-            "version": "test-v1",
+            "version": "test-native",
             "reason_codes": [],
         },
         "reports": [
@@ -399,25 +267,24 @@ def test_native_status_uses_build_manifest_instead_of_recomputing_active_views(
     paths = SimpleNamespace(catalog=catalog, data_root=tmp_path)
     selection = SimpleNamespace(
         mode="native",
+        is_native=True,
         publication_generation=7,
         write_epoch=1,
         active_build_id="build-1",
         active_snapshot_id="snapshot-1",
         predecessor_snapshot_id=None,
-        v1_fallback_open=False,
-        compatibility_bundle_id=None,
         degraded=False,
         write_enabled=True,
     )
     monkeypatch.setattr(
         status_module,
         "_status_retrieval_paths",
-        lambda _db_path: (paths, tmp_path),
+        lambda _data_root: (paths, tmp_path),
     )
     monkeypatch.setattr(
         status_module,
         "inspect_runtime",
-        lambda _db_path, **_kwargs: selection,
+        lambda _data_root, **_kwargs: selection,
     )
 
     statements: list[str] = []
@@ -498,12 +365,12 @@ def test_list_unembedded_reports_includes_ready_delta_failures_without_active_du
     monkeypatch.setattr(
         status_module,
         "_status_retrieval_paths",
-        lambda _db_path: (paths, tmp_path),
+        lambda _data_root: (paths, tmp_path),
     )
     monkeypatch.setattr(
         status_module,
         "inspect_runtime",
-        lambda _db_path, **_kwargs: SimpleNamespace(mode="native"),
+        lambda _data_root, **_kwargs: SimpleNamespace(mode="native"),
     )
 
     rows = list_unembedded_reports("unused.db")
@@ -513,94 +380,13 @@ def test_list_unembedded_reports_includes_ready_delta_failures_without_active_du
     assert rows[0]["embedding_last_error"].startswith("NativeSourceExtractionError")
 
 
-def test_status_never_downgrades_missing_native_authority_to_legacy(tmp_path):
-    db_path = tmp_path / "reports.db"
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE reports (
-                id INTEGER PRIMARY KEY,
-                report_type TEXT,
-                report_date TEXT,
-                target_name TEXT,
-                title TEXT,
-                broker TEXT,
-                file_name TEXT,
-                is_embedded INTEGER
-            )
-            """
-        )
-        connection.execute(
-            "INSERT INTO reports VALUES (1, 'company', '2026-07-16', "
-            "'stale', 'stale', 'stale', 'stale.pdf', 0)"
-        )
-    evidence = tmp_path / "retrieval" / "v2" / "evidence"
-    evidence.mkdir(parents=True)
-    (evidence / "native-authority.marker").write_text("present", encoding="utf-8")
-
-    status = get_data_status(
-        save_dir=str(tmp_path / "downloaded"),
-        db_path=str(db_path),
-        faiss_dir=str(tmp_path / "vector_db"),
-    )
+def test_status_reports_missing_native_authority_as_unavailable(tmp_path):
+    status = get_data_status(data_root=str(tmp_path))
 
     assert status["retrieval"]["mode"] == "unavailable"
     assert status["retrieval"]["write_enabled"] is False
-    assert "V2 recovery evidence" in status["retrieval"]["error"]
     assert status["db"]["total_reports"] == 0
-    assert list_unembedded_reports(str(db_path)) == []
-
-
-def test_list_unembedded_reports_returns_recent_pending_rows_and_safe_previews(tmp_path):
-    db_path = tmp_path / "reports.db"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_type TEXT NOT NULL,
-                report_date TEXT NOT NULL,
-                target_name TEXT,
-                title TEXT NOT NULL,
-                broker TEXT NOT NULL,
-                file_name TEXT NOT NULL UNIQUE,
-                is_embedded INTEGER NOT NULL DEFAULT 0,
-                embedding_last_error TEXT,
-                embedding_last_attempt_at TEXT,
-                embedding_extraction_engine TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO reports
-                (report_type, report_date, target_name, title, broker, file_name, is_embedded, embedding_last_error, embedding_last_attempt_at, embedding_extraction_engine)
-            VALUES
-                ('company', '2026-06-20', '삼성전자', '이미 처리됨', '미래에셋증권', 'embedded.pdf', 1, NULL, NULL, 'pymupdf'),
-                ('company', '2026-06-22', 'SK하이닉스', '2Q26 영업이익 전망', 'iM증권', 'sk_a.pdf', 0, NULL, NULL, NULL),
-                ('industry', '2026-06-23', '반도체', '업황 업데이트', '하나증권', 'semi.pdf', 0, 'FileNotFoundError: PDF missing', '2026-06-27T10:00:00', 'opendataloader'),
-                ('company', '2026-06-24', 'SK하이닉스', 'ADR 발행 관련 리포트', 'IBK투자증권', 'sk_b.pdf', 0, NULL, NULL, NULL)
-            """
-        )
-
-    rows = list_unembedded_reports(str(db_path), limit=2)
-    table_rows = build_unembedded_report_rows(rows)
-
-    assert [row["file_name"] for row in rows] == ["sk_b.pdf", "semi.pdf"]
-    assert table_rows[0] == {
-        "report_date": "2026-06-24",
-        "report_type": "company",
-        "target_name": "SK하이닉스",
-        "broker": "IBK투자증권",
-        "title": "ADR 발행 관련 리포트",
-        "file_name": "sk_b.pdf",
-        "embedding_extraction_engine": "-",
-        "embedding_last_error": "-",
-        "embedding_last_attempt_at": "-",
-    }
-    assert table_rows[1]["embedding_extraction_engine"] == "opendataloader"
-    assert table_rows[1]["embedding_last_error"] == "FileNotFoundError: PDF missing"
-    assert table_rows[1]["embedding_last_attempt_at"] == "2026-06-27T10:00:00"
+    assert list_unembedded_reports(str(tmp_path)) == []
 
 
 def test_list_unembedded_reports_maps_native_manifest_failure_to_management_row(
@@ -690,12 +476,12 @@ def test_list_unembedded_reports_maps_native_manifest_failure_to_management_row(
     monkeypatch.setattr(
         status_module,
         "retrieval_paths",
-        lambda _db_path: SimpleNamespace(catalog=catalog),
+        lambda _data_root: SimpleNamespace(catalog=catalog, data_root=tmp_path),
     )
     monkeypatch.setattr(
         status_module,
         "inspect_runtime",
-        lambda _db_path, **_kwargs: SimpleNamespace(mode="native"),
+        lambda _data_root, **_kwargs: SimpleNamespace(mode="native"),
     )
 
     rows = status_module.list_unembedded_reports("unused.db")
@@ -734,11 +520,9 @@ def test_assess_readiness_blocks_when_index_is_missing():
         "vector_db": {
             "exists": False,
             "has_faiss_index": False,
-            "has_pickle_index": False,
             "file_count": 0,
             "total_size_bytes": 0,
         },
-        "embedding_limit_active": False,
         "search_coverage_ratio": 0.0,
         "config": {},
         "paths": {},
@@ -752,7 +536,7 @@ def test_assess_readiness_blocks_when_index_is_missing():
     assert "Quick Start 준비 상태: 준비 필요" in format_readiness_text(status)
 
 
-def test_assess_readiness_warns_for_partial_embedding_and_pickle_index():
+def test_assess_readiness_warns_for_partial_native_embedding():
     status = {
         "downloaded_pdfs": 2,
         "db": {
@@ -767,11 +551,9 @@ def test_assess_readiness_warns_for_partial_embedding_and_pickle_index():
         "vector_db": {
             "exists": True,
             "has_faiss_index": True,
-            "has_pickle_index": True,
             "file_count": 2,
             "total_size_bytes": 16,
         },
-        "embedding_limit_active": True,
         "search_coverage_ratio": 0.5,
         "config": {},
         "paths": {},
@@ -782,7 +564,6 @@ def test_assess_readiness_warns_for_partial_embedding_and_pickle_index():
     assert readiness["level"] == "warning"
     assert readiness["label"] == "주의 필요"
     assert any("임베딩되지 않은 리포트" in message for message in readiness["messages"])
-    assert any("pickle 기반" in message for message in readiness["messages"])
 
 
 def test_build_crawler_env_passes_selected_categories():

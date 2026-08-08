@@ -31,7 +31,7 @@ echo      - PyMuPDF와 fallback이 모두 실패한 PDF는 실패 상태로 기�
 echo   3. 문서 수, 프로필, snapshot 무결성 검증
 echo   4. 성공한 경우에만 새 snapshot 활성화
 echo.
-echo 기존 data\reports.db와 data\downloaded PDF는 삭제하지 않습니다.
+echo DATA_ROOT의 현재 활성 snapshot과 원본 PDF는 삭제하지 않습니다.
 echo 실패하면 현재 활성 V2 snapshot이 계속 사용됩니다.
 echo 개별 PDF 파싱 실패는 관리 페이지에서 나중에 다시 시도할 수 있습니다.
 echo OpenRouter 임베딩 API 호출로 시간과 비용이 발생할 수 있습니다.

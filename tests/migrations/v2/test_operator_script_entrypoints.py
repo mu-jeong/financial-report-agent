@@ -16,18 +16,7 @@ pytestmark = pytest.mark.slow
     "relative_path",
     (
         "scripts/migrations/v2/migrate_v2_user.py",
-        "scripts/migrations/v2/migrate_v2_native.py",
-        "scripts/migrations/v2/run_v2_retrieval_benchmark.py",
-        "scripts/migrations/v2/analyze_v2_retrieval_benchmark.py",
-        "scripts/migrations/v2/run_v2_launcher_matrix.py",
-        "scripts/migrations/v2/run_v2_first_successor_race.py",
         "scripts/migrations/v2/rebuild_v2_successor.py",
-        "scripts/migrations/v2/run_v2_reader_parity.py",
-        "scripts/migrations/v2/run_v2_installed_validation.py",
-        "scripts/migrations/v2/create_v2_release_query.py",
-        "scripts/migrations/v2/analyze_v2_successor_compatibility.py",
-        "scripts/migrations/v2/assemble_v2_release_gate.py",
-        "scripts/migrations/v2/run_release_pytest.py",
     ),
 )
 def test_operator_script_can_bootstrap_repository_imports_from_any_directory(

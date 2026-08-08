@@ -24,7 +24,7 @@ from urllib.parse import quote
 import numpy as np
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
-from src.retrieval.bootstrap import RuntimeSelection, inspect_runtime
+from src.retrieval.bootstrap import RuntimeSelection
 from src.retrieval.identity import (
     EmbeddingProfile,
     assign_physical_ids,
@@ -138,7 +138,7 @@ class SourceFileSnapshot:
 
 @dataclass(frozen=True)
 class NativeBuildPlan:
-    base_snapshot_id: str
+    base_snapshot_id: str | None
     base_publication_generation: int
     base_write_epoch: int
     profile: EmbeddingProfile
@@ -193,7 +193,7 @@ class _ReusableSnapshot:
 
 
 def prepare_full_corpus_build(
-    legacy_db_path: str | Path,
+    data_root: str | Path,
     source_directory: str | Path,
     *,
     embeddings: EmbeddingsPort,
@@ -204,7 +204,6 @@ def prepare_full_corpus_build(
     fallback_extractor_name: str | None = None,
     use_parent_child: bool = True,
     single_chunk_size: int | None = None,
-    data_root: str | Path | None = None,
     extractor: ExtractorPort | None = None,
     metadata_parser: MetadataParser | None = None,
     metric: str = "l2",
@@ -222,19 +221,18 @@ def prepare_full_corpus_build(
 ) -> NativeBuildPlan | None:
     """Prepare one deterministic full-corpus successor entirely off path.
 
-    Epoch-zero planning requires the dedicated first-successor writer lease;
+    Greenfield planning requires the dedicated first-successor writer lease;
     ordinary updater entrypoints remain fail-closed until publication enables
     native writes.
     """
 
     selection = guard_before_retrieval_write(
-        legacy_db_path,
-        data_root=data_root,
+        data_root,
         allow_degraded_forward_recovery=allow_degraded_forward_recovery,
         first_successor_writer_lease=writer_lease,
     )
     if not selection.is_native:
-        raise NativeBuildError("a native epoch-zero seed is required before successor build")
+        raise NativeBuildError("native retrieval must be initialized before building")
     source_root = Path(source_directory).resolve(strict=True)
     if not source_root.is_dir() or source_root.is_symlink():
         raise NativeBuildError("source directory must be a real local directory")
@@ -285,6 +283,8 @@ def prepare_full_corpus_build(
     }
     if discovered_paths != inventory_paths:
         raise NativeBuildError("source corpus changed during discovery")
+    if selection.is_empty and not source_inventory and not deleted:
+        return None
     source_hashes = {
         source.canonical_relative_path: source.sha256 for source in source_inventory
     }
@@ -341,15 +341,6 @@ def prepare_full_corpus_build(
     if not source_records:
         raise NativeBuildError("full-corpus build discovered no source reports")
 
-    candidate_report_uids = {str(record["report_uid"]) for record in source_records}
-    if (
-        selection.write_epoch == 0
-        and not candidate_report_uids.difference(active_reports_by_path.values())
-    ):
-        raise NativeBuildError(
-            "first native successor must include at least one new logical corpus member"
-        )
-
     reports = tuple(
         CandidateReport(
             report_uid=record["report_uid"],
@@ -397,13 +388,13 @@ def prepare_full_corpus_build(
         )
 
     canary = (
-        _validate_same_space_canary(
+        _validate_active_space_canary(
             selection,
             embeddings,
             metric=metric,
             normalization=normalization,
         )
-        if selection.write_epoch == 0
+        if not selection.is_empty
         else None
     )
     extracted, extraction_failed_uids = _extract_source_records(
@@ -419,17 +410,6 @@ def prepare_full_corpus_build(
         deleted_paths=set(deleted),
         extraction_failed_uids=extraction_failed_uids,
     )
-    included_report_uids = {
-        str(record["report_uid"]) for record, _text in extracted
-    }
-    if (
-        selection.write_epoch == 0
-        and not included_report_uids.difference(active_reports_by_path.values())
-    ):
-        raise NativeBuildError(
-            "first native successor must include at least one new logical corpus member"
-        )
-
     provisional_parents, provisional_chunks, embedding_texts = _split_full_corpus(
         extracted,
         parent_chunk_size=parent_chunk_size,
@@ -445,7 +425,7 @@ def prepare_full_corpus_build(
     if vectors.ndim != 2 or vectors.shape[0] != len(provisional_chunks) or vectors.shape[1] <= 0:
         raise NativeBuildError("embedding result shape does not cover every candidate chunk")
     if canary is not None and vectors.shape[1] != canary.dimension:
-        raise NativeBuildError("successor vector dimension differs from the epoch-zero seed")
+        raise NativeBuildError("successor vector dimension differs from the active snapshot")
     if not np.isfinite(vectors).all():
         raise NativeBuildError("embedding result contains a non-finite vector")
     if normalization == "l2":
@@ -571,7 +551,7 @@ def prepare_full_corpus_build(
 
 
 def prepare_incremental_build(
-    legacy_db_path: str | Path,
+    data_root: str | Path,
     source_directory: str | Path,
     *,
     max_changed_reports: int | None = None,
@@ -589,7 +569,7 @@ def prepare_incremental_build(
         raise TypeError("incremental build controls are internal")
     skipped = frozenset(str(report_uid) for report_uid in skip_report_uids)
     return prepare_full_corpus_build(
-        legacy_db_path,
+        data_root,
         source_directory,
         **kwargs,
         _reuse_unchanged_vectors=True,
@@ -702,7 +682,7 @@ def _prepare_incremental_plan(
     )
 
     canary = (
-        _validate_same_space_canary(
+        _validate_active_space_canary(
             selection,
             embeddings,
             metric=metric,
@@ -963,7 +943,7 @@ def _finalize_native_build_plan(
         expected=source_inventory,
     )
     return NativeBuildPlan(
-        base_snapshot_id=str(selection.active_snapshot_id),
+        base_snapshot_id=selection.active_snapshot_id,
         base_publication_generation=selection.publication_generation,
         base_write_epoch=selection.write_epoch,
         profile=profile,
@@ -985,6 +965,90 @@ def _finalize_native_build_plan(
         build_mode=build_mode,
         attempted_report_uids=attempted_report_uids,
         deferred_report_count=deferred_report_count,
+    )
+
+
+def prepare_imported_legacy_build(
+    data_root: str | Path,
+    source_directory: str | Path,
+    *,
+    profile: EmbeddingProfile,
+    reports: tuple[CandidateReport, ...],
+    parents: tuple[CandidateParent, ...],
+    chunks: tuple[CandidateChunk, ...],
+    manifest: CorpusManifest,
+    vectors_by_physical_id: np.ndarray,
+    writer_lease: WriterLease,
+    canonical_source_prefix: str = "downloaded",
+) -> NativeBuildPlan:
+    """Plan the first native publication from already-embedded V1 vectors.
+
+    This boundary deliberately accepts only fully reconstructed native records
+    and a float32 vector matrix.  It never opens PDFs, invokes an extractor, or
+    calls an embedding provider.  V1 serialization knowledge remains confined
+    to ``src.migrations.v2``.
+    """
+
+    root = Path(data_root).resolve(strict=True)
+    selection = guard_before_retrieval_write(
+        root,
+        first_successor_writer_lease=writer_lease,
+    )
+    if not selection.is_empty:
+        raise NativeBuildError("V1 import requires an exact empty native runtime")
+    if not isinstance(profile, EmbeddingProfile):
+        raise NativeBuildError("V1 import requires a validated embedding profile")
+    if any(not isinstance(item, CandidateReport) for item in reports):
+        raise NativeBuildError("V1 import reports are invalid")
+    if any(not isinstance(item, CandidateParent) for item in parents):
+        raise NativeBuildError("V1 import parents are invalid")
+    if any(not isinstance(item, CandidateChunk) for item in chunks):
+        raise NativeBuildError("V1 import chunks are invalid")
+    if not reports or not parents or not chunks:
+        raise NativeBuildError("V1 import cannot publish an empty vector corpus")
+
+    source_root = Path(source_directory).resolve(strict=True)
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise NativeBuildError("V1 source directory must be a real local directory")
+    normalized_prefix = normalize_relative_path(canonical_source_prefix)
+    source_inventory = _capture_source_inventory(
+        source_root,
+        canonical_source_prefix=normalized_prefix,
+        ignored_paths=set(),
+    )
+    inventory_hashes = {
+        item.canonical_relative_path: item.sha256 for item in source_inventory
+    }
+    report_hashes = {
+        report.canonical_relative_path: report.source_sha256 for report in reports
+    }
+    if report_hashes != inventory_hashes:
+        raise NativeBuildError(
+            "V1 report catalog does not exactly match the current source PDF inventory"
+        )
+    if any(report.existing_report_id is not None for report in reports):
+        raise NativeBuildError("first V1 import cannot reference existing native reports")
+
+    vectors = np.ascontiguousarray(vectors_by_physical_id, dtype=np.float32)
+    if vectors.shape != (len(chunks), profile.dimension):
+        raise NativeBuildError("V1 vector payload shape is inconsistent")
+    if not np.isfinite(vectors).all():
+        raise NativeBuildError("V1 vector payload contains a non-finite value")
+    vectors.setflags(write=False)
+    return _finalize_native_build_plan(
+        selection=selection,
+        profile=profile,
+        reports=reports,
+        parents=parents,
+        chunks=chunks,
+        manifest=manifest,
+        vectors_by_physical_id=vectors,
+        deleted_relative_paths=(),
+        source_root=source_root,
+        canonical_source_prefix=normalized_prefix,
+        source_inventory=source_inventory,
+        same_space_canary=None,
+        build_mode="full",
     )
 
 
@@ -1159,17 +1223,17 @@ def publish_candidate(
 
 
 def execute_full_corpus_successor(
-    legacy_db_path: str | Path,
+    data_root: str | Path,
     source_directory: str | Path,
     **kwargs: Any,
 ) -> tuple[CandidateResult, PublicationOutcome]:
     """Prepare, materialize, and publish one full-corpus native successor."""
 
-    root = Path(kwargs.get("data_root") or Path(legacy_db_path).parent).resolve(strict=True)
+    root = Path(data_root).resolve(strict=True)
     with NativeWriterLock(root) as writer_lease:
         StartupReconciler(root).reconcile(writer_lease=writer_lease)
         plan = prepare_full_corpus_build(
-            legacy_db_path,
+            root,
             source_directory,
             **{
                 **kwargs,
@@ -1188,18 +1252,18 @@ def execute_full_corpus_successor(
 
 
 def execute_incremental_update(
-    legacy_db_path: str | Path,
+    data_root: str | Path,
     source_directory: str | Path,
     **kwargs: Any,
 ) -> tuple[CandidateResult, PublicationOutcome] | None:
     """Publish changed reports while carrying unchanged chunks and vectors forward."""
 
-    root = Path(kwargs.get("data_root") or Path(legacy_db_path).parent).resolve(strict=True)
+    root = Path(data_root).resolve(strict=True)
     with NativeWriterLock(root) as writer_lease:
         StartupReconciler(root).reconcile(writer_lease=writer_lease)
         _reject_pending_continuous_update(root)
         plan = prepare_incremental_build(
-            legacy_db_path,
+            root,
             source_directory,
             **{
                 **kwargs,
@@ -1218,7 +1282,7 @@ def execute_incremental_update(
 
 
 def _reject_pending_continuous_update(root: Path) -> None:
-    """Prevent the legacy snapshot-only writer from bypassing a ready delta chain."""
+    """Prevent snapshot publication from bypassing a ready delta chain."""
 
     catalog = root / "retrieval" / "v2" / "catalog.sqlite3"
     connection = _open_read_only_catalog(catalog)
@@ -1254,54 +1318,14 @@ def _reject_pending_continuous_update(root: Path) -> None:
         )
 
 
-def validate_epoch_zero_same_space_canary(
-    legacy_db_path: str | Path,
-    *,
-    embeddings: EmbeddingsPort,
-    data_root: str | Path | None = None,
-    metric: str = "l2",
-    normalization: str = "none",
-) -> SameSpaceCanary:
-    """Prove the configured provider still emits the imported V1 vector space.
-
-    This read-only entrypoint lets an off-path migration validate its converted
-    epoch-zero seed before that seed becomes visible to any supported launcher.
-    The full successor builder performs the same check again before its first
-    publication.
-    """
-
-    selection = inspect_runtime(
-        legacy_db_path,
-        data_root=data_root,
-        validate_snapshot=True,
-    )
-    if (
-        not selection.is_native
-        or selection.write_epoch != 0
-        or not selection.v1_fallback_open
-        or selection.degraded
-        or selection.write_enabled
-        or not selection.active_snapshot_id
-    ):
-        raise NativeBuildError(
-            "same-space canary requires a healthy epoch-zero native seed"
-        )
-    return _validate_same_space_canary(
-        selection,
-        embeddings,
-        metric=metric,
-        normalization=normalization,
-    )
-
-
-def _validate_same_space_canary(
+def _validate_active_space_canary(
     selection: RuntimeSelection,
     embeddings: EmbeddingsPort,
     *,
     metric: str,
     normalization: str,
 ) -> SameSpaceCanary:
-    """Prove the first native writer embeds in the converted seed's space."""
+    """Prove the configured embedder still matches the active vector space."""
 
     connection = _open_read_only_catalog(selection.paths.catalog)
     connection.row_factory = sqlite3.Row
@@ -1320,15 +1344,15 @@ def _validate_same_space_canary(
             (selection.active_snapshot_id,),
         ).fetchone()
         if descriptor_row is None:
-            raise NativeBuildError("epoch-zero seed descriptor is missing")
+            raise NativeBuildError("active snapshot descriptor is missing")
         if descriptor_row[4] != metric:
-            raise NativeBuildError("successor metric differs from the epoch-zero seed")
+            raise NativeBuildError("successor metric differs from the active snapshot")
         expected_normalization = "l2" if int(descriptor_row[6]) else "none"
         if expected_normalization != normalization:
-            raise NativeBuildError("successor normalization differs from the epoch-zero seed")
+            raise NativeBuildError("successor normalization differs from the active snapshot")
         sample_size = min(64, int(descriptor_row[5]))
         if sample_size <= 0:
-            raise NativeBuildError("epoch-zero seed contains no canary vectors")
+            raise NativeBuildError("active snapshot contains no canary vectors")
         rows = connection.execute(
             """
             SELECT membership.faiss_id, parent.content, chunk.span_start,
@@ -1348,7 +1372,7 @@ def _validate_same_space_canary(
     finally:
         connection.close()
     if len(rows) != sample_size:
-        raise NativeBuildError("epoch-zero canary membership is incomplete")
+        raise NativeBuildError("active snapshot canary membership is incomplete")
 
     prefix_template = str(descriptor_row[7])
     canary_texts: list[str] = []
@@ -1357,7 +1381,7 @@ def _validate_same_space_canary(
         content = str(row[1])
         start, end = int(row[2]), int(row[3])
         if start < 0 or end <= start or end > len(content):
-            raise NativeBuildError("epoch-zero canary contains an invalid child span")
+            raise NativeBuildError("active snapshot canary contains an invalid child span")
         metadata = {
             "target_name": row[4],
             "title": row[5],
@@ -1583,6 +1607,10 @@ def _read_catalog_sources(
             str(row[0]): int(row[1])
             for row in connection.execute("SELECT report_uid, report_id FROM reports")
         }
+        if selection.is_empty:
+            if active_reports or active_report_objects or existing:
+                raise NativeBuildError("empty native runtime contains report rows")
+            return {}, {}, {}, frozenset()
         manifest_row = connection.execute(
             """
             SELECT source_manifest_json
@@ -1806,7 +1834,7 @@ def _validate_incremental_profile(
         fallback_engine=fallback_extractor_name,
         allow_custom=True,
     )
-    accepted_extractors = {
+    accepted_profiles = {
         configured_profile,
         format_legacy_import_extraction_profile(
             extractor_name,
@@ -1815,7 +1843,7 @@ def _validate_incremental_profile(
             allow_custom=True,
         ),
     }
-    if profile.extractor not in accepted_extractors:
+    if profile.extractor not in accepted_profiles:
         raise NativeBuildError(
             "incremental extractor differs from the active embedding profile: "
             f"active={profile.extractor}, requested={configured_profile}; "
@@ -2036,7 +2064,7 @@ def _default_extractor(
     allow_fallback: bool = True,
     fallback_engine: str | None = _DEFAULT_FALLBACK_ENGINE,
 ) -> Any:
-    """Extract with the explicit policy; ``None`` retains legacy PyMuPDF fallback."""
+    """Extract with the explicit policy; ``None`` retains the PyMuPDF default."""
 
     from src.core.pdf_extraction import extract_pdf_text
 
@@ -2106,7 +2134,7 @@ def format_legacy_import_extraction_profile(
     fallback_engine: str | None,
     allow_custom: bool = False,
 ) -> str:
-    """Fingerprint the exact policy permitted for post-migration writes."""
+    """Bind a V1 import to the exact extraction policy used by later writes."""
 
     configured = format_extraction_profile(
         engine,
@@ -2114,7 +2142,7 @@ def format_legacy_import_extraction_profile(
         fallback_engine=fallback_engine,
         allow_custom=allow_custom,
     )
-    return f"legacy-v1-import|configured={configured}|unattested"
+    return f"legacy-v1-import|configured={configured}"
 
 
 def parse_extraction_profile(
@@ -2122,7 +2150,7 @@ def parse_extraction_profile(
     *,
     allow_custom: bool,
 ) -> tuple[str, str | None]:
-    """Parse and canonicalize one persisted non-migration extraction policy."""
+    """Parse and canonicalize one persisted extraction policy."""
 
     raw = str(profile or "").strip().lower()
     primary_raw, separator, fallback_raw = raw.partition("|fallback=")
@@ -2352,7 +2380,7 @@ def _assert_base_runtime(connection: sqlite3.Connection, plan: NativeBuildPlan) 
     row = connection.execute(
         """
         SELECT active_snapshot_id, publication_generation, write_epoch,
-               degraded, write_enabled, v1_fallback_open
+               degraded, write_enabled
         FROM retrieval_runtime WHERE runtime_id = 1
         """
     ).fetchone()
@@ -2366,13 +2394,11 @@ def _assert_base_runtime(connection: sqlite3.Connection, plan: NativeBuildPlan) 
         raise NativeBuildError("active runtime changed while the candidate was built")
     degraded = bool(row[3])
     write_enabled = bool(row[4])
-    fallback_open = bool(row[5])
     if plan.forward_recovery:
         if (
             plan.base_write_epoch <= 0
             or not degraded
             or write_enabled
-            or fallback_open
         ):
             raise NativeBuildError("native runtime no longer permits forward recovery")
     elif degraded or (plan.base_write_epoch > 0 and not write_enabled):
@@ -2817,6 +2843,9 @@ def _sha256_file(path: Path) -> str:
 
 
 __all__ = [
+    "CandidateChunk",
+    "CandidateParent",
+    "CandidateReport",
     "CandidateResult",
     "DEFAULT_INCREMENTAL_REPORT_BATCH_SIZE",
     "NativeBuildError",
@@ -2825,9 +2854,10 @@ __all__ = [
     "SourceFileSnapshot",
     "execute_full_corpus_successor",
     "execute_incremental_update",
+    "format_legacy_import_extraction_profile",
     "materialize_candidate",
     "prepare_full_corpus_build",
+    "prepare_imported_legacy_build",
     "prepare_incremental_build",
     "publish_candidate",
-    "validate_epoch_zero_same_space_canary",
 ]

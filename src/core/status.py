@@ -2,7 +2,7 @@
 
 The functions in this module are intentionally read-only. They are used by the
 CLI, Streamlit UI, and tests to make the current local data state visible
-without mutating the SQLite DB or FAISS index.
+without mutating the Native V2 catalog or vector snapshots.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import sqlite3
 import stat
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 from src.configs import config
 from src.retrieval.bootstrap import (
@@ -24,14 +25,12 @@ from src.retrieval.bootstrap import (
 )
 from src.retrieval.delta_schema import delta_schema_installed
 
-DB_PATH = config.DB_PATH
+DATA_ROOT = config.DATA_ROOT
 EMBEDDING_MODEL = config.EMBEDDING_MODEL
 EXTRACTION_ENGINE = config.EXTRACTION_ENGINE
-FAISS_DIR = config.FAISS_DIR
 GENERATION_MODEL = config.GENERATION_MODEL
 SAVE_DIR = config.SAVE_DIR
 SEARCH_TOP_K = config.SEARCH_TOP_K
-TEST_LIMIT = config.TEST_LIMIT
 UNEMBEDDED_EXTRACTION_ENGINE = getattr(config, "UNEMBEDDED_EXTRACTION_ENGINE", "")
 USE_PARENT_CHILD = config.USE_PARENT_CHILD
 USE_RERANKER = config.USE_RERANKER
@@ -49,151 +48,13 @@ def _safe_count_pdfs(save_dir: str) -> int:
         )
 
 
-def _safe_vector_info(faiss_dir: str) -> dict[str, Any]:
-    path = Path(faiss_dir)
-    files: list[dict[str, Any]] = []
-    total_size = 0
-
-    if path.exists():
-        for child in sorted(path.iterdir()):
-            if child.is_file():
-                size = child.stat().st_size
-                files.append({"name": child.name, "size_bytes": size})
-                total_size += size
-
-    return {
-        "exists": path.exists(),
-        "file_count": len(files),
-        "total_size_bytes": total_size,
-        "files": files,
-        "has_faiss_index": (path / "index.faiss").exists(),
-        "has_pickle_index": (path / "index.pkl").exists(),
-    }
-
-
 def _status_retrieval_paths(
-    db_path: str | Path,
-) -> tuple[RetrievalPaths, Path | None]:
-    """Resolve either a V1 anchor or the canonical V2 catalog path.
+    data_root: str | Path,
+) -> tuple[RetrievalPaths, Path]:
+    """Resolve Native V2 paths from the canonical data root."""
 
-    ``get_data_status`` exposes the active catalog as ``paths.db_path`` in
-    native mode. Callers may pass that value back into a status helper, so it
-    must not be interpreted as though its parent were the data root.
-    """
-    absolute = Path(
-        os.path.abspath(os.path.expanduser(str(db_path)))
-    )
-    is_canonical_catalog = (
-        absolute.name.casefold() == "catalog.sqlite3"
-        and absolute.parent.name.casefold() == "v2"
-        and absolute.parent.parent.name.casefold() == "retrieval"
-    )
-    data_root = absolute.parents[2] if is_canonical_catalog else None
-    paths = (
-        retrieval_paths(db_path, data_root=data_root)
-        if data_root is not None
-        else retrieval_paths(db_path)
-    )
-    return paths, data_root
-
-
-def _safe_db_info(db_path: str) -> dict[str, Any]:
-    path = Path(db_path)
-    info: dict[str, Any] = {
-        "exists": path.exists(),
-        "size_bytes": path.stat().st_size if path.exists() else 0,
-        "total_reports": 0,
-        "embedded_reports": 0,
-        "pending_reports": 0,
-        "parent_chunks": 0,
-        "min_report_date": None,
-        "max_report_date": None,
-        "report_date_counts": {},
-        "report_date_type_counts": {},
-        "report_types": {},
-        "error": None,
-    }
-    if not path.exists():
-        return info
-
-    try:
-        db_uri = f"file:{os.path.abspath(db_path)}?mode=ro"
-        with sqlite3.connect(db_uri, uri=True) as conn:
-            conn.row_factory = sqlite3.Row
-
-            row = conn.execute(
-                """
-                SELECT
-                    COUNT(*) AS total_reports,
-                    COALESCE(SUM(CASE WHEN is_embedded = 1 THEN 1 ELSE 0 END), 0) AS embedded_reports,
-                    MIN(CASE WHEN report_date IS NOT NULL AND TRIM(report_date) != '' THEN SUBSTR(TRIM(report_date), 1, 10) END) AS min_report_date,
-                    MAX(CASE WHEN report_date IS NOT NULL AND TRIM(report_date) != '' THEN SUBSTR(TRIM(report_date), 1, 10) END) AS max_report_date
-                FROM reports
-                """
-            ).fetchone()
-            if row:
-                total = int(row["total_reports"] or 0)
-                embedded = int(row["embedded_reports"] or 0)
-                info.update(
-                    {
-                        "total_reports": total,
-                        "embedded_reports": embedded,
-                        "pending_reports": max(total - embedded, 0),
-                        "min_report_date": row["min_report_date"],
-                        "max_report_date": row["max_report_date"],
-                    }
-                )
-
-            try:
-                parent_row = conn.execute("SELECT COUNT(*) AS count FROM parent_chunks").fetchone()
-                info["parent_chunks"] = int(parent_row["count"] if parent_row else 0)
-            except sqlite3.Error:
-                info["parent_chunks"] = 0
-
-            report_types = conn.execute(
-                "SELECT report_type, COUNT(*) AS count FROM reports GROUP BY report_type ORDER BY report_type"
-            ).fetchall()
-            info["report_types"] = {row["report_type"]: int(row["count"]) for row in report_types}
-
-            report_dates = conn.execute(
-                """
-                SELECT SUBSTR(TRIM(report_date), 1, 10) AS report_date, COUNT(*) AS count
-                FROM reports
-                WHERE report_date IS NOT NULL AND TRIM(report_date) != ''
-                  AND is_embedded = 1
-                GROUP BY SUBSTR(TRIM(report_date), 1, 10)
-                ORDER BY SUBSTR(TRIM(report_date), 1, 10)
-                """
-            ).fetchall()
-            info["report_date_counts"] = {
-                row["report_date"]: int(row["count"])
-                for row in report_dates
-            }
-
-            report_date_types = conn.execute(
-                """
-                SELECT
-                    SUBSTR(TRIM(report_date), 1, 10) AS report_date,
-                    TRIM(report_type) AS report_type,
-                    COUNT(*) AS count
-                FROM reports
-                WHERE report_date IS NOT NULL AND TRIM(report_date) != ''
-                  AND report_type IS NOT NULL AND TRIM(report_type) != ''
-                  AND is_embedded = 1
-                GROUP BY SUBSTR(TRIM(report_date), 1, 10), TRIM(report_type)
-                ORDER BY SUBSTR(TRIM(report_date), 1, 10), TRIM(report_type)
-                """
-            ).fetchall()
-            date_type_counts: dict[str, dict[str, int]] = {}
-            for row in report_date_types:
-                date_key = row["report_date"]
-                type_key = row["report_type"]
-                date_type_counts.setdefault(date_key, {})[type_key] = int(row["count"])
-            info["report_date_type_counts"] = date_type_counts
-    except sqlite3.Error as exc:
-        info["error"] = str(exc)
-
-    return info
+    paths = retrieval_paths(data_root)
+    return paths, paths.data_root
 
 
 def _native_delta_status_from_manifest(
@@ -436,22 +297,24 @@ def _native_delta_status_from_manifest(
 
 
 def _safe_native_info(
-    db_path: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
-    paths, data_root = _status_retrieval_paths(db_path)
+    data_root: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    paths, _ = _status_retrieval_paths(data_root)
     try:
         # The background search-engine warmup owns full FAISS validation.
         # Sidebar status needs catalog metadata only and must remain cheap.
         selection = inspect_runtime(
-            db_path,
-            data_root=data_root,
+            data_root,
             validate_snapshot=False,
             catalog_validation="read",
         )
     except Exception as exc:
         return _unavailable_native_info(paths, exc)
-    if selection.mode == "legacy_v1":
-        return None
+    if not selection.is_native:
+        return _unavailable_native_info(
+            paths,
+            RetrievalBootstrapError("Native V2 retrieval is not initialized"),
+        )
     db = {
         "exists": True,
         "size_bytes": paths.catalog.stat().st_size,
@@ -468,6 +331,7 @@ def _safe_native_info(
     }
     retrieval: dict[str, Any] = {
         "mode": "native",
+        "initialization_state": getattr(selection, "initialization_state", "ready"),
         "catalog_path": str(paths.catalog),
         "schema_version": None,
         "publication_generation": None,
@@ -475,8 +339,6 @@ def _safe_native_info(
         "active_build_id": None,
         "active_snapshot_id": None,
         "predecessor_snapshot_id": None,
-        "v1_fallback_open": None,
-        "compatibility_bundle_id": None,
         "degraded": None,
         "write_enabled": None,
         "membership_count": 0,
@@ -491,8 +353,6 @@ def _safe_native_info(
         "total_size_bytes": 0,
         "files": [],
         "has_faiss_index": False,
-        "has_pickle_index": False,
-        "legacy_pickle_bridge": False,
         "snapshot_id": None,
         "ntotal": 0,
     }
@@ -500,18 +360,24 @@ def _safe_native_info(
         retrieval.update(
             {
                 "mode": selection.mode,
+                "initialization_state": getattr(
+                    selection,
+                    "initialization_state",
+                    "ready",
+                ),
                 "publication_generation": selection.publication_generation,
                 "write_epoch": selection.write_epoch,
                 "active_build_id": selection.active_build_id,
                 "active_snapshot_id": selection.active_snapshot_id,
                 "predecessor_snapshot_id": selection.predecessor_snapshot_id,
-                "v1_fallback_open": selection.v1_fallback_open,
-                "compatibility_bundle_id": selection.compatibility_bundle_id,
                 "degraded": selection.degraded,
                 "write_enabled": selection.write_enabled,
             }
         )
-        connection = sqlite3.connect(paths.catalog)
+        catalog_uri = (
+            f"file:{quote(paths.catalog.resolve().as_posix(), safe='/:')}?mode=ro"
+        )
+        connection = sqlite3.connect(catalog_uri, uri=True)
         connection.row_factory = sqlite3.Row
         try:
             has_delta_schema = delta_schema_installed(connection)
@@ -668,8 +534,7 @@ def _safe_native_info(
                             if snapshot_path.is_file()
                             else []
                         ),
-                        "has_faiss_index": selection.mode == "native" and snapshot_path.is_file(),
-                        "legacy_pickle_bridge": selection.mode == "epoch_zero_compatibility",
+                        "has_faiss_index": snapshot_path.is_file(),
                         "snapshot_id": selection.active_snapshot_id,
                         "ntotal": int(snapshot["ntotal"]),
                     }
@@ -748,31 +613,6 @@ def _safe_native_info(
                             )
                             vector_db["file_count"] += 1
                             vector_db["total_size_bytes"] += artifact_size
-            if selection.mode == "epoch_zero_compatibility":
-                bundle = (
-                    paths.data_root
-                    / "retrieval"
-                    / "compat"
-                    / "v1"
-                    / str(selection.compatibility_bundle_id)
-                )
-                compat_index = bundle / "index.faiss"
-                size = compat_index.stat().st_size if compat_index.is_file() else 0
-                vector_db.update(
-                    {
-                        "exists": bundle.is_dir(),
-                        "file_count": int(compat_index.is_file()),
-                        "total_size_bytes": size,
-                        "files": (
-                            [{"name": "compat/index.faiss", "size_bytes": size}]
-                            if compat_index.is_file()
-                            else []
-                        ),
-                        "has_faiss_index": compat_index.is_file(),
-                        "has_pickle_index": False,
-                        "legacy_pickle_bridge": True,
-                    }
-                )
         finally:
             connection.close()
     except Exception as exc:
@@ -901,13 +741,12 @@ def _unavailable_native_info(
         "total_size_bytes": 0,
         "files": [],
         "has_faiss_index": False,
-        "has_pickle_index": False,
-        "legacy_pickle_bridge": False,
         "snapshot_id": None,
         "ntotal": 0,
     }
     retrieval = {
         "mode": "unavailable",
+        "initialization_state": "unavailable",
         "catalog_path": str(paths.catalog),
         "schema_version": None,
         "publication_generation": None,
@@ -915,8 +754,6 @@ def _unavailable_native_info(
         "active_build_id": None,
         "active_snapshot_id": None,
         "predecessor_snapshot_id": None,
-        "v1_fallback_open": None,
-        "compatibility_bundle_id": None,
         "degraded": True,
         "write_enabled": False,
         "membership_count": 0,
@@ -928,25 +765,27 @@ def _unavailable_native_info(
     return db, vector_db, retrieval
 
 
-def _reports_columns(conn: sqlite3.Connection) -> set[str]:
-    return {row["name"] for row in conn.execute("PRAGMA table_info(reports)").fetchall()}
-
-
-def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list[dict[str, Any]]:
-    """Return recent reports that exist in SQLite but are not embedded yet."""
-    native_paths, data_root = _status_retrieval_paths(db_path)
+def list_unembedded_reports(
+    data_root: str = DATA_ROOT,
+    *,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Return recent reports excluded from the active Native V2 index."""
+    native_paths, _ = _status_retrieval_paths(data_root)
     try:
         selection = inspect_runtime(
-            db_path,
-            data_root=data_root,
+            data_root,
             validate_snapshot=False,
             catalog_validation="read",
         )
     except RetrievalBootstrapError:
         return []
-    if selection.mode != "legacy_v1":
+    if selection.mode == "native" and not getattr(selection, "is_empty", False):
         safe_limit = max(1, int(limit or 1))
-        connection = sqlite3.connect(native_paths.catalog)
+        catalog_uri = (
+            f"file:{quote(native_paths.catalog.resolve().as_posix(), safe='/:')}?mode=ro"
+        )
+        connection = sqlite3.connect(catalog_uri, uri=True)
         connection.row_factory = sqlite3.Row
         try:
             rows = list(
@@ -986,10 +825,8 @@ def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list
                     WHERE runtime.runtime_id = 1
                       AND active.report_uid IS NULL
                       AND json_extract(decision.value, '$.status') = 'excluded'
-                      AND json_extract(decision.value, '$.reason_code') IN (
-                          'legacy_not_vectorized',
-                          'source-extraction-failed'
-                      )
+                      AND json_extract(decision.value, '$.reason_code')
+                          = 'source-extraction-failed'
                     ORDER BY report.report_date DESC, report.report_id DESC
                     LIMIT ?
                     """,
@@ -1063,38 +900,7 @@ def list_unembedded_reports(db_path: str = DB_PATH, *, limit: int = 200) -> list
             }
             for row in rows
         ]
-    path = Path(db_path)
-    if not path.exists():
-        return []
-    safe_limit = max(1, int(limit or 1))
-    db_uri = f"file:{os.path.abspath(db_path)}?mode=ro"
-    with sqlite3.connect(db_uri, uri=True) as conn:
-        conn.row_factory = sqlite3.Row
-        columns = _reports_columns(conn)
-        error_expr = "TRIM(embedding_last_error)" if "embedding_last_error" in columns else "NULL"
-        attempted_expr = "TRIM(embedding_last_attempt_at)" if "embedding_last_attempt_at" in columns else "NULL"
-        engine_expr = "TRIM(embedding_extraction_engine)" if "embedding_extraction_engine" in columns else "NULL"
-        rows = conn.execute(
-            f"""
-            SELECT
-                id,
-                SUBSTR(TRIM(report_date), 1, 10) AS report_date,
-                TRIM(report_type) AS report_type,
-                TRIM(target_name) AS target_name,
-                TRIM(title) AS title,
-                TRIM(broker) AS broker,
-                TRIM(file_name) AS file_name,
-                {engine_expr} AS embedding_extraction_engine,
-                {error_expr} AS embedding_last_error,
-                {attempted_expr} AS embedding_last_attempt_at
-            FROM reports
-            WHERE COALESCE(is_embedded, 0) = 0
-            ORDER BY SUBSTR(TRIM(report_date), 1, 10) DESC, id DESC
-            LIMIT ?
-            """,
-            (safe_limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return []
 
 
 def _preview_text(value: Any, max_chars: int = 120) -> str:
@@ -1125,35 +931,14 @@ def build_unembedded_report_rows(reports: list[dict[str, Any]]) -> list[dict[str
 def get_data_status(
     *,
     save_dir: str = SAVE_DIR,
-    db_path: str = DB_PATH,
-    faiss_dir: str = FAISS_DIR,
-    _native_only: bool = False,
+    data_root: str = DATA_ROOT,
 ) -> dict[str, Any]:
-    """Return a read-only snapshot of local data, index, and config state."""
-    native = _safe_native_info(db_path)
-    if native is None:
-        if _native_only:
-            paths, _ = _status_retrieval_paths(db_path)
-            db, vector_db, retrieval = _unavailable_native_info(
-                paths,
-                RuntimeError("Native V2 retrieval status is unavailable"),
-            )
-            effective_db_path = str(paths.catalog)
-            effective_faiss_dir = str(paths.v2_root / "snapshots")
-        else:
-            db = _safe_db_info(db_path)
-            vector_db = _safe_vector_info(faiss_dir)
-            retrieval = {"mode": "legacy_v1"}
-            effective_db_path = db_path
-            effective_faiss_dir = faiss_dir
-    else:
-        db, vector_db, retrieval = native
-        paths, _ = _status_retrieval_paths(db_path)
-        effective_db_path = str(paths.catalog)
-        effective_faiss_dir = str(paths.v2_root / "snapshots")
+    """Return a Native V2-only, read-only data and configuration snapshot."""
+
+    db, vector_db, retrieval = _safe_native_info(data_root)
+    paths, _ = _status_retrieval_paths(data_root)
     downloaded_pdfs = _safe_count_pdfs(save_dir)
 
-    embedding_limit_active = bool(TEST_LIMIT and TEST_LIMIT > 0)
     search_coverage_ratio = (
         db["embedded_reports"] / db["total_reports"]
         if db.get("total_reports")
@@ -1163,8 +948,9 @@ def get_data_status(
     return {
         "paths": {
             "save_dir": save_dir,
-            "db_path": effective_db_path,
-            "faiss_dir": effective_faiss_dir,
+            "data_root": str(paths.data_root),
+            "catalog_path": str(paths.catalog),
+            "snapshot_root": str(paths.v2_root / "snapshots"),
         },
         "downloaded_pdfs": downloaded_pdfs,
         "db": db,
@@ -1173,14 +959,12 @@ def get_data_status(
         "config": {
             "generation_model": GENERATION_MODEL,
             "embedding_model": EMBEDDING_MODEL,
-            "test_limit": TEST_LIMIT,
             "search_top_k": SEARCH_TOP_K,
             "use_reranker": USE_RERANKER,
             "use_parent_child": USE_PARENT_CHILD,
             "extraction_engine": EXTRACTION_ENGINE,
             "unembedded_extraction_engine": UNEMBEDDED_EXTRACTION_ENGINE,
         },
-        "embedding_limit_active": embedding_limit_active,
         "search_coverage_ratio": search_coverage_ratio,
     }
 
@@ -1188,14 +972,13 @@ def get_data_status(
 def get_native_v2_data_status(
     *,
     save_dir: str = SAVE_DIR,
-    db_path: str = DB_PATH,
+    data_root: str = DATA_ROOT,
 ) -> dict[str, Any]:
-    """Return Monitoring status without reading legacy DB/vector artifacts."""
+    """Return the Native V2 monitoring status."""
 
     return get_data_status(
         save_dir=save_dir,
-        db_path=db_path,
-        _native_only=True,
+        data_root=data_root,
     )
 
 
@@ -1232,7 +1015,7 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
     vector_db = status["vector_db"]
     config = status["config"]
     ratio = status["search_coverage_ratio"] * 100
-    retrieval = status.get("retrieval") or {"mode": "legacy_v1"}
+    retrieval = status.get("retrieval") or {"mode": "unavailable"}
 
     lines = [
         "Finance LLM 데이터 상태",
@@ -1253,7 +1036,6 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
         ),
         (
             "현재 설정: "
-            f"TEST_LIMIT={config['test_limit']}, "
             f"SEARCH_TOP_K={config['search_top_k']}, "
             f"RERANKER={config['use_reranker']}, "
             f"PARENT_CHILD={config['use_parent_child']}, "
@@ -1262,7 +1044,7 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
         f"모델: generation={config['generation_model']}, embedding={config['embedding_model']}",
     ]
 
-    if retrieval.get("mode") != "legacy_v1":
+    if retrieval.get("mode") == "native":
         lines.extend(
             [
                 (
@@ -1281,11 +1063,6 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
                 ),
             ]
         )
-        if retrieval.get("mode") == "epoch_zero_compatibility":
-            lines.append(
-                "Warning: sealed V1 compatibility bundle is serving the epoch-zero bridge; "
-                "native writes are blocked."
-            )
         pending_cleanup_count = int(
             retrieval.get("pending_cleanup_file_count") or 0
         )
@@ -1300,15 +1077,6 @@ def format_status_lines(status: dict[str, Any]) -> list[str]:
 
     if db.get("error"):
         lines.append(f"DB 상태 확인 오류: {db['error']}")
-    if status["embedding_limit_active"] and db["pending_reports"] > 0:
-        lines.append(
-            "주의: TEST_LIMIT가 켜져 있어 임베딩 파이프라인 1회 실행 시 일부 문서만 처리됩니다."
-        )
-    if vector_db["exists"] and vector_db["has_pickle_index"]:
-        lines.append(
-            "주의: FAISS index.pkl은 pickle 기반입니다. 직접 생성한 신뢰 가능한 인덱스만 로드하세요."
-        )
-
     return lines
 
 
@@ -1327,7 +1095,7 @@ def assess_readiness(status: dict[str, Any]) -> dict[str, Any]:
     """
     db = status["db"]
     vector_db = status["vector_db"]
-    retrieval = status.get("retrieval") or {"mode": "legacy_v1"}
+    retrieval = status.get("retrieval") or {"mode": "unavailable"}
     messages: list[str] = []
     next_actions: list[str] = []
     level = "ready"
@@ -1345,10 +1113,21 @@ def assess_readiness(status: dict[str, Any]) -> dict[str, Any]:
         messages.append(message)
         next_actions.append(action)
 
+    if (
+        retrieval.get("mode") == "native"
+        and retrieval.get("initialization_state") == "empty"
+    ):
+        return {
+            "level": "ready",
+            "label": READINESS_LABELS["ready"],
+            "messages": ["Native V2 is initialized; the source corpus is empty."],
+            "next_actions": ["Add source PDFs and run the native embedding update."],
+        }
+
     if db.get("error"):
         block(
             f"SQLite 상태를 확인하지 못했습니다: {db['error']}",
-            ".env의 DB_PATH 설정과 data/reports.db 파일을 확인하세요.",
+            ".env의 DATA_ROOT 설정과 Native V2 catalog를 확인하세요.",
         )
     elif not db.get("exists") or db["total_reports"] == 0:
         block(
@@ -1359,47 +1138,30 @@ def assess_readiness(status: dict[str, Any]) -> dict[str, Any]:
     if not vector_db["has_faiss_index"]:
         block(
             "FAISS 검색 인덱스가 없습니다.",
-            "python -m src.core.embed_pipeline --all 로 임베딩 인덱스를 생성하세요.",
+            "python -m src.core.embed_pipeline 로 임베딩 인덱스를 생성하세요.",
         )
     elif db["embedded_reports"] == 0:
         block(
             "임베딩 완료 리포트가 없어 검색할 수 없습니다.",
-            "python -m src.core.embed_pipeline --all 로 리포트를 임베딩하세요.",
+            "python -m src.core.embed_pipeline 로 리포트를 임베딩하세요.",
         )
 
     if db["total_reports"] > 0 and db["pending_reports"] > 0:
         warn(
             f"아직 임베딩되지 않은 리포트가 {db['pending_reports']}건 있습니다.",
-            "누락 없이 검색하려면 python -m src.core.embed_pipeline --all 을 한 번 더 실행하세요.",
+            "누락 없이 검색하려면 python -m src.core.embed_pipeline 을 한 번 더 실행하세요.",
         )
 
-    if status["embedding_limit_active"] and db["pending_reports"] > 0:
-        warn(
-            "TEST_LIMIT가 켜져 있어 임베딩 파이프라인 1회 실행 시 일부 문서만 처리될 수 있습니다.",
-            "전체 처리하려면 .env에서 TEST_LIMIT=0으로 설정하거나 --all 실행을 유지하세요.",
-        )
-
-    if vector_db["exists"] and vector_db["has_pickle_index"]:
-        warn(
-            "FAISS index.pkl은 pickle 기반입니다.",
-            "직접 생성한 신뢰 가능한 인덱스만 로드하고 외부에서 받은 index.pkl은 사용하지 마세요.",
-        )
-
-    if retrieval.get("mode") != "legacy_v1":
+    if retrieval.get("mode") == "native":
         if retrieval.get("membership_count") != vector_db.get("ntotal"):
             block(
                 "Native snapshot membership does not match raw FAISS ntotal.",
-                "Run startup recovery; do not reopen the legacy index path.",
+                "Run Native V2 startup recovery before serving searches.",
             )
         if retrieval.get("degraded"):
             warn(
                 "Native retrieval is serving a verified predecessor in degraded read-only mode.",
                 "Run a complete forward build before enabling writes.",
-            )
-        if retrieval.get("mode") == "epoch_zero_compatibility":
-            warn(
-                "The sealed epoch-zero V1 compatibility bundle is active.",
-                "Repair the converted seed before attempting the first native successor.",
             )
 
     if not messages:

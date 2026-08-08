@@ -1,1 +1,1 @@
-"""V1-to-V2 migration and release-validation entry points."""
+"""Native V2 maintenance entry points."""

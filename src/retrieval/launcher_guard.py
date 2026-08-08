@@ -12,7 +12,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Import after argument parsing so packaging/launcher errors remain clear.
-    from src.configs.config import DB_PATH
+    from src.configs.config import DATA_ROOT
     from src.retrieval.bootstrap import (
         RetrievalBootstrapError,
         reconcile_and_inspect_runtime,
@@ -21,13 +21,19 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         selection = reconcile_and_inspect_runtime(
-            DB_PATH,
+            DATA_ROOT,
             allow_live_writer_read=not args.write,
             prefer_fast_read=not args.write,
         )
         if args.write:
-            selection = guard_before_retrieval_write(DB_PATH)
-    except (RetrievalBootstrapError, RetrievalWriteBlocked) as exc:
+            selection = guard_before_retrieval_write(
+                DATA_ROOT,
+                allow_empty_preflight=True,
+            )
+    except (
+        RetrievalBootstrapError,
+        RetrievalWriteBlocked,
+    ) as exc:
         print(
             json.dumps(
                 {"status": "blocked", "error": type(exc).__name__, "message": str(exc)},
@@ -45,9 +51,9 @@ def main(argv: list[str] | None = None) -> int:
                 "predecessor_snapshot_id": selection.predecessor_snapshot_id,
                 "publication_generation": selection.publication_generation,
                 "write_epoch": selection.write_epoch,
-                "v1_fallback_open": selection.v1_fallback_open,
                 "degraded": selection.degraded,
                 "write_enabled": selection.write_enabled,
+                "initialization_state": selection.initialization_state,
             },
             ensure_ascii=False,
         )

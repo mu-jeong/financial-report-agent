@@ -60,7 +60,6 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | `SEARCH_TOP_K` | 답변 파이프라인으로 넘길 vector search 결과 수 |
 | `SEARCH_CANDIDATE_MULTIPLIER` | retrieval과 rerank 전에 가져올 후보 수의 배수. 기본값은 `1`이며 후보 수는 `SEARCH_TOP_K × SEARCH_CANDIDATE_MULTIPLIER`로 계산 |
 | `RECENCY_WEIGHT` | 최신 리포트에 부여하는 검색 점수 가중치 |
-| `TEST_LIMIT` | V1 기본 임베딩 처리 제한. `0`이면 V1 pending 전체 처리. Native V2는 이 값을 무시하고 전체 source inventory를 검사 |
 | `USE_PARENT_CHILD` | parent-child chunking 사용 여부 |
 | `PARENT_CHUNK_SIZE` | parent chunk 크기 |
 | `CHILD_CHUNK_SIZE` | child chunk 크기 |
@@ -91,8 +90,7 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | --- | --- |
 | `REPORT_PDF_DIR` | GUI의 `열기` 버튼이 PDF를 찾는 폴더. 비워두면 `data/downloaded` 사용 |
 | `SAVE_DIR` | 다운로드 PDF이자 V2 source inventory의 기본 폴더 |
-| `DB_PATH` | V1 DB 경로. 이 파일의 부모 폴더가 native V2 data root를 결정 |
-| `FAISS_DIR` | Legacy V1 FAISS 경로. Native V2는 `retrieval/v2/snapshots/` 사용 |
+| `DATA_ROOT` | Native V2 retrieval의 기준 폴더. 비워두면 `data`를 사용하며 catalog와 snapshot은 이 폴더의 `retrieval/v2/` 아래에 저장 |
 | `CONVERSATION_DB_PATH` | GUI/CLI 대화 SQLite 경로 |
 | `COMPANY_INDUSTRY_DATA_PATH` | 선택형 KRX 업종 CSV 경로 |
 
@@ -105,15 +103,14 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 - 비용은 PDF 길이, chunk 수, 추출 품질, OpenRouter 모델 가격에 따라 달라집니다.
 - 사용량과 잔액은 OpenRouter Credits 또는 Activity 화면에서 주기적으로 확인하세요.
 
-## V2 embedding profile 변경 주의
+## Native V2 embedding profile 변경 주의
 
-V2 활성 상태에서는 `data/retrieval/v2`, `reports.db`, `vector_db`를 수동으로 삭제하거나 수정하지 마세요. 일반 V2 updater는 활성 profile과 모델·추출기·chunk 설정이 다르면 fail closed로 중단하며, 같은 profile에서는 전체 source inventory를 비교해 변경된 PDF만 처리합니다. Profile 전체 변경은 별도로 검증된 full-corpus 전환 절차로 수행해야 합니다.
+Native V2가 활성 상태일 때는 `DATA_ROOT/retrieval/v2`를 수동으로 삭제하거나 수정하지 마세요. 일반 updater는 활성 profile과 모델·추출기·chunk 설정이 다르면 fail closed로 중단하며, 같은 profile에서는 전체 source inventory를 비교해 변경된 PDF만 처리합니다.
 
-Legacy V1 설치의 수동 재색인은 V2 migration/rollback artifact가 없고 V1이 canonical authority인 경우에만 수행하세요. PowerShell에서는 Bash heredoc(`python - <<'PY'`)을 사용할 수 없습니다.
+Profile 전체를 변경해야 하면 앱과 데이터 업데이트 창을 닫고 `tools\recovery\REBUILD_V2.bat --check`로 현재 상태를 확인한 뒤 검증된 full-corpus successor를 만드세요. 자세한 절차는 [Native V2 전체 재구축](migrations/v2/V2_REBUILD.md)을 참고하세요.
 
 ## 보안 주의사항
 
 - `.env`의 실제 API 키는 Git에 커밋하지 마세요.
 - `.env.example`에는 placeholder만 두세요.
 - API 키가 노출되었다면 OpenRouter에서 즉시 삭제하고 새 키를 발급하세요.
-- 신뢰할 수 없는 FAISS `index.pkl`은 로드하지 마세요.

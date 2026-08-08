@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.core import data_update_jobs
+from src.core import data_update_jobs, embed_pipeline
 from src.core.data_update_jobs import (
     build_crawler_env,
     build_embedding_command,
@@ -125,6 +125,20 @@ def test_embedding_failure_message_keeps_a_concise_error_detail():
     assert "provider unavailable" in message
 
 
+def test_embedding_failure_message_surfaces_checkpoint_metadata_mismatch():
+    output = (
+        "Native V2 incremental update failed: PublicationError: "
+        "committed floor checkpoint hash does not match\n"
+    )
+
+    message = data_update_jobs.embedding_failure_message(1, output)
+
+    assert message == (
+        "embedding failed with exit code 1: "
+        "retrieval checkpoint metadata is out of sync"
+    )
+
+
 def test_embedding_failure_message_redacts_credentials_from_subprocess_output():
     output = (
         "2026-07-25 [ERROR] request failed: "
@@ -140,10 +154,7 @@ def test_embedding_failure_message_redacts_credentials_from_subprocess_output():
     assert "secret-token" not in message
 
 
-def test_embedding_extraction_failure_count_reads_safe_v1_and_v2_summaries():
-    assert data_update_jobs.embedding_extraction_failure_count(
-        "Quick Start is continuing after 3 PDF parsing failure(s)."
-    ) == 3
+def test_embedding_extraction_failure_count_reads_native_summaries():
     assert data_update_jobs.embedding_extraction_failure_count(
         "Excluding PDF after primary and fallback extraction failed: a.pdf\n"
         "Excluding PDF after primary and fallback extraction failed: b.pdf\n"
@@ -166,7 +177,7 @@ def test_embedding_job_surfaces_partial_extraction_completion(monkeypatch):
         "_run_subprocess_stream",
         lambda *_args, **_kwargs: (
             0,
-            "Quick Start is continuing after 2 PDF parsing failure(s).",
+            "Native V2 update complete: deltas=1 compactions=1 failed=2",
         ),
     )
     monkeypatch.setattr(
@@ -181,18 +192,36 @@ def test_embedding_job_surfaces_partial_extraction_completion(monkeypatch):
     assert "관리 목록에 남았습니다" in str(statuses[-1]["message"])
 
 
-def test_build_embedding_command_uses_all_or_limit():
-    assert build_embedding_command(limit=None)[-1] == "--all"
-    assert build_embedding_command(limit=3)[-2:] == ["--limit", "3"]
-    assert build_embedding_command(
-        limit=None,
-        continue_on_extraction_error=True,
-        retry_extraction_failures=True,
-    )[-3:] == [
-        "--all",
-        "--continue-on-extraction-error",
-        "--retry-extraction-failures",
+def test_build_embedding_command_uses_native_full_inventory_cli():
+    assert build_embedding_command() == [
+        data_update_jobs.sys.executable,
+        "-m",
+        "src.core.embed_pipeline",
     ]
+    assert build_embedding_command(retry_extraction_failures=True)[-1] == (
+        "--retry-extraction-failures"
+    )
+
+
+def test_build_embedding_command_matches_embed_pipeline_cli(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def run_pipeline(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(embed_pipeline, "run_pipeline", run_pipeline)
+    command = build_embedding_command(
+        retry_extraction_failures=True,
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        embed_pipeline.main(command[3:])
+
+    assert exited.value.code == 0
+    assert captured == {
+        "retry_extraction_failures": True,
+    }
 
 
 def test_process_is_alive_handles_current_and_missing_pids():
@@ -252,48 +281,11 @@ def test_run_update_job_native_runtime_embeds_and_compacts_with_no_new_downloads
 
     assert len(subprocess_commands) == 2
     assert subprocess_commands[0][2:] == ["src.core.report_crawler"]
-    assert subprocess_commands[1] == build_embedding_command(
-        None,
-        continue_on_extraction_error=True,
-    )
+    assert subprocess_commands[1] == build_embedding_command()
     assert any(
         status.get("embedding_file") == "검색 데이터 정리" for status in statuses
     )
     assert statuses[-1]["phase"] == "done"
-
-
-def test_run_update_job_legacy_runtime_keeps_no_data_early_exit(monkeypatch):
-    statuses: list[dict[str, object]] = []
-    subprocess_commands: list[list[str]] = []
-
-    monkeypatch.setattr(
-        data_update_jobs,
-        "guard_before_retrieval_write",
-        lambda *_args, **_kwargs: SimpleNamespace(is_native=False),
-    )
-    monkeypatch.setattr(
-        data_update_jobs,
-        "_run_subprocess",
-        lambda command, **_kwargs: (subprocess_commands.append(command) or 0, ""),
-    )
-    monkeypatch.setattr(
-        data_update_jobs,
-        "_run_subprocess_stream",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("legacy no-data updates must not run embedding")
-        ),
-    )
-    monkeypatch.setattr(data_update_jobs, "_write_status", statuses.append)
-
-    assert data_update_jobs.run_update_job(
-        start_date="2026-07-30",
-        end_date="2026-07-30",
-        label="legacy update",
-    ) == 0
-
-    assert len(subprocess_commands) == 1
-    assert subprocess_commands[0][2:] == ["src.core.report_crawler"]
-    assert statuses[-1]["phase"] == "no_data"
 
 
 def test_start_update_job_passes_parent_pid_and_records_status(monkeypatch, tmp_path):
@@ -331,7 +323,7 @@ def test_start_update_job_passes_parent_pid_and_records_status(monkeypatch, tmp_
     assert data_update_jobs.read_status()["parent_pid"] == 1234
 
 
-def test_start_embedding_job_records_limit_and_parent_pid(monkeypatch, tmp_path):
+def test_start_embedding_job_records_parent_pid(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
     class FakeProcess:
@@ -353,14 +345,13 @@ def test_start_embedding_job_records_limit_and_parent_pid(monkeypatch, tmp_path)
     monkeypatch.setattr(data_update_jobs.os, "getpid", lambda: 1234)
     monkeypatch.setattr(data_update_jobs.subprocess, "Popen", fake_popen)
 
-    status = data_update_jobs.start_embedding_job(label="미임베딩 문서 3건", limit=3)
+    status = data_update_jobs.start_embedding_job(label="미임베딩 문서 3건")
 
     command = captured["command"]
     assert isinstance(command, list)
     assert command[:3] == [data_update_jobs.sys.executable, "-m", "src.core.data_update_jobs"]
-    assert command[-4:] == ["--limit", "3", "--parent-pid", "1234"]
+    assert command[-2:] == ["--parent-pid", "1234"]
     assert status["phase"] == "embed"
-    assert status["embedding_limit"] == 3
     assert status["pid"] == 9876
     assert data_update_jobs.read_status()["parent_pid"] == 1234
 

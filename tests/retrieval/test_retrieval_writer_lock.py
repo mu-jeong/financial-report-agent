@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -39,6 +40,46 @@ def _root(tmp_path: Path) -> Path:
 def _initialize_process_guard(root: Path) -> None:
     with NativeWriterLock(root):
         pass
+
+
+def _redirect_directory(redirect: Path, outside: Path) -> None:
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(redirect), str(outside)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            pytest.skip(f"directory junctions are unavailable: {completed.stderr}")
+    else:
+        redirect.symlink_to(outside, target_is_directory=True)
+
+
+def test_writer_lock_rejects_redirected_data_root(tmp_path: Path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    redirect = tmp_path / "data"
+    _redirect_directory(redirect, outside)
+
+    with pytest.raises(WriterLockError, match="data root"):
+        NativeWriterLock(redirect).acquire()
+
+    assert not (outside / "retrieval").exists()
+
+
+def test_writer_lock_rejects_redirected_runtime_ancestor(tmp_path: Path):
+    root = tmp_path / "data"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    redirect = root / "retrieval"
+    _redirect_directory(redirect, outside)
+
+    with pytest.raises(WriterLockError, match="runtime path"):
+        NativeWriterLock(root).acquire()
+
+    assert not (outside / "v2").exists()
 
 
 def test_live_nonce_owner_blocks_second_writer_and_release_allows_next(tmp_path: Path):

@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import sqlite3
-import stat
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -66,7 +64,6 @@ class PublicationRequest:
     evidence_manifest_sha256: str
     increment_write_epoch: bool = True
     enable_writes_on_complete: bool = True
-    allow_active_snapshot_promotion: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,7 +73,6 @@ class PublicationOutcome:
     write_epoch: int
     active_snapshot_id: str
     predecessor_snapshot_id: str | None
-    v1_fallback_open: bool
     checkpoint_relative_path: str
     checkpoint_sha256: str
     committed_floor_relative_path: str
@@ -89,16 +85,10 @@ class DurableFloor:
     publication_id: str
     publication_generation: int
     write_epoch: int
-    v1_fallback_floor: str
     active_snapshot_id: str
     checkpoint_relative_path: str
     checkpoint_sha256: str
     path: Path
-
-    @property
-    def fallback_open(self) -> bool:
-        return self.v1_fallback_floor == "open"
-
 
 @dataclass(frozen=True)
 class _CommitIntent:
@@ -106,7 +96,6 @@ class _CommitIntent:
     target_publication_generation: int
     old_write_epoch: int
     new_write_epoch: int
-    v1_fallback_floor: str
     from_snapshot_id: str | None
     to_snapshot_id: str
     to_build_id: str
@@ -115,13 +104,12 @@ class _CommitIntent:
 
     def as_json(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "native_publication",
             "publication_id": self.publication_id,
             "target_publication_generation": self.target_publication_generation,
             "old_write_epoch": self.old_write_epoch,
             "new_write_epoch": self.new_write_epoch,
-            "v1_fallback_floor": self.v1_fallback_floor,
             "from_snapshot_id": self.from_snapshot_id,
             "to_snapshot_id": self.to_snapshot_id,
             "to_build_id": self.to_build_id,
@@ -156,7 +144,7 @@ class PublicationCoordinator:
         crash_hook: CrashHook | None = None,
         writer_lease: WriterLease | None = None,
     ) -> PublicationOutcome:
-        """Publish a ready candidate and durably close its compatibility floor.
+        """Publish a ready candidate and durably seal its runtime floor.
 
         ``crash_after`` exists solely for deterministic crash-matrix tests.  It
         raises only after the named durable boundary, except
@@ -282,7 +270,6 @@ class PublicationCoordinator:
                     "committed_floor_durable",
                 )
             self._crash("committed_floor_durable", crash_after, crash_hook)
-            self._mark_epoch_zero_bundle_cleanup_pending(connection, intent)
             self._crash("before_fully_complete", crash_after, crash_hook)
 
             row = _read_publication(connection, request.publication_id)
@@ -303,49 +290,6 @@ class PublicationCoordinator:
             return outcome
         finally:
             connection.close()
-
-    def _mark_epoch_zero_bundle_cleanup_pending(
-        self,
-        connection: sqlite3.Connection,
-        intent: _CommitIntent,
-    ) -> None:
-        if intent.old_write_epoch != 0 or intent.new_write_epoch <= 0:
-            return
-        seed = connection.execute(
-            """
-            SELECT evidence_manifest_relative_path
-            FROM publication_runs
-            WHERE to_snapshot_id = ? AND state = 'fully_complete'
-            ORDER BY created_at DESC, publication_id DESC
-            LIMIT 1
-            """,
-            (intent.from_snapshot_id,),
-        ).fetchone()
-        if seed is None or not seed[0]:
-            raise PublicationError("epoch-zero seed compatibility evidence is missing")
-        evidence_path = _resolve_relative(self.data_root, str(seed[0]))
-        evidence = _read_json(evidence_path)
-        bundle_id = evidence.get("compatibility_bundle_id")
-        if (
-            not isinstance(bundle_id, str)
-            or len(bundle_id) != 64
-            or any(character not in "0123456789abcdef" for character in bundle_id)
-        ):
-            raise PublicationError("epoch-zero compatibility bundle identity is invalid")
-        bundle = self.data_root / "retrieval" / "compat" / "v1" / bundle_id
-        if not bundle.is_dir() or bundle.is_symlink():
-            raise PublicationError("epoch-zero compatibility bundle is unavailable")
-        _atomic_json_once(
-            bundle / "cleanup-pending.json",
-            {
-                "schema_version": 1,
-                "state": "cleanup_pending",
-                "bundle_id": bundle_id,
-                "closing_publication_id": intent.publication_id,
-                "publication_generation": intent.target_publication_generation,
-                "write_epoch": intent.new_write_epoch,
-            },
-        )
 
     def request_from_journal(self, publication_id: str) -> PublicationRequest:
         """Reconstruct the immutable request fields needed for startup replay."""
@@ -371,10 +315,6 @@ class PublicationCoordinator:
                     True
                     if intent is None
                     else intent.enable_writes_on_complete
-                ),
-                allow_active_snapshot_promotion=(
-                    row["from_snapshot_id"] is not None
-                    and row["from_snapshot_id"] == row["to_snapshot_id"]
                 ),
             )
         finally:
@@ -535,11 +475,6 @@ class PublicationCoordinator:
             new_epoch = int(runtime["write_epoch"]) + int(
                 request.increment_write_epoch
             )
-            fallback = (
-                "closed"
-                if new_epoch > 0 or not bool(runtime["v1_fallback_open"])
-                else "open"
-            )
             intent = _CommitIntent(
                 publication_id=request.publication_id,
                 target_publication_generation=int(
@@ -548,7 +483,6 @@ class PublicationCoordinator:
                 + 1,
                 old_write_epoch=int(runtime["write_epoch"]),
                 new_write_epoch=new_epoch,
-                v1_fallback_floor=fallback,
                 from_snapshot_id=(
                     None
                     if runtime["active_snapshot_id"] is None
@@ -592,49 +526,34 @@ class PublicationCoordinator:
         )
         if actual_runtime != expected_runtime:
             raise PublicationError("runtime changed after commit intent became durable")
-        promotes_active_snapshot = intent.from_snapshot_id == intent.to_snapshot_id
-        if promotes_active_snapshot and retiring_predecessor is not None:
-            raise PublicationError("epoch-zero seed activation cannot retire a predecessor")
-
         def commit() -> None:
-            if promotes_active_snapshot:
-                state = connection.execute(
-                    "SELECT state FROM retrieval_builds WHERE build_id = ?",
-                    (intent.to_build_id,),
-                ).fetchone()
-                if state is None or str(state[0]) != "fully_complete":
-                    raise PublicationError(
-                        "epoch-zero seed activation requires a fully complete build"
-                    )
-            else:
-                connection.execute(
-                    """
-                    UPDATE retrieval_builds
-                    SET state = 'committed_pending_checkpoint',
-                        state_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                    WHERE build_id = ? AND state = 'ready'
-                    """,
-                    (intent.to_build_id,),
-                )
-                if connection.execute("SELECT changes()").fetchone()[0] != 1:
-                    raise PublicationError("target build is not ready for commit")
+            connection.execute(
+                """
+                UPDATE retrieval_builds
+                SET state = 'committed_pending_checkpoint',
+                    state_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE build_id = ? AND state = 'ready'
+                """,
+                (intent.to_build_id,),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise PublicationError("target build is not ready for commit")
             connection.execute(
                 """
                 UPDATE retrieval_runtime
                 SET active_snapshot_id = ?, active_build_id = ?,
                     predecessor_snapshot_id = ?,
                     publication_generation = ?, write_epoch = ?,
-                    v1_fallback_open = ?, degraded = 0, write_enabled = 0,
+                    degraded = 0, write_enabled = 0,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE runtime_id = 1
                 """,
                 (
                     intent.to_snapshot_id,
                     intent.to_build_id,
-                    None if promotes_active_snapshot else intent.from_snapshot_id,
+                    intent.from_snapshot_id,
                     intent.target_publication_generation,
                     intent.new_write_epoch,
-                    int(intent.v1_fallback_floor == "open"),
                 ),
             )
             connection.execute(
@@ -646,7 +565,7 @@ class PublicationCoordinator:
                 """,
                 (intent.publication_id,),
             )
-            if retiring_predecessor is not None and not promotes_active_snapshot:
+            if retiring_predecessor is not None:
                 connection.execute(
                     """
                     UPDATE vector_snapshots
@@ -673,11 +592,10 @@ class PublicationCoordinator:
         checkpoint_hash: str,
     ) -> DurableFloor:
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "publication_id": intent.publication_id,
             "publication_generation": intent.target_publication_generation,
             "write_epoch": intent.new_write_epoch,
-            "v1_fallback_floor": intent.v1_fallback_floor,
             "active_snapshot_id": intent.to_snapshot_id,
             "checkpoint_relative_path": checkpoint_relative,
             "checkpoint_sha256": checkpoint_hash,
@@ -772,102 +690,6 @@ class PublicationCoordinator:
             raise PublicationCrash(boundary)
 
 
-def activate_epoch_zero_seed(
-    data_root: str | Path,
-    *,
-    snapshot_id: str,
-    canary: Mapping[str, Any],
-    writer_lease: WriterLease | None = None,
-) -> PublicationOutcome:
-    """Enable native writes while keeping the converted seed snapshot active."""
-
-    root = Path(data_root).resolve(strict=True)
-    if writer_lease is None:
-        with NativeWriterLock(root) as owned_lease:
-            return activate_epoch_zero_seed(
-                root,
-                snapshot_id=snapshot_id,
-                canary=canary,
-                writer_lease=owned_lease,
-            )
-    assert_writer_lease_owned(writer_lease, root)
-    if not isinstance(snapshot_id, str) or not snapshot_id:
-        raise ValueError("snapshot_id must be a non-empty string")
-
-    coordinator = PublicationCoordinator(root)
-    publication_id = hashlib.sha256(
-        f"native-seed-activation\0{snapshot_id}".encode("utf-8")
-    ).hexdigest()
-    connection = _open_catalog(coordinator.catalog_path, read_only=True)
-    try:
-        _validate_catalog_integrity(connection)
-        existing = connection.execute(
-            "SELECT 1 FROM publication_runs WHERE publication_id = ?",
-            (publication_id,),
-        ).fetchone()
-        if existing is not None:
-            request = coordinator.request_from_journal(publication_id)
-            if (
-                request.to_snapshot_id != snapshot_id
-                or not request.allow_active_snapshot_promotion
-            ):
-                raise PublicationError("seed activation journal identity conflicts")
-            return coordinator.publish(request, writer_lease=writer_lease)
-
-        _validate_runtime_floor(root, connection, None)
-        runtime = _read_runtime(connection)
-        if (
-            runtime["active_snapshot_id"] != snapshot_id
-            or int(runtime["write_epoch"]) != 0
-            or not bool(runtime["v1_fallback_open"])
-            or bool(runtime["degraded"])
-            or bool(runtime["write_enabled"])
-            or runtime["predecessor_snapshot_id"] is not None
-        ):
-            raise PublicationError(
-                "seed activation requires the healthy converted epoch-zero runtime"
-            )
-        snapshot = _validate_snapshot(
-            connection,
-            root,
-            snapshot_id,
-            allowed_build_states={"fully_complete"},
-            allowed_snapshot_states={"ready"},
-        )
-        evidence = {
-            "schema_version": 1,
-            "kind": "native_seed_activation",
-            "publication_id": publication_id,
-            "base_publication_generation": int(runtime["publication_generation"]),
-            "base_snapshot_id": snapshot_id,
-            "base_write_epoch": 0,
-            "build_id": str(snapshot["build_id"]),
-            "snapshot_id": snapshot_id,
-            "snapshot_file_sha256": str(snapshot["file_sha256"]),
-            "same_space_canary": dict(canary),
-        }
-        _validate_seed_activation_canary(evidence, int(snapshot["dimension"]))
-    finally:
-        connection.close()
-
-    evidence_relative = f"retrieval/v2/evidence/{publication_id}/manifest.json"
-    evidence_path = _resolve_relative(root, evidence_relative)
-    _atomic_json_once(evidence_path, evidence)
-    evidence_path.chmod(stat.S_IREAD)
-    return coordinator.publish(
-        PublicationRequest(
-            publication_id=publication_id,
-            to_snapshot_id=snapshot_id,
-            evidence_manifest_relative_path=evidence_relative,
-            evidence_manifest_sha256=_sha256_file(evidence_path),
-            increment_write_epoch=True,
-            enable_writes_on_complete=True,
-            allow_active_snapshot_promotion=True,
-        ),
-        writer_lease=writer_lease,
-    )
-
-
 def publish_immutable_artifact(
     staged_path: str | Path,
     final_path: str | Path,
@@ -949,63 +771,28 @@ def _validate_first_successor_new_member(
     connection: sqlite3.Connection,
     request: PublicationRequest,
 ) -> None:
-    """Allow only the atomic first-successor transition from the V1 bridge."""
+    """Require the first greenfield publication to create a usable corpus."""
 
     runtime = _read_runtime(connection)
-    if (
-        int(runtime["write_epoch"]) != 0
-        or not bool(runtime["v1_fallback_open"])
-    ):
-        return
-    if not request.increment_write_epoch:
-        raise PublicationError(
-            "epoch-zero publication must increment write epoch and close V1 fallback"
-        )
-    if not request.enable_writes_on_complete:
-        raise PublicationError(
-            "first native successor must enable writes when publication completes"
-        )
-    active_snapshot = runtime["active_snapshot_id"]
-    if active_snapshot is None:
-        raise PublicationError("epoch-zero runtime has no converted active snapshot")
-    if request.to_snapshot_id == active_snapshot:
-        if not request.allow_active_snapshot_promotion:
+    if _is_exact_empty_runtime(runtime):
+        if not request.increment_write_epoch or not request.enable_writes_on_complete:
             raise PublicationError(
-                "active epoch-zero snapshot requires the dedicated seed activation protocol"
+                "greenfield publication must increment the epoch and enable writes"
             )
-        if runtime["predecessor_snapshot_id"] is not None:
-            raise PublicationError("epoch-zero seed activation cannot have a predecessor")
+        included = connection.execute(
+            """
+            SELECT build.included_count
+            FROM vector_snapshots AS snapshot
+            JOIN retrieval_builds AS build ON build.build_id = snapshot.build_id
+            WHERE snapshot.snapshot_id = ?
+            """,
+            (request.to_snapshot_id,),
+        ).fetchone()
+        if included is None or int(included[0]) <= 0:
+            raise PublicationError(
+                "first greenfield publication must include a source report"
+            )
         return
-    if request.allow_active_snapshot_promotion:
-        raise PublicationError(
-            "seed activation must keep the converted active snapshot selected"
-        )
-
-    def report_uids(snapshot_id: str) -> set[str]:
-        return {
-            str(row[0])
-            for row in connection.execute(
-                """
-                SELECT DISTINCT report.report_uid
-                FROM snapshot_membership AS membership
-                JOIN retrieval_chunks AS chunk
-                  ON chunk.chunk_uid = membership.chunk_uid
-                JOIN retrieval_parents AS parent
-                  ON parent.parent_uid = chunk.parent_uid
-                 AND parent.profile_id = chunk.profile_id
-                JOIN reports AS report ON report.report_id = parent.report_id
-                WHERE membership.snapshot_id = ?
-                """,
-                (snapshot_id,),
-            )
-        }
-
-    if not report_uids(request.to_snapshot_id).difference(
-        report_uids(str(active_snapshot))
-    ):
-        raise PublicationError(
-            "first native successor must include at least one new logical corpus member"
-        )
 
 
 def _reconcile_retired_snapshots(
@@ -1031,7 +818,7 @@ def _reconcile_retired_snapshots(
 
 
 def read_durable_floors(data_root: str | Path) -> tuple[DurableFloor, ...]:
-    """Read and validate the complete append-only compatibility-floor chain."""
+    """Read and validate the complete append-only runtime-floor chain."""
 
     root = Path(data_root).resolve(strict=True)
     evidence_root = root / "retrieval" / "v2" / "evidence"
@@ -1044,17 +831,13 @@ def read_durable_floors(data_root: str | Path) -> tuple[DurableFloor, ...]:
     ordered = sorted(floors, key=lambda item: item.publication_generation)
     seen_generations: set[int] = set()
     previous_epoch = -1
-    previous_closed = False
     for floor in ordered:
         if floor.publication_generation in seen_generations:
             raise PublicationError("durable floors contain a duplicate generation")
         seen_generations.add(floor.publication_generation)
         if floor.write_epoch < previous_epoch:
             raise PublicationError("durable floor write epoch moved backward")
-        if previous_closed and floor.fallback_open:
-            raise PublicationError("durable floor attempted to reopen V1 fallback")
         previous_epoch = floor.write_epoch
-        previous_closed = not floor.fallback_open
     return tuple(ordered)
 
 
@@ -1225,14 +1008,6 @@ def _validate_request(request: PublicationRequest) -> None:
         raise TypeError("increment_write_epoch must be a bool")
     if not isinstance(request.enable_writes_on_complete, bool):
         raise TypeError("enable_writes_on_complete must be a bool")
-    if not isinstance(request.allow_active_snapshot_promotion, bool):
-        raise TypeError("allow_active_snapshot_promotion must be a bool")
-    if request.allow_active_snapshot_promotion and (
-        not request.increment_write_epoch or not request.enable_writes_on_complete
-    ):
-        raise ValueError(
-            "active snapshot promotion must increment the epoch and enable writes"
-        )
 
 
 def _validate_evidence_manifest(
@@ -1261,11 +1036,7 @@ def _validate_candidate_evidence_lineage(
     live_runtime: sqlite3.Row | None,
 ) -> None:
     snapshot = _read_snapshot(connection, request.to_snapshot_id)
-    allowed_kinds = (
-        {"native_seed_activation"}
-        if request.allow_active_snapshot_promotion
-        else {"native_full_corpus_candidate", "native_incremental_candidate"}
-    )
+    allowed_kinds = {"native_full_corpus_candidate", "native_incremental_candidate"}
     expected_identity = (
         1,
         request.publication_id,
@@ -1295,7 +1066,18 @@ def _validate_candidate_evidence_lineage(
     ):
         raise PublicationError("publication evidence base lineage is invalid")
     base_snapshot_id = evidence.get("base_snapshot_id")
-    if not isinstance(base_snapshot_id, str) or not base_snapshot_id:
+    greenfield_base = bool(
+        base_snapshot_id is None
+        and base_generation == 0
+        and base_epoch == 0
+        and expected_from_snapshot_id is None
+        and (live_runtime is None or _is_exact_empty_runtime(live_runtime))
+        and request.increment_write_epoch
+        and request.enable_writes_on_complete
+    )
+    if not greenfield_base and (
+        not isinstance(base_snapshot_id, str) or not base_snapshot_id
+    ):
         raise PublicationError("publication evidence base lineage is invalid")
 
     if live_runtime is not None:
@@ -1313,38 +1095,18 @@ def _validate_candidate_evidence_lineage(
         raise PublicationError(
             "publication evidence base snapshot does not match its journal"
         )
-    if request.allow_active_snapshot_promotion:
-        _validate_seed_activation_canary(evidence, int(snapshot["dimension"]))
 
 
-def _validate_seed_activation_canary(
-    evidence: Mapping[str, Any],
-    expected_dimension: int,
-) -> None:
-    canary = evidence.get("same_space_canary")
-    if not isinstance(canary, Mapping):
-        raise PublicationError("seed activation evidence has no same-space canary")
-    sample_count = canary.get("sample_count")
-    dimension = canary.get("dimension")
-    self_rank_one_count = canary.get("self_rank_one_count")
-    minimum_cosine = canary.get("minimum_cosine_similarity")
-    maximum_norm_error = canary.get("maximum_norm_relative_error")
-    if (
-        not isinstance(sample_count, int)
-        or isinstance(sample_count, bool)
-        or sample_count <= 0
-        or dimension != expected_dimension
-        or self_rank_one_count != sample_count
-        or not isinstance(minimum_cosine, (int, float))
-        or isinstance(minimum_cosine, bool)
-        or not math.isfinite(float(minimum_cosine))
-        or float(minimum_cosine) < 0.999
-        or not isinstance(maximum_norm_error, (int, float))
-        or isinstance(maximum_norm_error, bool)
-        or not math.isfinite(float(maximum_norm_error))
-        or float(maximum_norm_error) > 0.01
-    ):
-        raise PublicationError("seed activation same-space canary is invalid")
+def _is_exact_empty_runtime(runtime: sqlite3.Row) -> bool:
+    return bool(
+        runtime["active_snapshot_id"] is None
+        and runtime["active_build_id"] is None
+        and runtime["predecessor_snapshot_id"] is None
+        and int(runtime["publication_generation"]) == 0
+        and int(runtime["write_epoch"]) == 0
+        and not bool(runtime["degraded"])
+        and not bool(runtime["write_enabled"])
+    )
 
 
 def _validate_snapshot(
@@ -1516,23 +1278,16 @@ def _validate_committed_pointer(
     actual = (
         int(runtime["publication_generation"]),
         int(runtime["write_epoch"]),
-        bool(runtime["v1_fallback_open"]),
         runtime["active_snapshot_id"],
         runtime["active_build_id"],
         runtime["predecessor_snapshot_id"],
     )
-    expected_predecessor = (
-        None
-        if intent.from_snapshot_id == intent.to_snapshot_id
-        else intent.from_snapshot_id
-    )
     expected = (
         intent.target_publication_generation,
         intent.new_write_epoch,
-        intent.v1_fallback_floor == "open",
         intent.to_snapshot_id,
         intent.to_build_id,
-        expected_predecessor,
+        intent.from_snapshot_id,
     )
     if actual != expected:
         raise PublicationError("committed runtime pointer conflicts with its intent")
@@ -1585,7 +1340,6 @@ def _validate_checkpoint_for_floor(data_root: Path, floor: DurableFloor) -> None
         if (
             int(runtime["publication_generation"]) != floor.publication_generation
             or int(runtime["write_epoch"]) != floor.write_epoch
-            or bool(runtime["v1_fallback_open"]) != floor.fallback_open
             or runtime["active_snapshot_id"] != floor.active_snapshot_id
         ):
             raise PublicationError("checkpoint runtime conflicts with committed floor")
@@ -1613,6 +1367,16 @@ def _validate_runtime_floor(
     if not floors:
         if generation == 0:
             return
+        if (
+            generation == 1
+            and journal is not None
+            and str(journal["state"]) == "running"
+            and not _phase_before(
+                str(journal["phase"]), "committed_pending_checkpoint"
+            )
+            and journal["to_snapshot_id"] == runtime["active_snapshot_id"]
+        ):
+            return
         raise PublicationError(
             "a positive publication generation requires a durable committed floor"
         )
@@ -1622,7 +1386,6 @@ def _validate_runtime_floor(
     if generation == highest.publication_generation:
         if (
             int(runtime["write_epoch"]) != highest.write_epoch
-            or bool(runtime["v1_fallback_open"]) != highest.fallback_open
             or runtime["active_snapshot_id"] != highest.active_snapshot_id
         ):
             raise PublicationError(
@@ -1652,7 +1415,6 @@ def _validate_new_floor(
     highest = existing[-1]
     generation = int(payload["publication_generation"])
     epoch = int(payload["write_epoch"])
-    fallback = str(payload["v1_fallback_floor"])
     publication_id = str(payload["publication_id"])
     if generation < highest.publication_generation:
         raise PublicationError("committed floor generation cannot move backward")
@@ -1662,8 +1424,17 @@ def _validate_new_floor(
         return
     if epoch < highest.write_epoch:
         raise PublicationError("committed floor write epoch cannot move backward")
-    if not highest.fallback_open and fallback != "closed":
-        raise PublicationError("committed floor cannot reopen V1 fallback")
+
+
+def _schema_keys_match(value: Mapping[str, Any], required: set[str]) -> bool:
+    """Allow historical extensions only for schema 1 artifacts."""
+
+    version = value.get("schema_version")
+    return bool(
+        version in {1, 2}
+        and required.issubset(value)
+        and (version == 1 or set(value) == required)
+    )
 
 
 def _parse_floor(path: Path, value: Mapping[str, Any]) -> DurableFloor:
@@ -1672,12 +1443,11 @@ def _parse_floor(path: Path, value: Mapping[str, Any]) -> DurableFloor:
         "publication_id",
         "publication_generation",
         "write_epoch",
-        "v1_fallback_floor",
         "active_snapshot_id",
         "checkpoint_relative_path",
         "checkpoint_sha256",
     }
-    if set(value) != required or value.get("schema_version") != 1:
+    if not _schema_keys_match(value, required):
         raise PublicationError(f"invalid committed floor schema: {path.name}")
     generation = value["publication_generation"]
     epoch = value["write_epoch"]
@@ -1690,11 +1460,6 @@ def _parse_floor(path: Path, value: Mapping[str, Any]) -> DurableFloor:
         or epoch < 0
     ):
         raise PublicationError("committed floor generation/epoch is invalid")
-    fallback = value["v1_fallback_floor"]
-    if fallback not in {"open", "closed"}:
-        raise PublicationError("committed floor fallback value is invalid")
-    if epoch > 0 and fallback != "closed":
-        raise PublicationError("positive floor epoch requires closed V1 fallback")
     publication_id = str(value["publication_id"])
     if not publication_id or path.parent.name != publication_id:
         raise PublicationError("committed floor identity conflicts with its path")
@@ -1713,7 +1478,6 @@ def _parse_floor(path: Path, value: Mapping[str, Any]) -> DurableFloor:
         publication_id=publication_id,
         publication_generation=generation,
         write_epoch=epoch,
-        v1_fallback_floor=str(fallback),
         active_snapshot_id=active_snapshot_id,
         checkpoint_relative_path=checkpoint_relative,
         checkpoint_sha256=str(value["checkpoint_sha256"]),
@@ -1735,7 +1499,6 @@ def _read_commit_intent_if_present(
         "target_publication_generation",
         "old_write_epoch",
         "new_write_epoch",
-        "v1_fallback_floor",
         "from_snapshot_id",
         "to_snapshot_id",
         "to_build_id",
@@ -1743,8 +1506,7 @@ def _read_commit_intent_if_present(
         "enable_writes_on_complete",
     }
     if (
-        set(value) != required
-        or value.get("schema_version") != 1
+        not _schema_keys_match(value, required)
         or value.get("kind") != "native_publication"
         or value.get("publication_id") != publication_id
     ):
@@ -1760,11 +1522,6 @@ def _read_commit_intent_if_present(
         raise PublicationError("commit intent generation/epoch is invalid")
     if new_epoch < old_epoch:
         raise PublicationError("commit intent write epoch moved backward")
-    fallback = value["v1_fallback_floor"]
-    if fallback not in {"open", "closed"}:
-        raise PublicationError("commit intent fallback floor is invalid")
-    if new_epoch > 0 and fallback != "closed":
-        raise PublicationError("positive write epoch requires closed V1 fallback")
     if not isinstance(value["enable_writes_on_complete"], bool):
         raise PublicationError("commit intent writable flag is invalid")
     return _CommitIntent(
@@ -1772,7 +1529,6 @@ def _read_commit_intent_if_present(
         target_publication_generation=generation,
         old_write_epoch=old_epoch,
         new_write_epoch=new_epoch,
-        v1_fallback_floor=str(fallback),
         from_snapshot_id=(
             None
             if value["from_snapshot_id"] is None
@@ -1793,7 +1549,6 @@ def _outcome_from_floor(
         int(runtime["publication_generation"]) != floor.publication_generation
         or int(runtime["write_epoch"]) != floor.write_epoch
         or runtime["active_snapshot_id"] != floor.active_snapshot_id
-        or bool(runtime["v1_fallback_open"]) != floor.fallback_open
     ):
         raise PublicationError("runtime does not match its committed floor")
     return PublicationOutcome(
@@ -1806,7 +1561,6 @@ def _outcome_from_floor(
             if runtime["predecessor_snapshot_id"] is None
             else str(runtime["predecessor_snapshot_id"])
         ),
-        v1_fallback_open=floor.fallback_open,
         checkpoint_relative_path=floor.checkpoint_relative_path,
         checkpoint_sha256=floor.checkpoint_sha256,
         committed_floor_relative_path=str(

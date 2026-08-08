@@ -101,8 +101,7 @@ def _run_app_test() -> tuple[dict, str]:
         environment = os.environ.copy()
         environment.update(
             {
-                "DB_PATH": str(temp_root / "reports.db"),
-                "FAISS_DIR": str(temp_root / "vector_db"),
+                "DATA_ROOT": str(temp_root),
                 "CONVERSATION_DB_PATH": str(temp_root / "conversations.db"),
                 "SAVE_DIR": str(temp_root / "downloaded"),
                 "REPORT_PDF_DIR": str(temp_root / "downloaded"),
@@ -169,14 +168,10 @@ def _run_native_status_cache_probe() -> dict:
 
     with tempfile.TemporaryDirectory(prefix="finance-llm-native-cache-") as temp_dir:
         data_root = Path(temp_dir) / "data"
-        db_path = data_root / "reports.db"
         catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
         save_dir = data_root / "downloaded"
-        faiss_dir = data_root / "vector_db"
         catalog.parent.mkdir(parents=True)
         save_dir.mkdir()
-        faiss_dir.mkdir()
-        db_path.write_bytes(b"legacy-anchor")
         with closing(sqlite3.connect(catalog)) as connection:
             with connection:
                 connection.executescript(
@@ -189,14 +184,15 @@ def _run_native_status_cache_probe() -> dict:
                     predecessor_snapshot_id TEXT,
                     publication_generation INTEGER NOT NULL,
                     write_epoch INTEGER NOT NULL,
-                    v1_fallback_open INTEGER NOT NULL,
                     degraded INTEGER NOT NULL,
                     write_enabled INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 INSERT INTO retrieval_runtime VALUES (
-                    1, 7, 'snapshot-1', 'build-1', NULL,
-                    1, 1, 0, 0, 1, '2026-08-04T00:00:00Z'
+                    1, 3, 'snapshot-1', 'build-1', NULL,
+                    1, 1, 0, 1,
+                    '2026-08-04T00:00:00Z', '2026-08-04T00:00:00Z'
                 );
                     """
                 )
@@ -228,8 +224,7 @@ def _run_native_status_cache_probe() -> dict:
             status_cache.clear()
             arguments = {
                 "save_dir": str(save_dir),
-                "db_path": str(db_path),
-                "faiss_dir": str(faiss_dir),
+                "data_root": str(data_root),
             }
             first = status_cache.get_data_status(**arguments)
             second = status_cache.get_data_status(**arguments)
@@ -249,8 +244,7 @@ def _run_native_status_cache_probe() -> dict:
             for _ in range(5):
                 started = time.perf_counter()
                 status_cache._status_revision(
-                    db_path=str(db_path),
-                    faiss_dir=str(faiss_dir),
+                    data_root=str(data_root),
                 )
                 revision_seconds.append(time.perf_counter() - started)
         finally:

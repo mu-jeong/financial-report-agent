@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import pytest
@@ -41,8 +40,6 @@ from src.core.monitoring import (
     summarize_evaluation_dataset,
     summarize_issue_reports,
     summarize_v2_data_integrity,
-    assess_evaluation_snapshot_readiness,
-    validate_evaluation_snapshot,
 )
 
 
@@ -55,7 +52,6 @@ def _native_v2_data_source() -> dict:
         "profile_hash": "a" * 64,
         "publication_generation": 3,
         "write_epoch": 2,
-        "v1_fallback_open": False,
         "degraded": False,
     }
 
@@ -102,125 +98,6 @@ def test_summarize_evaluation_dataset_counts_monitoring_dimensions():
     assert summary["stability_policy"]["policy"] == "fixed_baseline_until_change_reason"
 
 
-def test_validate_evaluation_snapshot_passes_for_matching_manifest_and_files(tmp_path):
-    snapshot_root = tmp_path / "eval_snapshot"
-    vector_dir = snapshot_root / "vector_db"
-    vector_dir.mkdir(parents=True)
-    (snapshot_root / "reports.db").write_bytes(b"sqlite placeholder")
-    (vector_dir / "index.faiss").write_bytes(b"faiss")
-    (vector_dir / "index.pkl").write_bytes(b"pkl")
-    dataset = {
-        "name": "finance_llm_local_eval_dataset",
-        "version": 2,
-        "generated_from": {
-            "snapshot_date": "2026-06-19",
-            "source_row_count": 3861,
-            "embedded_row_count": 3847,
-            "min_report_date": "2026-02-05",
-            "max_report_date": "2026-06-19",
-        },
-    }
-    manifest = {
-        "dataset_name": "finance_llm_local_eval_dataset",
-        "dataset_version": 2,
-        "snapshot_date": "2026-06-19",
-        "database": {
-            "path": "reports.db",
-            "source_row_count": 3861,
-            "embedded_row_count": 3847,
-            "min_report_date": "2026-02-05",
-            "max_report_date": "2026-06-19",
-        },
-        "vector_db": {"path": "vector_db", "required_files": ["index.faiss", "index.pkl"]},
-    }
-
-    validation = validate_evaluation_snapshot(dataset, manifest, snapshot_root)
-
-    assert validation["status"] == "pass"
-    assert validation["db_path"] == str(snapshot_root / "reports.db")
-    assert validation["faiss_dir"] == str(vector_dir)
-
-
-def test_validate_evaluation_snapshot_fails_for_missing_files_and_mismatched_dataset(tmp_path):
-    dataset = {
-        "name": "finance_llm_local_eval_dataset",
-        "version": 2,
-        "generated_from": {"snapshot_date": "2026-06-19"},
-    }
-    manifest = {
-        "dataset_name": "other_dataset",
-        "dataset_version": 3,
-        "snapshot_date": "2026-06-20",
-        "database": {"path": "reports.db"},
-        "vector_db": {"path": "vector_db", "required_files": ["index.faiss"]},
-    }
-
-    validation = validate_evaluation_snapshot(dataset, manifest, tmp_path / "missing_snapshot")
-
-    assert validation["status"] == "fail"
-    failed_checks = {check["name"] for check in validation["checks"] if check["status"] == "fail"}
-    assert "dataset_name" in failed_checks
-    assert "dataset_version" in failed_checks
-    assert "snapshot_date" in failed_checks
-    assert "snapshot_db_exists" in failed_checks
-    assert "vector_file:index.faiss" in failed_checks
-
-
-def test_assess_evaluation_snapshot_readiness_reports_missing_fixed_inputs(tmp_path):
-    readiness = assess_evaluation_snapshot_readiness(
-        dataset_path=tmp_path / "evaluation_dataset.json",
-        manifest_path=tmp_path / "eval_snapshot" / "manifest.json",
-        snapshot_root=tmp_path / "eval_snapshot",
-    )
-
-    assert readiness["ready"] is False
-    assert readiness["status"] == "missing"
-    assert set(readiness["missing_inputs"]) == {
-        "dataset",
-        "snapshot_manifest",
-        "snapshot_root",
-    }
-
-
-def test_assess_evaluation_snapshot_readiness_validates_fixed_inputs(tmp_path):
-    snapshot_root = tmp_path / "eval_snapshot"
-    vector_dir = snapshot_root / "vector_db"
-    vector_dir.mkdir(parents=True)
-    (snapshot_root / "reports.db").write_bytes(b"sqlite placeholder")
-    (vector_dir / "index.faiss").write_bytes(b"faiss")
-    (vector_dir / "index.pkl").write_bytes(b"pkl")
-    dataset = {
-        "name": "fixed-evaluation",
-        "version": 1,
-        "generated_from": {"snapshot_date": "2026-08-02"},
-    }
-    manifest = {
-        "dataset_name": "fixed-evaluation",
-        "dataset_version": 1,
-        "snapshot_date": "2026-08-02",
-        "database": {"path": "reports.db"},
-        "vector_db": {
-            "path": "vector_db",
-            "required_files": ["index.faiss", "index.pkl"],
-        },
-    }
-    dataset_path = tmp_path / "evaluation_dataset.json"
-    manifest_path = snapshot_root / "manifest.json"
-    dataset_path.write_text(json.dumps(dataset), encoding="utf-8")
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    readiness = assess_evaluation_snapshot_readiness(
-        dataset_path=dataset_path,
-        manifest_path=manifest_path,
-        snapshot_root=snapshot_root,
-    )
-
-    assert readiness["ready"] is True
-    assert readiness["status"] == "ready"
-    assert readiness["missing_inputs"] == []
-    assert readiness["failed_checks"] == []
-
-
 def test_chat_monitoring_summary_and_rows_are_safe_metadata_only():
     messages = [
         {"role": "user", "content": "질문 본문"},
@@ -240,7 +117,6 @@ def test_chat_monitoring_summary_and_rows_are_safe_metadata_only():
                     "active_build_id": "build-v2",
                     "publication_generation": 3,
                     "write_epoch": 2,
-                    "v1_fallback_open": False,
                     "degraded": False,
                 },
             },
@@ -274,7 +150,6 @@ def test_chat_latency_metrics_use_only_successful_native_v2_samples():
         "active_snapshot_id": "snapshot-v2",
         "publication_generation": 3,
         "write_epoch": 2,
-        "v1_fallback_open": False,
         "degraded": False,
     }
     messages = [
@@ -591,7 +466,7 @@ def test_rdb_turn_marks_retrieval_k_not_applicable_without_fake_counts():
     }
 
 
-def test_legacy_vector_turn_does_not_invent_identity_or_completed_state_stages():
+def test_sparse_vector_turn_does_not_invent_identity_or_completed_state_stages():
     detail = build_message_trace_detail(
         {
             "content": "과거 근거 [1]",
@@ -599,7 +474,7 @@ def test_legacy_vector_turn_does_not_invent_identity_or_completed_state_stages()
             "metadata": {
                 "status": "succeeded",
                 "route": "vectordb",
-                "selected_sources": [{"rank": 1, "file_name": "legacy.pdf"}],
+                "selected_sources": [{"rank": 1, "file_name": "unidentified.pdf"}],
             },
         }
     )
@@ -611,7 +486,7 @@ def test_legacy_vector_turn_does_not_invent_identity_or_completed_state_stages()
         {
             "document_uid": None,
             "identity_status": "not_measured",
-            "file_name": "legacy.pdf",
+            "file_name": "unidentified.pdf",
             "target_name": None,
             "report_date": None,
             "title": None,
@@ -1257,7 +1132,7 @@ def test_summarize_all_chat_threads_and_issue_reports_for_global_monitoring():
     assert "Description" in rows[0]["preview"]
 
 
-def test_speed_summary_excludes_legacy_messages_without_v2_provenance():
+def test_speed_summary_excludes_messages_without_v2_provenance():
     summary = summarize_all_chat_threads(
         [
             {
@@ -1281,7 +1156,6 @@ def test_speed_summary_excludes_legacy_messages_without_v2_provenance():
                                 "active_build_id": "build-v2",
                                 "publication_generation": 3,
                                 "write_epoch": 2,
-                                "v1_fallback_open": False,
                                 "degraded": False,
                             },
                         },
@@ -1296,7 +1170,7 @@ def test_speed_summary_excludes_legacy_messages_without_v2_provenance():
     assert summary["p95_latency_seconds"] == 1.25
 
 
-def test_summarize_v2_data_integrity_never_falls_back_to_v1_metrics():
+def test_summarize_v2_data_integrity_requires_runtime_status():
     summary = summarize_v2_data_integrity(
         {
             "db": {"total_reports": 10, "embedded_reports": 7, "pending_reports": 3, "parent_chunks": 0},
@@ -1324,7 +1198,6 @@ def test_summarize_v2_data_integrity_uses_native_snapshot_membership_not_pickle_
             },
             "vector_db": {
                 "has_faiss_index": True,
-                "has_pickle_index": False,
                 "ntotal": 12,
             },
             "retrieval": {
@@ -1346,15 +1219,7 @@ def test_summarize_v2_data_integrity_uses_native_snapshot_membership_not_pickle_
     assert "embedding_backlog" not in summary["checks"]
 
 
-def test_summarize_v2_data_integrity_rejects_epoch_zero_compatibility():
-    summary = summarize_v2_data_integrity(
-        {"retrieval": {"mode": "epoch_zero_compatibility"}}
-    )
-
-    assert summary["checks"]["v2_runtime"]["status"] == "fail"
-
-
-def test_build_native_v2_evaluation_data_source_rejects_epoch_zero():
+def test_build_native_v2_evaluation_data_source_rejects_zero_write_epoch():
     with pytest.raises(
         CandidateValidationError,
         match="successor Native V2",
@@ -1368,7 +1233,6 @@ def test_build_native_v2_evaluation_data_source_rejects_epoch_zero():
                     "profile_hash": "a" * 64,
                     "publication_generation": 1,
                     "write_epoch": 0,
-                    "v1_fallback_open": True,
                     "degraded": False,
                 }
             }
@@ -1606,7 +1470,7 @@ def test_regression_candidate_helpers_list_rows_and_build_draft_dataset(tmp_path
     assert dataset["cases"] == [candidate_a["eval_case_draft"]]
 
 
-def test_active_monitoring_candidate_list_ignores_v1_contracts(tmp_path):
+def test_active_monitoring_candidate_list_ignores_pre_v2_contracts(tmp_path):
     promote_issue_report_to_eval_candidate(
         {"id": "old", "category": "답변 품질", "content": "old"},
         output_dir=tmp_path,
@@ -1672,31 +1536,29 @@ def test_run_evaluation_dataset_runs_selected_case_ids_only(tmp_path):
         fake_invoke,
         output_dir=tmp_path,
         selected_case_ids=["case-b"],
-        execution_mode="fixed_snapshot",
-        data_source={"db_path": "snapshot/reports.db"},
     )
 
     assert seen_questions == ["B"]
     assert run["selected_case_ids"] == ["case-b"]
     assert run["summary"]["case_count"] == 1
-    assert run["execution_mode"] == "fixed_snapshot"
-    assert run["data_source"] == {"db_path": "snapshot/reports.db"}
+    assert run["execution_mode"] == "current_data"
+    assert run["data_source"] == {}
     saved = Path(run["json_path"]).read_text(encoding="utf-8")
-    assert '"execution_mode": "fixed_snapshot"' in saved
+    assert '"execution_mode": "current_data"' in saved
 
 
-def test_filter_evaluation_runs_by_mode_does_not_compare_current_and_snapshot_runs():
+def test_filter_evaluation_runs_by_mode_separates_native_runs():
     runs = [
         {"run_id": "old-current"},
         {"run_id": "new-current", "execution_mode": "current_data"},
-        {"run_id": "snapshot", "execution_mode": "fixed_snapshot"},
+        {"run_id": "native", "execution_mode": "native_v2"},
     ]
 
     assert [run["run_id"] for run in filter_evaluation_runs_by_mode(runs, "current_data")] == [
         "old-current",
         "new-current",
     ]
-    assert [run["run_id"] for run in filter_evaluation_runs_by_mode(runs, "fixed_snapshot")] == ["snapshot"]
+    assert [run["run_id"] for run in filter_evaluation_runs_by_mode(runs, "native_v2")] == ["native"]
 
 
 def test_build_evaluation_failure_actions_explains_next_steps_by_failure_type():

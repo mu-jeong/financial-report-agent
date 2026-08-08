@@ -12,16 +12,14 @@ from src.retrieval.build_service import NativeBuildError, execute_incremental_up
 from src.retrieval.continuous_update import execute_continuous_update
 from src.retrieval.reader import NativeRetrievalReader
 from src.retrieval.repository import CatalogRepository, SnapshotCache
-from tests.retrieval.test_retrieval_build_service import (
+from tests.retrieval.native_build_fixtures import (
     PREFIX,
     DeterministicEmbeddings,
-    _activate_seed_for_incremental,
     _extract,
     _metadata,
-    _migration_profile,
+    _native_profile,
     _native_seed,
 )
-
 
 def _metadata_with_new_reports(file_name: str):
     existing = _metadata(file_name)
@@ -43,9 +41,8 @@ def _extract_with_new_reports(path: Path, engine: str) -> str:
     return f"{path.stem} newly searchable report content"
 
 
-def _options(data_root: Path, embeddings: DeterministicEmbeddings) -> dict[str, object]:
+def _options(embeddings: DeterministicEmbeddings) -> dict[str, object]:
     return {
-        "data_root": data_root,
         "embeddings": embeddings,
         "model": "model-a",
         "extractor_name": "deterministic-extractor",
@@ -64,16 +61,15 @@ def _seed(tmp_path: Path) -> tuple[Path, Path]:
     data_root, sources = _native_seed(
         tmp_path,
         seed_matches_current_source=True,
-        profile=_migration_profile(),
+        profile=_native_profile(),
     )
-    _activate_seed_for_incremental(data_root)
+    (sources / "b.pdf").write_bytes(b"baseline-change")
     return data_root, sources
 
 
 def _runtime_revision(data_root: Path) -> tuple[str, int, int]:
     selection = inspect_runtime(
-        data_root / "reports.db",
-        data_root=data_root,
+        data_root,
         validate_snapshot=True,
     )
     return (
@@ -109,13 +105,13 @@ def test_continuous_update_publishes_batches_then_compacts_once(tmp_path: Path) 
     callback_states: list[tuple[int, list[list[str]]]] = []
 
     result = execute_continuous_update(
-        data_root / "reports.db",
+        data_root,
         sources,
         batch_size=2,
         progress_callback=lambda publication: callback_states.append(
             (publication.sequence, [list(call) for call in embeddings.calls])
         ),
-        **_options(data_root, embeddings),
+        **_options(embeddings),
     )
 
     assert result is not None
@@ -169,62 +165,15 @@ def test_continuous_update_publishes_batches_then_compacts_once(tmp_path: Path) 
     assert published <= visible
 
 
-def test_epoch_zero_uses_one_complete_successor_without_sparse_deltas(
-    tmp_path: Path,
-) -> None:
-    data_root, sources = _native_seed(
-        tmp_path,
-        seed_matches_current_source=True,
-        profile=_migration_profile(),
-    )
-    before = _runtime_revision(data_root)
-    callbacks = []
-
-    result = execute_continuous_update(
-        data_root / "reports.db",
-        sources,
-        progress_callback=callbacks.append,
-        **_options(data_root, DeterministicEmbeddings()),
-    )
-
-    assert result is not None
-    assert before[2] == 0
-    assert result.delta_publications == ()
-    assert callbacks == []
-    assert result.attempted_report_uids == ()
-    assert result.failed_report_uids == ()
-    assert result.candidate_result.report_count == 2
-    assert result.publication_outcome.publication_generation == before[1] + 1
-    assert result.publication_outcome.write_epoch == 1
-    assert result.publication_outcome.v1_fallback_open is False
-
-    catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
-    with sqlite3.connect(catalog) as connection:
-        delta_table_count = connection.execute(
-            """
-            SELECT COUNT(*) FROM sqlite_schema
-            WHERE type = 'table' AND name = 'retrieval_delta_segments'
-            """
-        ).fetchone()[0]
-    assert delta_table_count == 0
-    assert set(_active_report_uids(data_root)) == {
-        "downloaded/a.pdf",
-        "downloaded/b.pdf",
-    }
-    assert _vector_visible_report_uids(data_root) == set(
-        _active_report_uids(data_root).values()
-    )
-
-
 @pytest.mark.slow
 def test_failure_is_durable_retains_old_version_and_is_not_retried(
     tmp_path: Path,
 ) -> None:
     data_root, sources = _seed(tmp_path)
     baseline = execute_continuous_update(
-        data_root / "reports.db",
+        data_root,
         sources,
-        **_options(data_root, DeterministicEmbeddings()),
+        **_options(DeterministicEmbeddings()),
     )
     assert baseline is not None
     old_b_uid = _active_report_uids(data_root)["downloaded/b.pdf"]
@@ -240,10 +189,10 @@ def test_failure_is_durable_retains_old_version_and_is_not_retried(
         return _extract_with_new_reports(path, engine)
 
     embeddings = DeterministicEmbeddings()
-    options = _options(data_root, embeddings)
+    options = _options(embeddings)
     options["extractor"] = fail_b
     result = execute_continuous_update(
-        data_root / "reports.db",
+        data_root,
         sources,
         batch_size=2,
         **options,
@@ -281,10 +230,10 @@ def test_failure_is_durable_retains_old_version_and_is_not_retried(
     before_noop = _runtime_revision(data_root)
     extracted.clear()
     noop_embeddings = DeterministicEmbeddings()
-    noop_options = _options(data_root, noop_embeddings)
+    noop_options = _options(noop_embeddings)
     noop_options["extractor"] = fail_b
     assert execute_continuous_update(
-        data_root / "reports.db",
+        data_root,
         sources,
         **noop_options,
     ) is None
@@ -305,10 +254,10 @@ def test_restart_compacts_a_ready_delta_without_pending_source_changes(
 
     with pytest.raises(RuntimeError, match="simulate process interruption"):
         execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
             progress_callback=interrupt_after_delta,
-            **_options(data_root, first_embeddings),
+            **_options(first_embeddings),
         )
 
     catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
@@ -327,9 +276,9 @@ def test_restart_compacts_a_ready_delta_without_pending_source_changes(
 
     restart_embeddings = DeterministicEmbeddings()
     result = execute_continuous_update(
-        data_root / "reports.db",
+        data_root,
         sources,
-        **_options(data_root, restart_embeddings),
+        **_options(restart_embeddings),
     )
 
     assert result is not None
@@ -350,9 +299,7 @@ def test_restart_compacts_a_ready_delta_without_pending_source_changes(
     assert _vector_visible_report_uids(data_root) == set(
         _active_report_uids(data_root).values()
     )
-
-
-def test_legacy_incremental_writer_rejects_an_active_delta_chain(tmp_path: Path) -> None:
+def test_full_corpus_writer_rejects_an_active_delta_chain(tmp_path: Path) -> None:
     data_root, sources = _seed(tmp_path)
 
     def interrupt_after_delta(_publication) -> None:
@@ -360,17 +307,17 @@ def test_legacy_incremental_writer_rejects_an_active_delta_chain(tmp_path: Path)
 
     with pytest.raises(RuntimeError, match="simulate process interruption"):
         execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
             progress_callback=interrupt_after_delta,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
 
     with pytest.raises(NativeBuildError, match="use execute_continuous_update"):
         execute_incremental_update(
-            data_root / "reports.db",
+            data_root,
             sources,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
 
 
@@ -393,10 +340,10 @@ def test_open_composite_request_survives_final_compaction(tmp_path: Path) -> Non
 
     try:
         result = execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
             progress_callback=pin_composite,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
 
         assert result is not None
@@ -461,10 +408,10 @@ def test_independent_cache_pinned_composite_survives_next_base_gc(
 
     try:
         first = execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
             progress_callback=pin_without_searching,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
         assert first is not None
         assert pinned is not None
@@ -483,9 +430,9 @@ def test_independent_cache_pinned_composite_survives_next_base_gc(
 
         (sources / "z.pdf").write_bytes(b"new-z")
         second = execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
 
         assert second is not None
@@ -526,17 +473,17 @@ def test_independent_cache_pinned_base_survives_two_publications(
         assert pinned.revision.delta_segment_count == 0
 
         first = execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
         assert first is not None
 
         (sources / "z.pdf").write_bytes(b"new-z")
         second = execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
 
         assert second is not None
@@ -557,9 +504,9 @@ def test_delete_only_composite_eagerly_pins_base_across_next_gc(
 ) -> None:
     data_root, sources = _seed(tmp_path)
     baseline = execute_continuous_update(
-        data_root / "reports.db",
+        data_root,
         sources,
-        **_options(data_root, DeterministicEmbeddings()),
+        **_options(DeterministicEmbeddings()),
     )
     assert baseline is not None
     active_reports = _active_report_uids(data_root)
@@ -590,11 +537,11 @@ def test_delete_only_composite_eagerly_pins_base_across_next_gc(
 
     try:
         first = execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
             deleted_relative_paths=("downloaded/b.pdf",),
             progress_callback=pin_delete_only_revision,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
         assert first is not None
         assert pinned is not None
@@ -603,9 +550,9 @@ def test_delete_only_composite_eagerly_pins_base_across_next_gc(
 
         (sources / "z.pdf").write_bytes(b"new-z")
         second = execute_continuous_update(
-            data_root / "reports.db",
+            data_root,
             sources,
-            **_options(data_root, DeterministicEmbeddings()),
+            **_options(DeterministicEmbeddings()),
         )
 
         assert second is not None
@@ -627,9 +574,9 @@ def test_compacted_delta_artifact_is_retained_until_base_gc_boundary(
     data_root, sources = _seed(tmp_path)
     before = _runtime_revision(data_root)
     result = execute_continuous_update(
-        data_root / "reports.db",
+        data_root,
         sources,
-        **_options(data_root, DeterministicEmbeddings()),
+        **_options(DeterministicEmbeddings()),
     )
 
     assert result is not None

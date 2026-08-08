@@ -7,13 +7,13 @@ from typing import Any
 import requests
 
 from src.configs.config import (
-    FAISS_DIR,
     OPENROUTER_API_KEY,
     OPENROUTER_APP_TITLE,
     OPENROUTER_APP_URL,
     OPENROUTER_DATA_COLLECTION,
     RERANK_MODEL,
     RERANK_PROVIDER,
+    RERANK_CACHE_DIR,
     RERANK_TIMEOUT,
     get_logger,
 )
@@ -119,7 +119,7 @@ class FlashRankReranker:
         from flashrank import Ranker, RerankRequest
 
         self._request_cls = RerankRequest
-        self._ranker = Ranker(model_name=RERANK_MODEL, cache_dir=FAISS_DIR)
+        self._ranker = Ranker(model_name=RERANK_MODEL, cache_dir=RERANK_CACHE_DIR)
         logger.info("✅ 로컬 FlashRank 모델 로딩 완료!")
 
     def rerank(self, query: str, passages: list[dict], top_n: int) -> list[dict]:

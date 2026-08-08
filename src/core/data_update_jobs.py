@@ -16,7 +16,6 @@ import sys
 import threading
 import time
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any, Callable
 
 from src.configs import config
@@ -27,6 +26,10 @@ STATUS_PATH = JOB_DIR / "status.json"
 LOG_PATH = JOB_DIR / "latest.log"
 
 _SAFE_EMBEDDING_FAILURE_HINTS = (
+    (
+        "committed floor checkpoint hash does not match",
+        "retrieval checkpoint metadata is out of sync",
+    ),
     ("provider unavailable", "provider unavailable"),
     ("insufficient credit", "insufficient provider credits"),
     ("rate limit", "provider rate limit reached"),
@@ -290,19 +293,11 @@ def _popen_creation_kwargs() -> dict[str, Any]:
 
 
 def build_embedding_command(
-    limit: int | None = None,
     *,
-    continue_on_extraction_error: bool = False,
     retry_extraction_failures: bool = False,
 ) -> list[str]:
     """Build the embed_pipeline command for pending reports."""
     command = [sys.executable, "-m", "src.core.embed_pipeline"]
-    if limit is None:
-        command.append("--all")
-    else:
-        command.extend(["--limit", str(max(0, int(limit)))])
-    if continue_on_extraction_error:
-        command.append("--continue-on-extraction-error")
     if retry_extraction_failures:
         command.append("--retry-extraction-failures")
     return command
@@ -311,20 +306,18 @@ def build_embedding_command(
 def start_embedding_job(
     *,
     label: str,
-    limit: int | None = None,
     retry_extraction_failures: bool = False,
 ) -> dict[str, Any]:
     """Start a detached embedding-only job and return the initial status."""
     guard_before_retrieval_write(
-        config.DB_PATH,
+        config.DATA_ROOT,
         allow_degraded_forward_recovery=True,
+        allow_empty_preflight=True,
     )
     JOB_DIR.mkdir(parents=True, exist_ok=True)
     LOG_PATH.write_text("", encoding="utf-8")
     parent_pid = os.getpid()
     command = [sys.executable, "-m", "src.core.data_update_jobs", "embed", "--label", label]
-    if limit is not None:
-        command.extend(["--limit", str(max(0, int(limit)))])
     if retry_extraction_failures:
         command.append("--retry-extraction-failures")
     command.extend(["--parent-pid", str(parent_pid)])
@@ -342,7 +335,6 @@ def start_embedding_job(
         "message": f"{label}: 임베딩 작업을 시작했습니다.",
         "pid": process.pid,
         "label": label,
-        "embedding_limit": limit,
         "retry_extraction_failures": retry_extraction_failures,
         "log_path": str(LOG_PATH),
         "parent_pid": parent_pid,
@@ -360,7 +352,10 @@ def start_update_job(
     categories: str | list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Start a detached update job and return the initial status."""
-    guard_before_retrieval_write(config.DB_PATH)
+    guard_before_retrieval_write(
+        config.DATA_ROOT,
+        allow_empty_preflight=True,
+    )
     selected_dates = normalize_date_list(selected_dates)
     selected_categories = normalize_update_categories(categories)
     if selected_dates:
@@ -467,17 +462,16 @@ def _run_subprocess_stream(
 def run_embedding_job(
     *,
     label: str,
-    limit: int | None = None,
     retry_extraction_failures: bool = False,
     parent_pid: int | None = None,
 ) -> int:
     """Run an embedding-only job and persist progress status for the GUI."""
     try:
-        runtime = guard_before_retrieval_write(
-            config.DB_PATH,
+        guard_before_retrieval_write(
+            config.DATA_ROOT,
             allow_degraded_forward_recovery=True,
+            allow_empty_preflight=True,
         )
-        continuous_search = bool(getattr(runtime, "is_native", False))
         _write_status(
             {
                 "state": "running",
@@ -486,12 +480,9 @@ def run_embedding_job(
                 "message": (
                     f"{label}: 문서를 처리해 검색에 반영하는 중입니다. "
                     "기존 검색은 계속 사용할 수 있습니다."
-                    if continuous_search
-                    else f"{label}: 미임베딩 문서 임베딩 중..."
                 ),
                 "label": label,
-                "search_available_during_update": continuous_search,
-                "embedding_limit": limit,
+                "search_available_during_update": True,
                 "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
@@ -512,8 +503,7 @@ def run_embedding_job(
                     "percent": min(98, 5 + int((current / total) * 90)),
                     "message": f"{label}: 처리 중 ({current}/{total}) {file_label}",
                     "label": label,
-                    "search_available_during_update": continuous_search,
-                    "embedding_limit": limit,
+                    "search_available_during_update": True,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
                     "embedding_current": current,
@@ -525,8 +515,6 @@ def run_embedding_job(
 
         code, output = _run_subprocess_stream(
             build_embedding_command(
-                limit,
-                continue_on_extraction_error=True,
                 retry_extraction_failures=retry_extraction_failures,
             ),
             on_line=on_embed_line,
@@ -549,7 +537,6 @@ def run_embedding_job(
                 "percent": 100,
                 "message": completion_message,
                 "label": label,
-                "embedding_limit": limit,
                 "embedding_failure_count": extraction_failure_count,
                 "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
@@ -566,7 +553,6 @@ def run_embedding_job(
                 "percent": 100,
                 "message": f"{label}: 임베딩 작업 실패 - {exc}",
                 "label": label,
-                "embedding_limit": limit,
                 "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
@@ -575,13 +561,6 @@ def run_embedding_job(
             }
         )
         return 1
-
-
-def _processed_report_count(output: str) -> int:
-    matches = re.findall("(?:\ucc98\ub9ac\ub41c\\s*\ub9ac\ud3ec\ud2b8|\ucc98\ub9ac\ub41c\\s*\ub370\uc774\ud130):\\s*(\\d+)\uac74", output)
-    if not matches:
-        matches = re.findall("\ub370\uc774\ud130\\s*(\\d+)\uac74", output)
-    return sum(int(match) for match in matches)
 
 
 def embedding_file_progress_from_line(line: str) -> tuple[int, int, str] | None:
@@ -629,7 +608,7 @@ def embedding_failure_message(exit_code: int, output: str) -> str:
 
 
 def embedding_extraction_failure_count(output: str) -> int:
-    """Return the safe aggregate count emitted by V1 or V2 extraction handling."""
+    """Return the safe aggregate count emitted by native extraction handling."""
 
     native_matches = re.findall(
         r"Native V2 update complete:.*\bfailed=(\d+)",
@@ -637,13 +616,6 @@ def embedding_extraction_failure_count(output: str) -> int:
     )
     if native_matches:
         return int(native_matches[-1])
-    v1_matches = re.findall(
-        r"Quick Start is continuing after\s+(\d+)\s+PDF parsing failure",
-        output,
-        flags=re.IGNORECASE,
-    )
-    if v1_matches:
-        return int(v1_matches[-1])
     return sum(
         "Excluding PDF after primary and fallback extraction failed:" in line
         for line in output.splitlines()
@@ -661,7 +633,10 @@ def run_update_job(
 ) -> int:
     """Run crawler then embedding pipeline, updating status as each phase completes."""
     try:
-        runtime = guard_before_retrieval_write(config.DB_PATH)
+        guard_before_retrieval_write(
+            config.DATA_ROOT,
+            allow_empty_preflight=True,
+        )
         normalized_dates = normalize_date_list(selected_dates)
         selected_categories = normalize_update_categories(categories)
         if normalized_dates:
@@ -678,7 +653,6 @@ def run_update_job(
         if not date_ranges:
             raise ValueError("No update date range was provided")
 
-        processed_total = 0
         for index, (range_start, range_end) in enumerate(date_ranges, start=1):
             percent = 10 + int(((index - 1) / max(len(date_ranges), 1)) * 50)
             _write_status(
@@ -705,26 +679,6 @@ def run_update_job(
             )
             if code != 0:
                 raise RuntimeError(f"crawler failed with exit code {code}")
-            processed_total += _processed_report_count(output)
-
-        if processed_total == 0 and not runtime.is_native:
-            _write_status(
-                {
-                    "state": "succeeded",
-                    "phase": "no_data",
-                    "percent": 100,
-                    "message": f"{label}: 처리할 데이터가 없습니다.",
-                    "label": label,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "selected_dates": normalized_dates,
-                    "categories": selected_categories,
-                    "log_path": str(LOG_PATH),
-                    "pid": os.getpid(),
-                    "parent_pid": parent_pid,
-                }
-            )
-            return 0
 
         _write_status(
             {
@@ -734,11 +688,9 @@ def run_update_job(
                 "message": (
                     f"{label}: 문서를 처리해 검색에 반영하는 중입니다. "
                     "기존 검색은 계속 사용할 수 있습니다."
-                    if runtime.is_native
-                    else f"{label}: 임베딩/검색 인덱스 생성 중..."
                 ),
                 "label": label,
-                "search_available_during_update": runtime.is_native,
+                "search_available_during_update": True,
                 "start_date": start_date,
                 "end_date": end_date,
                 "selected_dates": normalized_dates,
@@ -763,7 +715,7 @@ def run_update_job(
                     "percent": percent,
                     "message": f"{label}: 처리 중 ({current}/{total}) {file_label}",
                     "label": label,
-                    "search_available_during_update": runtime.is_native,
+                    "search_available_during_update": True,
                     "start_date": start_date,
                     "end_date": end_date,
                     "selected_dates": normalized_dates,
@@ -778,7 +730,7 @@ def run_update_job(
             )
 
         code, output = _run_subprocess_stream(
-            build_embedding_command(None, continue_on_extraction_error=True),
+            build_embedding_command(),
             on_line=on_embed_line,
             parent_pid=parent_pid,
         )
@@ -843,7 +795,6 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--parent-pid", type=int)
     embed_parser = subparsers.add_parser("embed")
     embed_parser.add_argument("--label", required=True)
-    embed_parser.add_argument("--limit", type=int)
     embed_parser.add_argument("--retry-extraction-failures", action="store_true")
     embed_parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)
@@ -860,7 +811,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "embed":
         return run_embedding_job(
             label=args.label,
-            limit=args.limit,
             retry_extraction_failures=args.retry_extraction_failures,
             parent_pid=args.parent_pid,
         )

@@ -3,8 +3,7 @@
 Recovery never selects a snapshot by inspecting filenames.  It either trusts
 an integrity-checked SQLite control plane, restores the checkpoint named by the
 highest validated committed floor, serves the verified V2 predecessor in a
-degraded epoch-positive state, selects the epoch-zero compatibility bridge, or
-fails vector retrieval closed.
+degraded state, or fails vector retrieval closed.
 """
 
 from __future__ import annotations
@@ -33,12 +32,14 @@ from .publication import (
     _floor_path,
     _fsync_directory,
     _fsync_file,
+    _is_exact_empty_runtime,
     _open_catalog,
     _phase_before,
     _read_json,
     _read_publication,
     _read_runtime,
     _resolve_relative,
+    _schema_keys_match,
     _set_phase,
     _sha256_file,
     _transaction,
@@ -57,7 +58,6 @@ class RecoveryDisposition(str, Enum):
     PUBLICATION_COMPLETED = "publication_completed"
     CHECKPOINT_RESTORED = "checkpoint_restored"
     PREDECESSOR_DEGRADED = "predecessor_degraded"
-    V1_FALLBACK = "v1_fallback"
     FAIL_CLOSED = "fail_closed"
 
 
@@ -68,7 +68,6 @@ class RecoveryOutcome:
     write_epoch: int | None
     active_snapshot_id: str | None
     predecessor_snapshot_id: str | None
-    v1_fallback_open: bool
     degraded: bool
     write_enabled: bool
     restored_checkpoint: bool = False
@@ -128,7 +127,6 @@ class StartupReconciler:
                     write_epoch=None,
                     active_snapshot_id=None,
                     predecessor_snapshot_id=None,
-                    v1_fallback_open=False,
                     degraded=True,
                     write_enabled=False,
                     reason=(
@@ -217,7 +215,6 @@ class StartupReconciler:
                         write_epoch=published.write_epoch,
                         active_snapshot_id=published.active_snapshot_id,
                         predecessor_snapshot_id=published.predecessor_snapshot_id,
-                        v1_fallback_open=published.v1_fallback_open,
                         degraded=False,
                         write_enabled=request.enable_writes_on_complete,
                         restored_checkpoint=restored,
@@ -259,7 +256,6 @@ class StartupReconciler:
                     write_epoch=None,
                     active_snapshot_id=None,
                     predecessor_snapshot_id=None,
-                    v1_fallback_open=False,
                     degraded=True,
                     write_enabled=False,
                     restored_checkpoint=restored,
@@ -280,12 +276,10 @@ class StartupReconciler:
         runtime = _read_runtime(connection)
         active = runtime["active_snapshot_id"]
         if active is None:
-            if int(runtime["write_epoch"]) == 0 and bool(
-                runtime["v1_fallback_open"]
-            ):
+            if _is_exact_empty_runtime(runtime):
                 return _runtime_outcome(
                     runtime,
-                    RecoveryDisposition.V1_FALLBACK,
+                    disposition,
                     restored=restored,
                 )
             return self._fail_closed(
@@ -327,21 +321,6 @@ class StartupReconciler:
                 runtime, RecoveryDisposition.ACTIVE, restored=restored
             )
         except PublicationError as active_error:
-            if int(runtime["write_epoch"]) == 0 and bool(
-                runtime["v1_fallback_open"]
-            ):
-                return RecoveryOutcome(
-                    disposition=RecoveryDisposition.V1_FALLBACK,
-                    publication_generation=int(runtime["publication_generation"]),
-                    write_epoch=0,
-                    active_snapshot_id=None,
-                    predecessor_snapshot_id=None,
-                    v1_fallback_open=True,
-                    degraded=True,
-                    write_enabled=False,
-                    restored_checkpoint=restored,
-                    reason=str(active_error),
-                )
             predecessor = runtime["predecessor_snapshot_id"]
             if predecessor is None:
                 return self._fail_closed(
@@ -409,7 +388,7 @@ class StartupReconciler:
             / publication_id
         )
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "active_recovery",
             "publication_id": publication_id,
             "from_snapshot_id": from_snapshot,
@@ -423,12 +402,11 @@ class StartupReconciler:
             f"retrieval/v2/evidence/{publication_id}/manifest.json"
         )
         intent = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "active_recovery",
             "publication_id": publication_id,
             "target_publication_generation": target_generation,
             "write_epoch": int(runtime["write_epoch"]),
-            "v1_fallback_floor": "closed",
             "from_snapshot_id": from_snapshot,
             "to_snapshot_id": to_snapshot,
             "to_build_id": str(to_build[0]),
@@ -512,15 +490,18 @@ class StartupReconciler:
         manifest = _read_json(manifest_path)
         if manifest.get("kind") != "active_recovery":
             return False
-        expected_manifest = {
-            "schema_version": 1,
+        required_manifest = {
             "kind": "active_recovery",
             "publication_id": publication_id,
             "from_snapshot_id": row["from_snapshot_id"],
             "to_snapshot_id": row["to_snapshot_id"],
             "reason_code": "active_snapshot_validation_failed",
         }
-        if manifest != expected_manifest:
+        required_keys = {"schema_version", *required_manifest}
+        if (
+            not _schema_keys_match(manifest, required_keys)
+            or not required_manifest.items() <= manifest.items()
+        ):
             raise PublicationError("active-recovery manifest conflicts with its journal")
         return True
 
@@ -547,14 +528,12 @@ class StartupReconciler:
                         intent["from_snapshot_id"],
                         intent["to_snapshot_id"],
                         int(intent["write_epoch"]),
-                        False,
                     )
                     actual = (
                         int(runtime["publication_generation"]),
                         runtime["active_snapshot_id"],
                         runtime["predecessor_snapshot_id"],
                         int(runtime["write_epoch"]),
-                        bool(runtime["v1_fallback_open"]),
                     )
                     if actual != expected:
                         raise PublicationError(
@@ -637,13 +616,12 @@ class StartupReconciler:
                 _set_phase(connection, publication_id, "checkpoint_validated")
 
             floor_payload = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "publication_id": publication_id,
                 "publication_generation": int(
                     intent["target_publication_generation"]
                 ),
                 "write_epoch": int(intent["write_epoch"]),
-                "v1_fallback_floor": "closed",
                 "active_snapshot_id": str(intent["to_snapshot_id"]),
                 "checkpoint_relative_path": checkpoint_relative,
                 "checkpoint_sha256": checkpoint_hash,
@@ -739,13 +717,9 @@ class StartupReconciler:
                     int(runtime["publication_generation"])
                     < highest.publication_generation
                     or int(runtime["write_epoch"]) < highest.write_epoch
-                    or (
-                        not highest.fallback_open
-                        and bool(runtime["v1_fallback_open"])
-                    )
                 ):
                     raise PublicationError(
-                        "checkpoint is below the durable compatibility floor"
+                        "checkpoint is below the durable committed floor"
                     )
             finally:
                 check.close()
@@ -824,7 +798,6 @@ class StartupReconciler:
                     if runtime["predecessor_snapshot_id"] is None
                     else str(runtime["predecessor_snapshot_id"])
                 ),
-                v1_fallback_open=bool(runtime["v1_fallback_open"]),
                 degraded=True,
                 write_enabled=False,
                 restored_checkpoint=restored,
@@ -837,7 +810,6 @@ class StartupReconciler:
                 write_epoch=None,
                 active_snapshot_id=None,
                 predecessor_snapshot_id=None,
-                v1_fallback_open=False,
                 degraded=True,
                 write_enabled=False,
                 restored_checkpoint=restored,
@@ -885,6 +857,16 @@ def _validate_runtime_floor_at_startup(
     if not floors:
         if generation == 0:
             return
+        if (
+            generation == 1
+            and journal is not None
+            and str(journal["state"]) == "running"
+            and not _phase_before(
+                str(journal["phase"]), "committed_pending_checkpoint"
+            )
+            and journal["to_snapshot_id"] == runtime["active_snapshot_id"]
+        ):
+            return
         raise PublicationError(
             "a positive publication generation requires a durable committed floor"
         )
@@ -892,7 +874,6 @@ def _validate_runtime_floor_at_startup(
     if generation == highest.publication_generation:
         if (
             int(runtime["write_epoch"]) != highest.write_epoch
-            or bool(runtime["v1_fallback_open"]) != highest.fallback_open
             or runtime["active_snapshot_id"] != highest.active_snapshot_id
         ):
             raise PublicationError(
@@ -964,13 +945,20 @@ def _validate_external_commit_intents(
             raise PublicationError("commit intent target conflicts with its journal")
         generation = int(runtime["publication_generation"])
         if generation == highest_generation:
-            if (
-                not _phase_before(
-                    str(row["phase"]), "committed_pending_checkpoint"
-                )
-                or not floors
-                or runtime["active_snapshot_id"] != floors[-1].active_snapshot_id
+            if not _phase_before(
+                str(row["phase"]), "committed_pending_checkpoint"
             ):
+                raise PublicationError(
+                    "pre-commit runtime conflicts with unresolved intent"
+                )
+            if (
+                floors
+                and runtime["active_snapshot_id"] != floors[-1].active_snapshot_id
+            ):
+                raise PublicationError(
+                    "pre-commit runtime conflicts with unresolved intent"
+                )
+            if not floors and not _is_exact_empty_runtime(runtime):
                 raise PublicationError(
                     "pre-commit runtime conflicts with unresolved intent"
                 )
@@ -993,16 +981,13 @@ def _validate_recovery_intent(intent: Mapping[str, Any]) -> None:
         "publication_id",
         "target_publication_generation",
         "write_epoch",
-        "v1_fallback_floor",
         "from_snapshot_id",
         "to_snapshot_id",
         "to_build_id",
     }
     if (
-        set(intent) != required
-        or intent.get("schema_version") != 1
+        not _schema_keys_match(intent, required)
         or intent.get("kind") != "active_recovery"
-        or intent.get("v1_fallback_floor") != "closed"
     ):
         raise PublicationError("active-recovery intent is invalid")
     if any(
@@ -1032,7 +1017,6 @@ def _validate_recovered_runtime(
     actual = (
         int(runtime["publication_generation"]),
         int(runtime["write_epoch"]),
-        bool(runtime["v1_fallback_open"]),
         runtime["active_snapshot_id"],
         runtime["active_build_id"],
         runtime["predecessor_snapshot_id"],
@@ -1042,7 +1026,6 @@ def _validate_recovered_runtime(
     expected = (
         int(intent["target_publication_generation"]),
         int(intent["write_epoch"]),
-        False,
         intent["to_snapshot_id"],
         intent["to_build_id"],
         None,
@@ -1073,7 +1056,6 @@ def _runtime_outcome(
             if runtime["predecessor_snapshot_id"] is None
             else str(runtime["predecessor_snapshot_id"])
         ),
-        v1_fallback_open=bool(runtime["v1_fallback_open"]),
         degraded=bool(runtime["degraded"]),
         write_enabled=bool(runtime["write_enabled"]),
         restored_checkpoint=restored,

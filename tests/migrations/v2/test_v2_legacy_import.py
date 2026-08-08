@@ -8,10 +8,10 @@ from pathlib import Path
 import faiss
 import numpy as np
 import pytest
-from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_core.documents import Document
 
 from src.migrations.v2.legacy_import import LegacyImportError, reconstruct_v1_documents
+from tests.migrations.v2.legacy_pickle_fixture import InMemoryDocstore
 
 
 PREFIX_TEMPLATE = "[Company: {target_name}, Title: {title}]\n"

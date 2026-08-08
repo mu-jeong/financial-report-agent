@@ -36,24 +36,40 @@ def _search_engine_status_content(status: dict) -> tuple[str, str]:
     )
 
 
-@st.fragment(run_every=1.0)
 def render_search_engine_status() -> None:
-    status = search_engine.start_search_engine_warmup()
-    queue_was_pending = bool(
-        st.session_state.get("search_engine_queue_was_pending", False)
-    )
-    if queue_was_pending and not chat_jobs.has_pending_search_engine_job():
-        st.session_state["search_engine_queue_was_pending"] = False
-        st.rerun(scope="app")
-    message_kind, message = _search_engine_status_content(status)
-    getattr(st, message_kind)(message)
-    if status["state"] == "failed" and st.button(
-        "검색 엔진 다시 준비",
-        key="retry_search_engine_warmup",
-        use_container_width=True,
-    ):
-        search_engine.retry_search_engine_warmup()
-        st.rerun(scope="fragment")
+    initial_status = search_engine.start_search_engine_warmup()
+    queue_is_pending = chat_jobs.has_pending_search_engine_job()
+    polling_active = initial_status["state"] == "warming" or queue_is_pending
+
+    @st.fragment(run_every=1.0 if polling_active else None)
+    def render_status() -> None:
+        status = search_engine.start_search_engine_warmup()
+        queue_is_pending_now = chat_jobs.has_pending_search_engine_job()
+        queue_was_pending = bool(
+            st.session_state.get("search_engine_queue_was_pending", False)
+        )
+        queue_became_available = queue_was_pending and not queue_is_pending_now
+        polling_finished = (
+            polling_active
+            and status["state"] != "warming"
+            and not queue_is_pending_now
+        )
+        if queue_became_available:
+            st.session_state["search_engine_queue_was_pending"] = False
+        if queue_became_available or polling_finished:
+            st.rerun(scope="app")
+
+        message_kind, message = _search_engine_status_content(status)
+        getattr(st, message_kind)(message)
+        if status["state"] == "failed" and st.button(
+            "검색 엔진 다시 준비",
+            key="retry_search_engine_warmup",
+            use_container_width=True,
+        ):
+            search_engine.retry_search_engine_warmup()
+            st.rerun(scope="app")
+
+    render_status()
 
 
 def _render_issue_report_control(
@@ -416,40 +432,48 @@ def _render_message(message: dict, *, index: int) -> None:
 
 def render_chat(current_id: str, current_thread: dict) -> None:
     st.header(current_thread["name"])
+    chat_history_region = st.container()
+    search_engine_status_region = st.container()
 
-    messages = conversation_store.list_messages(current_id)
-    for index, message in enumerate(messages):
-        _render_message(message, index=index)
+    with chat_history_region:
+        messages = conversation_store.list_messages(current_id)
+        for index, message in enumerate(messages):
+            _render_message(message, index=index)
 
-    pending_scroll_anchor = st.session_state.pop("pending_scroll_anchor", None)
-    if pending_scroll_anchor:
-        _scroll_to_anchor(pending_scroll_anchor)
+        pending_scroll_anchor = st.session_state.pop("pending_scroll_anchor", None)
+        if pending_scroll_anchor:
+            _scroll_to_anchor(pending_scroll_anchor)
 
-    has_running_job = chat_jobs.thread_has_running_job(messages)
-    has_pending_engine_job = chat_jobs.has_pending_search_engine_job()
-    st.session_state["search_engine_queue_was_pending"] = has_pending_engine_job
-    chat_input_locked = has_running_job or has_pending_engine_job
-    if has_running_job:
-        waiting_for_engine = any(
-            message.get("role") == "assistant"
-            and (message.get("metadata") or {}).get("status") == "running"
-            and (message.get("metadata") or {}).get("phase") == "waiting_for_engine"
-            for message in messages
-        )
-        if waiting_for_engine:
-            st.caption(
-                "첫 질문이 대기 중입니다. 검색 엔진 준비가 끝나면 자동으로 처리되며, "
-                "그동안 추가 질문 입력은 잠시 잠깁니다."
+        has_running_job = chat_jobs.thread_has_running_job(messages)
+        has_pending_engine_job = chat_jobs.has_pending_search_engine_job()
+        st.session_state["search_engine_queue_was_pending"] = has_pending_engine_job
+        chat_input_locked = has_running_job or has_pending_engine_job
+        if has_running_job:
+            waiting_for_engine = any(
+                message.get("role") == "assistant"
+                and (message.get("metadata") or {}).get("status") == "running"
+                and (message.get("metadata") or {}).get("phase")
+                == "waiting_for_engine"
+                for message in messages
             )
-        else:
-            st.caption("이 대화의 답변을 백그라운드에서 생성 중입니다. 다른 대화로 이동해도 작업은 계속됩니다.")
-    elif has_pending_engine_job:
-        st.caption(
-            "다른 대화의 첫 질문이 검색 엔진 준비를 기다리고 있습니다. "
-            "준비가 끝나면 여기에서도 질문할 수 있습니다."
-        )
+            if waiting_for_engine:
+                st.caption(
+                    "첫 질문이 대기 중입니다. 검색 엔진 준비가 끝나면 자동으로 처리되며, "
+                    "그동안 추가 질문 입력은 잠시 잠깁니다."
+                )
+            else:
+                st.caption(
+                    "이 대화의 답변을 백그라운드에서 생성 중입니다. "
+                    "다른 대화로 이동해도 작업은 계속됩니다."
+                )
+        elif has_pending_engine_job:
+            st.caption(
+                "다른 대화의 첫 질문이 검색 엔진 준비를 기다리고 있습니다. "
+                "준비가 끝나면 여기에서도 질문할 수 있습니다."
+            )
 
-    render_search_engine_status()
+    with search_engine_status_region:
+        render_search_engine_status()
 
     with st.container(key="chat_entry_area"):
         user_query = st.chat_input(

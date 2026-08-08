@@ -8,10 +8,9 @@ import json
 import os
 import platform
 import sqlite3
-import sys
 import uuid
 from collections.abc import Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -28,18 +27,15 @@ class SupportExportError(RuntimeError):
 
 
 def build_support_payload(
-    legacy_db_path: str | Path,
-    *,
-    data_root: str | Path | None = None,
+    data_root: str | Path,
 ) -> dict[str, Any]:
     """Build a deterministic payload with no report/query text or machine paths."""
 
-    paths = retrieval_paths(legacy_db_path, data_root=data_root)
+    paths = retrieval_paths(data_root)
     if not paths.catalog.is_file() or paths.catalog.is_symlink():
         raise SupportExportError("native retrieval catalog is unavailable")
     selection = inspect_runtime(
-        legacy_db_path,
-        data_root=paths.data_root,
+        paths.data_root,
         validate_snapshot=True,
     )
     connection = _open_read_only(paths.catalog)
@@ -49,7 +45,7 @@ def build_support_payload(
             """
             SELECT schema_version, active_snapshot_id, active_build_id,
                    predecessor_snapshot_id, publication_generation,
-                   write_epoch, v1_fallback_open, degraded, write_enabled
+                   write_epoch, degraded, write_enabled
             FROM retrieval_runtime WHERE runtime_id = 1
             """
         ).fetchone()
@@ -121,41 +117,14 @@ def build_support_payload(
                 """
             )
         ]
-        publication_evidence_paths = tuple(
-            row[0]
-            for row in connection.execute(
-                """
-                SELECT evidence_manifest_relative_path
-                FROM publication_runs
-                WHERE state = 'fully_complete'
-                  AND evidence_manifest_relative_path IS NOT NULL
-                ORDER BY created_at, publication_id
-                """
-            )
-        )
     finally:
         connection.close()
-
-    bundle_state = "absent"
-    bundle_id = selection.compatibility_bundle_id or _find_compatibility_bundle_id(
-        paths.data_root,
-        publication_evidence_paths,
-    )
-    if bundle_id:
-        bundle = paths.data_root / "retrieval" / "compat" / "v1" / bundle_id
-        if bundle.is_dir() and not bundle.is_symlink():
-            bundle_state = (
-                "cleanup_pending"
-                if (bundle / "cleanup-pending.json").is_file()
-                else "sealed"
-            )
 
     floors = [
         {
             "publication_id": floor.publication_id,
             "publication_generation": floor.publication_generation,
             "write_epoch": floor.write_epoch,
-            "v1_fallback_floor": floor.v1_fallback_floor,
             "active_snapshot_id": floor.active_snapshot_id,
             "checkpoint_sha256": floor.checkpoint_sha256,
         }
@@ -180,9 +149,8 @@ def build_support_payload(
             "predecessor_snapshot_id": runtime[3],
             "publication_generation": int(runtime[4]),
             "write_epoch": int(runtime[5]),
-            "v1_fallback_open": bool(runtime[6]),
-            "degraded": bool(runtime[7]),
-            "write_enabled": bool(runtime[8]),
+            "degraded": bool(runtime[6]),
+            "write_enabled": bool(runtime[7]),
         },
         "active_revision": {
             "snapshot_id": active[0],
@@ -210,11 +178,6 @@ def build_support_payload(
         "state_counts": {
             "snapshots": snapshot_states,
             "builds": build_states,
-        },
-        "compatibility": {
-            "bundle_id": bundle_id,
-            "state": bundle_state,
-            "selectable": selection.mode == "epoch_zero_compatibility",
         },
         "committed_floors": floors,
         "publications": publications,
@@ -250,16 +213,15 @@ def write_support_export(path: str | Path, payload: Mapping[str, Any]) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from src.configs.config import DB_PATH
+    from src.configs.config import DATA_ROOT
 
     parser = argparse.ArgumentParser(
         description="Export redacted native retrieval support evidence"
     )
     parser.add_argument("output", help="new JSON output path")
-    parser.add_argument("--db-path", default=DB_PATH)
-    parser.add_argument("--data-root")
+    parser.add_argument("--data-root", default=DATA_ROOT)
     args = parser.parse_args(argv)
-    payload = build_support_payload(args.db_path, data_root=args.data_root)
+    payload = build_support_payload(args.data_root)
     output = write_support_export(args.output, payload)
     print(
         json.dumps(
@@ -297,46 +259,6 @@ def _validate_catalog(connection: sqlite3.Connection) -> None:
 
 def _payload_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(dict(payload)).encode("utf-8")).hexdigest()
-
-
-def _find_compatibility_bundle_id(
-    data_root: Path,
-    evidence_paths: tuple[str, ...],
-) -> str | None:
-    for relative in evidence_paths:
-        path = PurePosixPath(relative)
-        if (
-            path.is_absolute()
-            or path.as_posix() != relative
-            or any(part in {"", ".", ".."} for part in path.parts)
-            or (path.parts and ":" in path.parts[0])
-        ):
-            raise SupportExportError("publication evidence path is unsafe")
-        candidate = data_root.joinpath(*path.parts).resolve(strict=False)
-        try:
-            candidate.relative_to(data_root)
-        except ValueError as exc:
-            raise SupportExportError("publication evidence escapes the data root") from exc
-        if not candidate.is_file() or candidate.is_symlink():
-            continue
-        try:
-            evidence = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise SupportExportError("publication evidence is unreadable") from exc
-        if not isinstance(evidence, dict):
-            raise SupportExportError("publication evidence must be a JSON object")
-        bundle_id = evidence.get("compatibility_bundle_id")
-        if bundle_id is None:
-            continue
-        if (
-            not isinstance(bundle_id, str)
-            or len(bundle_id) != 64
-            or bundle_id != bundle_id.lower()
-            or any(character not in "0123456789abcdef" for character in bundle_id)
-        ):
-            raise SupportExportError("compatibility bundle identity is invalid")
-        return bundle_id
-    return None
 
 
 if __name__ == "__main__":

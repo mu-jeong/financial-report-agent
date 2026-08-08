@@ -72,7 +72,7 @@ def _import_graph_app():
     config_module = importlib.import_module("src.configs.config")
     bootstrap_module = importlib.import_module("src.retrieval.bootstrap")
     selection = bootstrap_module.reconcile_and_inspect_runtime(
-        config_module.DB_PATH,
+        config_module.DATA_ROOT,
         allow_live_writer_read=True,
         prefer_fast_read=True,
     )
@@ -84,8 +84,8 @@ def _import_graph_app():
             "active_build_id": selection.active_build_id,
             "publication_generation": selection.publication_generation,
             "write_epoch": selection.write_epoch,
-            "v1_fallback_open": selection.v1_fallback_open,
             "degraded": selection.degraded,
+            "initialization_state": selection.initialization_state,
         }
     module = importlib.import_module("src.graphs.main_graph")
     graph_app = module.graph_app

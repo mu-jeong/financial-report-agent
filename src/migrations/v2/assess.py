@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import io
-import os
 import pickle
 import re
 import sqlite3
@@ -37,6 +35,30 @@ _ALLOWED_PICKLE_GLOBALS = frozenset(
 
 class AssessmentError(ValueError):
     """Raised when copied V1 evidence is untrusted, incomplete, or inconsistent."""
+
+
+class _LegacyInMemoryDocstore:
+    """Minimal pickle target for the retired LangChain community docstore.
+
+    V1 persisted only the instance ``__dict__`` (including ``_dict``).  Mapping
+    the historical global to this inert carrier keeps migration independent of
+    the removed ``langchain-community`` runtime package.
+    """
+
+
+class _LegacyDocument:
+    """Inert carrier for V1 ``Document`` instances during trusted import."""
+
+    def __setstate__(self, state: Any) -> None:
+        # Pydantic-backed LangChain releases wrap model fields in a nested
+        # ``__dict__`` state, while older releases pickle the fields directly.
+        # Retain only the plain field mapping needed by the migration reader.
+        if isinstance(state, dict) and isinstance(state.get("__dict__"), dict):
+            self.__dict__.update(state["__dict__"])
+        elif isinstance(state, dict):
+            self.__dict__.update(state)
+        else:
+            raise AssessmentError("legacy document pickle state must be a mapping")
 
 
 @dataclass(frozen=True)
@@ -316,7 +338,11 @@ class _RestrictedLegacyUnpickler(pickle.Unpickler):
             raise AssessmentError(
                 f"legacy pickle references a forbidden global: {module}.{name}"
             )
-        return super().find_class(module, name)
+        if name == "InMemoryDocstore":
+            return _LegacyInMemoryDocstore
+        if name == "Document":
+            return _LegacyDocument
+        raise AssertionError("allowed legacy pickle global is not mapped")
 
 
 def load_trusted_legacy_docstore(path: str | Path) -> tuple[Any, Any]:

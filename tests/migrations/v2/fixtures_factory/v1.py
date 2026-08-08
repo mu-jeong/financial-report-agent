@@ -17,10 +17,10 @@ from pathlib import Path
 
 import faiss
 import numpy as np
-from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_core.documents import Document
 
 from src.retrieval.identity import EmbeddingProfile
+from tests.migrations.v2.legacy_pickle_fixture import InMemoryDocstore
 
 
 PREFIX_TEMPLATE = "[Company: {target_name}, Title: {title}]\n"

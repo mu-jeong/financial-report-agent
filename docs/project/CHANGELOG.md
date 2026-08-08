@@ -12,11 +12,13 @@
 
 ### Changed
 
+- Retrieval runtime은 Native V2로 단일화하되 기존 사용자가 청크와 벡터를 재사용해 전환할 수 있도록 `MIGRATE_V2.bat`의 마이그레이션 전용 V1 판독 경계를 유지했습니다. 전환 성공 후 V1 `reports.db`와 `vector_db`는 삭제하고 `downloaded` PDF만 보존합니다.
+- 런타임 V1 fallback, release attestation, benchmark gate와 고정 evaluation snapshot 도구는 현재 앱 실행 경로에서 제거했습니다.
 - 전체 Monitoring의 단일 dropdown을 `운영 모니터링`과 `성능 개선 실험` 상단 내비게이션으로 나누고, 각 그룹의 마지막 선택을 기억하면서 선택한 세부 화면만 렌더링하도록 변경했습니다.
 - `현재 문제`가 경고의 실제 집계값과 다음 확인 경로를 표시하도록 보강하고, Native V2 상태가 복합 active view를 반복 계산하지 않도록 고정 build manifest와 현재 delta head 기준 집계 및 PDF 수 스캔을 최적화했습니다.
 - 개별 Chat Monitoring은 정확도와 trace 진단을 제외하고 최근·평균 응답시간, RDB 평균 조회시간, Vector DB 평균 검색시간과 응답별 시간 표만 표시하도록 단순화했습니다.
 - Monitoring 기본 화면을 응답 속도(P95)와 correctness-only 답변 정확도로 축소하고, 응답 trace·검색 자료·평가·parsing·신고 도구는 단일 `문제 상황 자세히 보기` 영역으로 이동했습니다. 활성 discovery와 무결성 집계는 Native V2 계약만 사용하며 과거 고정 DB/vector 실행 경로는 UI에서 제거했습니다.
-- Monitoring의 속도 표본과 정확도 run에 실제 Native V2 runtime provenance를 요구하고, legacy/epoch-zero 상태에서는 평가와 V1 상세 지표를 fail closed하도록 변경했습니다.
+- Monitoring의 속도 표본과 정확도 run에 실제 Native V2 runtime provenance를 요구하고, 유효한 Native V2 상태가 아니면 평가와 상세 지표를 fail closed하도록 변경했습니다.
 - V2 업데이트는 batch마다 전체 snapshot을 다시 만들지 않고, 작업 종료 시 기존 vector를 재사용한 완전한 snapshot을 한 번만 게시합니다.
 - 변경 문서 파싱이 실패하면 이전 검색 가능 버전을 유지하며, GUI는 업데이트 중에도 검색 사용 가능 여부와 처리 완료 문서의 순차 반영을 안내합니다.
 - 임시 vector 파일 정리를 공용 snapshot GC에 통합해 소유 base GC 직후, 모든 snapshot 게시 후, 정상 시작 시 자동 재시도합니다.

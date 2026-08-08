@@ -6,7 +6,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from src.configs.config import DB_PATH
 from src.core.db_manager import get_connection
 from src.configs.settings import BASE_DIR, get_config_value
 
@@ -106,13 +105,11 @@ def resolve_report_file_scope_for_companies(
     company_names: list[str],
     *,
     base_filters: dict[str, Any] | None = None,
-    db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return embedded company-report files for an already resolved company universe."""
     base_filters = dict(base_filters or {})
     sql, params = _report_scope_sql(base_filters, list(company_names or []))
-    database_path = str(db_path or DB_PATH)
-    with get_connection(database_path) as conn:
+    with get_connection() as conn:
         rows = conn.execute(sql, params).fetchall()
 
     file_names = sorted({row["file_name"] for row in rows if row["file_name"]})
@@ -130,14 +127,12 @@ def resolve_industry_report_file_scope(
     *,
     base_filters: dict[str, Any] | None = None,
     data_path: str | Path | None = None,
-    db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     base_filters = dict(base_filters or {})
     lookup = lookup_companies_by_industry(term, data_path=data_path)
     report_scope = resolve_report_file_scope_for_companies(
         lookup["company_names"],
         base_filters=base_filters,
-        db_path=db_path,
     )
     return {
         "term": term,

@@ -2,10 +2,11 @@ import sqlite3
 
 import pytest
 
+from src.core import db_manager
 from src.core.company_industry import resolve_report_file_scope_for_companies
 from src.nodes import rdb
 from src.retrieval.build_service import materialize_candidate, publish_candidate
-from tests.retrieval.test_retrieval_build_service import (
+from tests.retrieval.native_build_fixtures import (
     DeterministicEmbeddings,
     _metadata,
     _native_seed,
@@ -13,69 +14,60 @@ from tests.retrieval.test_retrieval_build_service import (
 )
 
 
-def test_execute_sql_allows_readonly_select(tmp_path, monkeypatch):
-    db_path = tmp_path / "reports.db"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
+def _seed_reports(path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
             """
             CREATE TABLE reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY,
                 report_type TEXT NOT NULL,
                 report_date TEXT NOT NULL,
                 target_name TEXT,
                 title TEXT NOT NULL,
                 broker TEXT NOT NULL,
                 file_name TEXT NOT NULL UNIQUE,
-                is_embedded INTEGER NOT NULL DEFAULT 0
+                is_embedded INTEGER NOT NULL
             )
             """
         )
-        conn.execute(
-            """
-            INSERT INTO reports
-                (report_type, report_date, target_name, title, broker, file_name, is_embedded)
-            VALUES
-                ('company', '2026-02-05', '삼성전자', 'HBM 전망', '미래에셋증권', 'sample.pdf', 1)
-            """
+        connection.execute(
+            "INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                "company",
+                "2026-06-05",
+                "Example",
+                "Outlook",
+                "Broker",
+                "example.pdf",
+                1,
+            ),
         )
 
-    monkeypatch.setattr(rdb, "DB_PATH", str(db_path))
+
+def _fixture_connection(path):
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def test_execute_sql_allows_readonly_select(tmp_path, monkeypatch):
+    db_path = tmp_path / "fixture.sqlite3"
+    _seed_reports(db_path)
+    monkeypatch.setattr(rdb, "get_connection", lambda: _fixture_connection(db_path))
 
     result = rdb.execute_sql("SELECT target_name, title FROM reports")
 
     assert result == {
         "columns": ["target_name", "title"],
-        "rows": [("삼성전자", "HBM 전망")],
+        "rows": [("Example", "Outlook")],
     }
 
 
 def test_execute_sql_allows_readonly_cte_aliases(tmp_path, monkeypatch):
-    db_path = tmp_path / "reports.db"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_type TEXT NOT NULL,
-                report_date TEXT NOT NULL,
-                target_name TEXT,
-                title TEXT NOT NULL,
-                broker TEXT NOT NULL,
-                file_name TEXT NOT NULL UNIQUE,
-                is_embedded INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO reports
-                (report_type, report_date, target_name, title, broker, file_name, is_embedded)
-            VALUES
-                ('company', '2026-06-05', '올릭스', '로레알 지분투자', '교보증권', 'olix.pdf', 1)
-            """
-        )
-
-    monkeypatch.setattr(rdb, "DB_PATH", str(db_path))
+    db_path = tmp_path / "fixture.sqlite3"
+    _seed_reports(db_path)
+    monkeypatch.setattr(rdb, "get_connection", lambda: _fixture_connection(db_path))
 
     result = rdb.execute_sql(
         """
@@ -86,20 +78,12 @@ def test_execute_sql_allows_readonly_cte_aliases(tmp_path, monkeypatch):
         """
     )
 
-    assert result == {
-        "columns": ["target_name"],
-        "rows": [("올릭스",)],
-    }
+    assert result == {"columns": ["target_name"], "rows": [("Example",)]}
 
 
-def test_native_rdb_readers_follow_active_successor_without_legacy_db(
-    tmp_path,
-    monkeypatch,
-):
+def test_native_rdb_readers_follow_active_successor(tmp_path, monkeypatch):
     data_root, sources = _native_seed(tmp_path)
-    legacy_anchor = data_root / "reports.db"
-    assert not legacy_anchor.exists()
-    monkeypatch.setattr(rdb, "DB_PATH", str(legacy_anchor))
+    monkeypatch.setattr(db_manager, "DATA_ROOT", str(data_root))
 
     def company_metadata(file_name: str):
         value = dict(_metadata(file_name) or {})
@@ -108,7 +92,11 @@ def test_native_rdb_readers_follow_active_successor_without_legacy_db(
         return value
 
     initial = rdb.execute_sql("SELECT id, file_name FROM reports ORDER BY file_name")
-    assert [row[1] for row in initial["rows"]] == ["a.pdf"]
+    assert [row[1] for row in initial["rows"]] == ["a.pdf", "b.pdf"]
+    initial_b_id = next(row[0] for row in initial["rows"] if row[1] == "b.pdf")
+    assert resolve_report_file_scope_for_companies(["A", "B"])["file_names"] == [
+        "a.pdf"
+    ]
 
     successor_plan = _prepare(
         data_root,
@@ -120,10 +108,11 @@ def test_native_rdb_readers_follow_active_successor_without_legacy_db(
     successor = rdb.execute_sql("SELECT id, file_name FROM reports ORDER BY file_name")
     assert [row[1] for row in successor["rows"]] == ["a.pdf", "b.pdf"]
     successor_b_id = next(row[0] for row in successor["rows"] if row[1] == "b.pdf")
-    assert resolve_report_file_scope_for_companies(
-        ["A", "B"],
-        db_path=legacy_anchor,
-    )["file_names"] == ["a.pdf", "b.pdf"]
+    assert successor_b_id != initial_b_id
+    assert resolve_report_file_scope_for_companies(["A", "B"])["file_names"] == [
+        "a.pdf",
+        "b.pdf",
+    ]
 
     (sources / "b.pdf").write_bytes(b"corrected-b")
     correction_plan = _prepare(
@@ -148,10 +137,9 @@ def test_native_rdb_readers_follow_active_successor_without_legacy_db(
     publish_candidate(materialize_candidate(deletion_plan, data_root), data_root)
     deleted = rdb.execute_sql("SELECT file_name FROM reports ORDER BY file_name")
     assert deleted == {"columns": ["file_name"], "rows": [("b.pdf",)]}
-    assert resolve_report_file_scope_for_companies(
-        ["A", "B"],
-        db_path=legacy_anchor,
-    )["file_names"] == ["b.pdf"]
+    assert resolve_report_file_scope_for_companies(["A", "B"])["file_names"] == [
+        "b.pdf"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -204,35 +192,28 @@ def test_rdb_execute_node_records_query_duration_on_blocked_result(monkeypatch):
 
 def test_extract_sources_from_rdb_result_uses_file_name_rows():
     result = {
-        "columns": ["report_type", "report_date", "target_name", "broker", "title", "file_name"],
+        "columns": [
+            "report_type",
+            "report_date",
+            "target_name",
+            "broker",
+            "title",
+            "file_name",
+        ],
         "rows": [
-            (
-                "company",
-                "2026-06-16",
-                "현대차",
-                "유안타증권",
-                "속성이 다른 이익에 기반한 밸류에이션 할증",
-                "yuanta.pdf",
-            ),
-            (
-                "company",
-                "2026-06-18",
-                "현대차",
-                "한화투자증권",
-                "기대감에서 실적으로",
-                "hanwha.pdf",
-            ),
+            ("company", "2026-06-16", "A", "Broker A", "Title A", "a.pdf"),
+            ("company", "2026-06-18", "B", "Broker B", "Title B", "b.pdf"),
         ],
     }
 
     sources = rdb.extract_sources_from_rdb_result(result)
 
-    assert [source["file_name"] for source in sources] == ["yuanta.pdf", "hanwha.pdf"]
+    assert [source["file_name"] for source in sources] == ["a.pdf", "b.pdf"]
     assert [source["rank"] for source in sources] == [1, 2]
-    assert sources[0]["broker"] == "유안타증권"
+    assert sources[0]["broker"] == "Broker A"
 
 
-def test_extract_sources_from_rdb_result_ignores_aggregate_rows_without_file_name():
+def test_extract_sources_from_rdb_result_ignores_rows_without_file_name():
     assert rdb.extract_sources_from_rdb_result(
         {"columns": ["count"], "rows": [(2,)]}
     ) == []

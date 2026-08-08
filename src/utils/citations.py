@@ -38,7 +38,7 @@ def source_identity(info: dict[str, Any]) -> str:
         value = str(info.get(key) or "").strip()
         if value and value != "-":
             return f"{key}:{value}"
-    return "legacy_metadata:" + "|".join(
+    return "metadata:" + "|".join(
         str(info.get(key) or "").strip()
         for key in ("target_name", "report_date", "broker", "title")
     )

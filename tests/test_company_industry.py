@@ -15,7 +15,7 @@ def _write_company_industry_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def _write_reports_db(path: Path) -> None:
+def _write_catalog_fixture(path: Path) -> None:
     conn = sqlite3.connect(path)
     conn.execute(
         """
@@ -62,9 +62,11 @@ def test_lookup_companies_by_industry_matches_industry_and_products(tmp_path):
     assert result["source_url"] == "https://kind.krx.co.kr/corpgeneral/corpList.do?method=loadInitPage"
 
 
-def test_resolve_industry_report_file_scope_intersects_lookup_with_report_scope(tmp_path):
+def test_resolve_industry_report_file_scope_intersects_lookup_with_report_scope(
+    tmp_path, monkeypatch
+):
     data_path = tmp_path / "listed_company_industries.csv"
-    db_path = tmp_path / "reports.db"
+    db_path = tmp_path / "catalog.sqlite3"
     _write_company_industry_csv(
         data_path,
         [
@@ -74,7 +76,14 @@ def test_resolve_industry_report_file_scope_intersects_lookup_with_report_scope(
             {"company_name": "현대차", "industry": "자동차 제조업", "main_products": "승용차"},
         ],
     )
-    _write_reports_db(db_path)
+    _write_catalog_fixture(db_path)
+
+    def open_fixture():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    monkeypatch.setattr("src.core.company_industry.get_connection", open_fixture)
 
     result = resolve_industry_report_file_scope(
         "반도체",
@@ -84,7 +93,6 @@ def test_resolve_industry_report_file_scope_intersects_lookup_with_report_scope(
             "report_type": "company",
         },
         data_path=data_path,
-        db_path=db_path,
     )
 
     assert result["matched_company_count"] == 3

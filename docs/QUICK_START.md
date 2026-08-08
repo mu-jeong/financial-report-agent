@@ -4,9 +4,11 @@
 
 초기 준비가 끝난 뒤 앱만 다시 열 때는 `RUN_APP.bat`을 사용하세요. 이 파일은 `.venv`와 `.env`를 확인하고 retrieval runtime의 catalog와 active snapshot을 검증한 뒤 Streamlit GUI를 실행하며, 설치·수집·임베딩은 반복하지 않습니다.
 
-기존 V1 데이터의 V2 변환은 `MIGRATE_V2.bat`을 더블클릭합니다. 이 작업은 V1 원본을 유지하면서 기존 청크와 벡터를 V2 형식으로 변환하고, 임베딩 공간 호환성과 실제 GUI 실행을 확인한 뒤 같은 변환 snapshot을 쓰기 가능 상태로 활성화합니다. 전체 corpus 재임베딩은 하지 않으며 이후에는 새 문서와 변경된 문서만 처리합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
+활성 V2의 추출 정책을 배포 기본값으로 바꾸려면 incremental update가 아니라 전체 successor 재구축이 필요합니다. 앱과 데이터 업데이트 창을 모두 닫고 `tools\recovery\REBUILD_V2.bat --check`로 읽기 전용 점검을 수행한 뒤, `tools\recovery\REBUILD_V2.bat`을 실행해 안내에 따라 진행하세요. 자세한 내용은 [Native V2 전체 재구축](migrations/v2/V2_REBUILD.md)을 참고하세요.
 
-이미 활성화된 V2의 추출 정책을 배포 기본값으로 바꾸려면 incremental update가 아니라 전체 successor 재구축이 필요합니다. 앱과 데이터 업데이트 창을 모두 닫고 `tools\recovery\REBUILD_V2.bat --check`로 읽기 전용 점검을 수행한 뒤, `tools\recovery\REBUILD_V2.bat`을 실행해 안내에 따라 진행하세요. 자세한 내용은 [활성 V2 전체 재구축](migrations/v2/V2_MIGRATION_USER.md#활성-v2-전체-재구축)을 참고하세요.
+## 기존 V1 사용자 마이그레이션
+
+`DATA_ROOT`에 V1 `reports.db`와 `vector_db`가 있다면 새 앱을 실행하기 전에 프로젝트 루트의 `MIGRATE_V2.bat`을 실행하세요. 기존 청크와 FAISS 벡터를 Native V2 저장 구조로 옮기므로 전체 PDF 파싱과 전체 임베딩을 다시 수행하지 않습니다. 성공 후 V1 `reports.db`와 `vector_db`는 삭제되지만, 데이터 업데이트와 재구축에 필요한 `downloaded` PDF는 유지됩니다. 자세한 절차와 실패 시 동작은 [V1 → Native V2 사용자 마이그레이션](migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
 ## 1. 실행 방법
 
@@ -40,7 +42,7 @@ API 키가 없다면 아래 문서를 먼저 따라 발급받으세요.
 6. `requirements.txt` 패키지 설치 또는 확인
 7. retrieval runtime의 쓰기 가능 상태 검증
 8. 실행일 포함 이전 7일 범위의 리포트 수집
-9. V1이면 pending 리포트 전체 처리, V2이면 전체 PDF 변경 여부를 검사해 새 문서와 변경된 문서만 파싱·임베딩하고 immutable snapshot 게시
+9. 전체 PDF 변경 여부를 검사해 새 문서와 변경된 문서만 파싱·임베딩하고 immutable Native V2 snapshot 게시
 10. 데이터 상태 출력
 11. Streamlit GUI 실행
 
@@ -77,7 +79,7 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 
 처음 실행할 때는 패키지 설치, PDF 다운로드, 텍스트 추출, 임베딩 생성이 함께 진행됩니다.
 배포 템플릿은 일반 문서와 미임베딩 문서를 먼저 `pymupdf`로 추출하고 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시합니다. fallback을 사용하려면 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 새 키가 없는 기존 `.env`와 빈 값은 fallback을 비활성화합니다. Native V2에서는 active profile과 다른 fallback 설정을 incremental update에 섞지 않으며, 정책을 바꾸려면 full-corpus successor가 필요합니다.
-일부 PDF에서 primary와 fallback 파싱이 모두 실패해도 Quick Start는 실패 파일을 기록하고 다음 단계로 진행합니다. OpenDataLoader fallback이 한 PDF에서 5분 안에 반환하지 않는 경우도 같은 추출 실패로 처리합니다. V1에서는 성공한 파일의 색인을 유지합니다. V2에서는 실패 PDF를 active build manifest에 `source-extraction-failed` 제외 상태로 남기고, 성공한 나머지 문서로 검증된 successor를 게시합니다. 같은 실패 파일은 일반 업데이트에서 반복 파싱하지 않으며 Monitoring Mode의 `운영 상태 → 임베딩 누락 문서`에서 `파싱 실패 문서 재시도`를 눌렀을 때만 다시 처리합니다. 일반 V1 `embed_pipeline` CLI 실행은 `--continue-on-extraction-error`를 명시하지 않으면 실패 exit code를 반환합니다.
+일부 PDF에서 primary와 fallback 파싱이 모두 실패해도 Quick Start는 실패 파일을 기록하고 다음 단계로 진행합니다. OpenDataLoader fallback이 한 PDF에서 5분 안에 반환하지 않는 경우도 같은 추출 실패로 처리합니다. 실패 PDF는 active build manifest에 `source-extraction-failed` 제외 상태로 남기고, 성공한 나머지 문서로 검증된 successor를 게시합니다. 같은 실패 파일은 일반 업데이트에서 반복 파싱하지 않으며 Monitoring Mode의 `운영 상태 → 임베딩 누락 문서`에서 `파싱 실패 문서 재시도`를 눌렀을 때만 다시 처리합니다.
 `RUN_QUICKSTART.bat`을 다시 실행하면 이미 설치된 항목과 이미 임베딩된 리포트를 재사용하므로 처음보다는 빠르지만, 실행일 기준 데이터 수집과 임베딩 확인 단계를 다시 거칩니다. 단순히 앱만 열려면 `RUN_APP.bat`을 사용하세요.
 
 ## 7. 활성 V2 전체 재구축
@@ -89,17 +91,15 @@ tools\recovery\REBUILD_V2.bat --check
 tools\recovery\REBUILD_V2.bat
 ```
 
-- `--check`는 현재 snapshot·추출 profile·인덱싱 문서 수, 교정 후 목표 추출 profile·원본 PDF 수와 `.env` primary 충돌을 출력할 뿐 데이터를 바꾸지 않습니다.
-- 자동 교정 대상은 과거 공식 설정 두 가지입니다. primary/fallback이 반대인 설정과, PyMuPDF primary에 미임베딩 추출기만 OpenDataLoader이고 fallback이 비어 있거나 PyMuPDF인 설정입니다. 두 번째 설정은 `UNEMBEDDED_PDF_EXTRACTION_ENGINE`과 기존 alias `UNEMBEDDED_EXTRACTION_ENGINE`을 모두 인식합니다.
-- 전체 실행은 안내를 표시한 뒤 세 개의 `PDF_*` 추출 키만 배포 기본값으로 자동 정리합니다. 그 밖의 사용자 지정 정책은 덮어쓰지 않으며, legacy/new primary 값이 다르면 두 값을 알립니다.
-- active profile과 목표 profile이 이미 같고 알려진 설정 충돌도 없다면 재구축하지 않고 종료합니다.
-- active profile은 이미 목표와 같지만 알려진 과거 설정 충돌만 남았다면, 전체 실행은 `.env`만 교정하고 API를 호출하지 않습니다.
+- `--check`는 현재 snapshot·추출 profile·인덱싱 문서 수와 요청 profile·원본 PDF 수를 출력할 뿐 데이터를 바꾸지 않습니다.
+- 전체 실행은 현재 `PDF_*` 추출 설정을 그대로 사용하며 다른 사용자 설정을 덮어쓰지 않습니다.
+- active profile과 요청 profile이 이미 같다면 재구축하지 않고 종료합니다.
 - 전체 corpus를 다시 처리하므로 OpenRouter API 비용이 발생하며 문서 수와 길이에 따라 오래 걸릴 수 있습니다. 실행 전에 API 크레딧을 확인하세요.
 - 실행 창의 `[PDF 현재/전체]` 표시로 추출 진행률을 확인할 수 있습니다. 일부 OpenDataLoader fallback PDF는 한 파일 처리에도 여러 분이 걸릴 수 있습니다.
 - PyMuPDF와 OpenDataLoader가 모두 실패한 PDF는 원본을 삭제하지 않고 manifest에 제외 상태로 기록합니다. 화면에는 `원본 PDF`, `인덱싱 성공`, `추출 실패/제외` 수가 따로 표시되며 나머지 문서 처리는 계속됩니다.
 - 재구축 중에는 기존 active snapshot이 계속 검색을 담당합니다. 성공한 문서와 명시적 제외 결정을 모두 포함한 새 snapshot은 검증을 통과한 뒤에만 원자적으로 활성화됩니다. embedding·무결성 검증 등 빌드 자체가 실패하면 기존 active가 그대로 유지됩니다.
-- `data/reports.db`와 `data/downloaded`의 원본 PDF는 삭제하지 않습니다. 전환 직전 snapshot은 검증된 predecessor로 잠시 보존하지만 전환 후 검색에는 사용하지 않습니다.
-- `data/retrieval/v2`를 수동으로 삭제하지 마세요.
+- `DATA_ROOT`의 현재 활성 snapshot과 원본 PDF는 삭제하지 않습니다. 전환 직전 snapshot은 검증된 predecessor로 잠시 보존하지만 전환 후 검색에는 사용하지 않습니다.
+- `DATA_ROOT/retrieval/v2`를 수동으로 삭제하거나 수정하지 마세요.
 
 ## 8. 자주 생기는 문제
 

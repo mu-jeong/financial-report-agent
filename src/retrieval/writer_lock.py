@@ -35,6 +35,50 @@ class ProcessState:
 ProcessProbe = Callable[[int], ProcessState]
 
 
+def _is_reparse_path(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return path.is_symlink() or bool(attributes & reparse_flag)
+
+
+def ensure_native_runtime_directory(data_root: str | Path) -> Path:
+    """Create ``retrieval/v2`` without following redirected path components."""
+
+    root = Path(data_root).expanduser().absolute()
+    if _is_reparse_path(root) or not root.is_dir():
+        raise WriterLockError("retrieval data root must be a real directory")
+    root = root.resolve(strict=True)
+
+    current = root
+    for name in ("retrieval", "v2"):
+        candidate = current / name
+        if _is_reparse_path(candidate):
+            raise WriterLockError("native runtime path cannot contain redirected directories")
+        if candidate.exists():
+            if not candidate.is_dir():
+                raise WriterLockError("native runtime path must contain only directories")
+        else:
+            try:
+                candidate.mkdir()
+            except OSError as exc:
+                raise WriterLockError("native runtime path could not be created") from exc
+        if _is_reparse_path(candidate):
+            raise WriterLockError("native runtime path cannot contain redirected directories")
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise WriterLockError("native runtime path escapes the data root") from exc
+        if resolved != candidate:
+            raise WriterLockError("native runtime path cannot contain redirected directories")
+        current = candidate
+    return current
+
+
 @dataclass(frozen=True)
 class WriterLease:
     """Immutable proof that one process still owns a specific lock nonce."""
@@ -112,7 +156,8 @@ class NativeWriterLock:
     ) -> None:
         if stale_after_seconds < 0:
             raise ValueError("stale_after_seconds cannot be negative")
-        self.data_root = Path(data_root).resolve(strict=True)
+        self._lexical_data_root = Path(data_root).expanduser().absolute()
+        self.data_root = self._lexical_data_root.resolve(strict=True)
         self.lock_path = self.data_root / "retrieval" / "v2" / "writer.lock"
         self.guard_path = self.data_root / "retrieval" / "v2" / "writer.guard"
         self.stale_after_seconds = float(stale_after_seconds)
@@ -129,7 +174,7 @@ class NativeWriterLock:
     def acquire(self) -> "NativeWriterLock":
         if self._nonce is not None or self._guard_descriptor is not None:
             raise WriterLockError("writer lock instance is already acquired")
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_native_runtime_directory(self._lexical_data_root)
         self._guard_descriptor = _acquire_process_guard(self.guard_path)
         try:
             for _attempt in range(4):
@@ -658,5 +703,6 @@ __all__ = [
     "WriterLockBusyError",
     "WriterLockError",
     "assert_writer_lease_owned",
+    "ensure_native_runtime_directory",
     "probe_process",
 ]

@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_SIGNED_INT64 = (1 << 63) - 1
 
 RETRIEVAL_TABLES = frozenset(
@@ -310,8 +310,6 @@ _TABLE_DDL = (
         publication_generation INTEGER NOT NULL DEFAULT 0
             CHECK (publication_generation >= 0),
         write_epoch INTEGER NOT NULL DEFAULT 0 CHECK (write_epoch >= 0),
-        v1_fallback_open INTEGER NOT NULL DEFAULT 1
-            CHECK (v1_fallback_open IN (0, 1)),
         degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded IN (0, 1)),
         write_enabled INTEGER NOT NULL DEFAULT 0
             CHECK (write_enabled IN (0, 1)),
@@ -333,7 +331,6 @@ _TABLE_DDL = (
             predecessor_snapshot_id IS NULL
             OR predecessor_snapshot_id <> active_snapshot_id
         ),
-        CHECK (write_epoch = 0 OR v1_fallback_open = 0),
         CHECK (degraded = 0 OR write_enabled = 0),
         CHECK (write_enabled = 0 OR active_snapshot_id IS NOT NULL),
         FOREIGN KEY (active_snapshot_id)
@@ -382,9 +379,6 @@ _TABLE_DDL = (
         updated_at TEXT NOT NULL DEFAULT (
             strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         ) CHECK (length(updated_at) > 0),
-        -- A journal may point from and to the same immutable snapshot only for
-        -- the application-validated epoch-zero seed activation protocol.  The
-        -- ordinary publication path still rejects same-snapshot requests.
         CHECK (
             (evidence_manifest_relative_path IS NULL
              AND evidence_manifest_sha256 IS NULL)
@@ -739,10 +733,9 @@ _TRIGGER_DDL = (
       OR NEW.schema_version < OLD.schema_version
       OR NEW.publication_generation < OLD.publication_generation
       OR NEW.write_epoch < OLD.write_epoch
-      OR (OLD.v1_fallback_open = 0 AND NEW.v1_fallback_open <> 0)
       OR NEW.created_at IS NOT OLD.created_at
     BEGIN
-        SELECT RAISE(ABORT, 'runtime generation, epoch, and fallback are monotonic');
+        SELECT RAISE(ABORT, 'runtime generation and epoch are monotonic');
     END
     ''',
     '''
@@ -1024,7 +1017,6 @@ _EXPECTED_COLUMNS = {
         'predecessor_snapshot_id',
         'publication_generation',
         'write_epoch',
-        'v1_fallback_open',
         'degraded',
         'write_enabled',
         'created_at',
@@ -1049,7 +1041,7 @@ def install_schema(connection: sqlite3.Connection) -> None:
     '''Install and validate the native catalog schema atomically.
 
     Repeating this function against an installed catalog performs no schema or
-    row changes.  A legacy/incompatible table fails closed instead of being
+    row changes.  An incompatible table fails closed instead of being
     silently treated as a native V2 table.
     '''
     if not isinstance(connection, sqlite3.Connection):
@@ -1083,10 +1075,9 @@ def install_schema(connection: sqlite3.Connection) -> None:
                 schema_version,
                 publication_generation,
                 write_epoch,
-                v1_fallback_open,
                 degraded,
                 write_enabled
-            ) VALUES (1, ?, 0, 0, 1, 0, 0)
+            ) VALUES (1, ?, 0, 0, 0, 0)
             ''',
             (SCHEMA_VERSION,),
         )
@@ -1201,13 +1192,12 @@ def _validate_installed_schema(connection: sqlite3.Connection) -> None:
     if ('view', 'active_reports') not in objects:
         raise SchemaError('active_reports view is missing')
 
-    forbidden_tables = {'parent_chunks', 'report_revisions'}
     installed_tables = {name for kind, name in objects if kind == 'table'}
-    present_forbidden = installed_tables & forbidden_tables
-    if present_forbidden:
+    unexpected_tables = installed_tables - RETRIEVAL_TABLES
+    if unexpected_tables:
         raise SchemaError(
-            'legacy tables are forbidden in a native V2 catalog: '
-            + ', '.join(sorted(present_forbidden))
+            'unexpected tables in native retrieval catalog: '
+            + ', '.join(sorted(unexpected_tables))
         )
 
     for table, expected in _EXPECTED_COLUMNS.items():

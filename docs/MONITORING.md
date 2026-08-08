@@ -2,9 +2,7 @@
 
 Monitoring Mode는 전체 운영 상태와 개별 대화 turn을 서로 다른 깊이로 확인하는 개발자용 화면이다. `.env`의 `MONITORING_MODE=true`일 때만 노출된다.
 
-전체 Monitoring의 장기 계약은 2026-08-01 개정 `평가 묶음 제작·운영 개발 계획`을 따른다. 구현 순서도 그 문서의 의존성을 유지한다. 먼저 `src/core/evaluation_bundle.py`에서 평가 사례·묶음 설명·고정 작업 영수증·참조 설명·검증·시험·승인·봉인·현재 기준 포인터의 자료 형식과 내용 식별값 경계를 고정하고, 논리적 고정·삭제 방지·실행기·복구 작업이 준비된 뒤 평가 묶음 운영 화면을 연결한다. 계약만 존재하는 기능을 화면에서 완료된 것처럼 표시하지 않는다.
-
-활성 화면과 새 산출물은 Native V2만 기준으로 삼는다. 스키마가 없는 과거 평가 run·신고·회귀 후보는 활성 화면에서 자동으로 제외한다. 파일을 삭제하지는 않으며, 명시적인 변환이나 호환성 테스트에 필요한 범용 로더만 별도 경계로 유지한다.
+활성 화면과 새 산출물은 Native V2만 기준으로 삼는다. 스키마가 유효하지 않은 평가 run·신고·회귀 후보는 활성 화면에서 제외한다.
 
 ## 1. 화면 원칙
 
@@ -31,7 +29,7 @@ Monitoring
    └─ 성능 개선 실험
       ├─ 정확도 평가
       ├─ 문서 읽기 품질 비교
-      └─ 신고·수정 확인 · 묶음 전 단계
+      └─ 신고·수정 확인
 ```
 
 그룹 내부 ID는 `operations`, `experiments`로 고정한다. 세부 영역의 내부 ID는 각각 `summary`, `response`, `search_data`, `evaluation`, `parsing`, `issues`로 유지한다. 화면 문구가 바뀌어도 widget state와 테스트가 흔들리지 않게 하기 위해서다. Streamlit `st.tabs`는 숨은 panel까지 모두 계산하므로, 이 화면은 선택한 panel만 계산하는 `st.segmented_control`을 탭형 내비게이션으로 사용한다.
@@ -49,7 +47,7 @@ Sidebar
 ```
 
 - `Chat > 답변 모니터링`은 현재 대화의 시간 지표와 turn 근거를 다룬다. 최근 성공 응답의 전체시간, 현재 대화 평균, RDB 평균 조회시간, Vector DB 평균 검색시간을 표시하고, 응답별로 compact state, 검색 k 단계값, prompt에 사용한 chunk·문서를 내려가서 확인한다.
-- `Monitoring`은 모든 대화의 속도, 공통 정확도, Native V2 검색 자료 상태와 문제 처리 도구를 다룬다. 평가 묶음 제작·시험·승인·봉인·현재 기준 지정은 개정 운영 계획의 단계 순서대로 이 전역 화면에 추가한다.
+- `Monitoring`은 모든 대화의 속도, 공통 정확도, Native V2 검색 자료 상태와 문제 처리 도구를 다룬다.
 - `MONITORING_MODE=false`이거나 설정이 없으면 일반 Chat 화면만 렌더링한다.
 
 ## 3. 기본 지표와 turn 근거
@@ -115,7 +113,7 @@ Vector DB 사용 근거는 최종 prompt에 들어간 passage만 기록한다. N
 
 느리지만 맞는 답변을 오답으로 계산하지 않고, 속도와 정확도를 서로 독립적으로 판단한다.
 
-현재 저장소에는 승인된 정식 evaluation fixture가 없으므로 기본 상태는 `측정 전`이다. 임시 데이터나 live DB 결과를 승인된 정확도 기준으로 간주하지 않는다. 준비 절차는 [Evaluation Dataset 준비 작업](EVALUATION_DATASET.md)을 따른다.
+승인된 정식 evaluation fixture가 없으면 기본 상태는 `측정 전`이다. 임시 데이터나 현재 `DATA_ROOT`의 결과를 승인된 정확도 기준으로 간주하지 않는다.
 
 ## 4. 문제 상황 상세 영역
 
@@ -157,7 +155,7 @@ Vector DB 사용 근거는 최종 prompt에 들어간 passage만 기록한다. N
 - compacted artifact 정리 대기 수·용량·최장 시간
 - 파싱 실패 등 검색에서 제외된 문서와 재시도 동작
 
-raw snapshot ID, generation, epoch 같은 값은 `기술 세부정보` expander 안에 둔다. Native V2 상태가 없으면 V1 지표로 우회하지 않고 `V2 retrieval status is unavailable` 문제를 표시한다.
+raw snapshot ID, generation, epoch 같은 값은 `기술 세부정보` expander 안에 둔다. Native V2 상태가 없으면 다른 저장소의 지표로 우회하지 않고 `V2 retrieval status is unavailable` 문제를 표시한다.
 
 ### 정확도 평가
 
@@ -176,9 +174,9 @@ raw snapshot ID, generation, epoch 같은 값은 `기술 세부정보` expander 
 
 PDF 추출 엔진 비교는 문제 문서가 의심될 때만 연다. 파일별 성공/실패, 추출량, 실행 시간과 결과 경로를 확인한다. 이 결과는 기본 정확도 수치에 자동 합산하지 않는다.
 
-### 신고·수정 확인 · 묶음 전 단계
+### 신고·수정 확인
 
-이 화면은 최종 평가 묶음 제작 화면이 아니다. 사용자 신고를 회귀 후보로 승격하고 수정 전 재현과 수정 후 검증을 관리하는 앞단이다. `verified` 또는 `closed` 후보만 이후 새 평가 사례의 입력으로 사용할 수 있으며, 새로 고정한 데이터 기준에서 기대 조건과 출처를 다시 검토해야 한다.
+이 화면은 사용자 신고를 회귀 후보로 승격하고 수정 전 재현과 수정 후 검증을 관리한다. `verified` 또는 `closed` 후보만 이후 새 평가 사례의 입력으로 사용할 수 있으며, 새로 고정한 데이터 기준에서 기대 조건과 출처를 다시 검토해야 한다.
 
 활성 화면은 다음 V2 계약만 자동 발견한다.
 
@@ -188,9 +186,9 @@ PDF 추출 엔진 비교는 문제 문서가 의심될 때만 연다. 파일별 
 | Regression candidate | `schema_version=2`, `contract_schema_version=2` |
 | Evaluation run | `schema_version=2`, 유효한 `run_hash`, 검증된 successor Native V2 provenance |
 
-구형 파일은 활성 목록에서 조용히 제외한다. 새 issue report와 이메일 text import는 V2 계약으로 저장한다.
+계약이 유효하지 않은 파일은 활성 목록에서 제외한다. 새 issue report와 이메일 text import는 V2 계약으로 저장한다.
 
-회귀 후보의 자동 baseline·verification은 Native V2 revision을 고정한 실행 결과만 증거로 연결한다. 검증 계획은 판정 기준이고 재현 매니페스트는 환경 지문이므로 둘만으로 실행 자료를 복원하지 않는다. UI는 고정 dataset, snapshot manifest와 snapshot 디렉터리의 존재 및 기존 snapshot 검증 결과를 별도로 확인해 `자동 재현 자료 준비됨` 또는 `자동 재현 자료 미준비`로 표시한다. 준비되지 않은 경우 수동 검사 결과를 기록하거나, 별도의 유효한 고정 자료로 생성한 검증 가능한 V2 run을 미연결 실행 목록에서 연결한다. 단순 후보 초안 진단 실행은 현재 Native V2 backend를 사용하지만 정식 lifecycle 증거로 자동 승격하지 않는다.
+회귀 후보의 baseline·verification은 Native V2 revision이 기록되고 검증된 실행 결과만 증거로 연결한다. 검증 계획은 판정 기준이고 재현 매니페스트는 환경 지문이므로 둘만으로 실행 자료를 복원하지 않는다. 단순 후보 초안 진단 실행은 현재 Native V2 backend를 사용하지만 정식 lifecycle 증거로 자동 승격하지 않는다.
 
 기대 결과 작성 단계에서는 운영자가 계약 JSON을 직접 입력하지 않는다. `LLM으로 최소 조건 제안`을 명시적으로 눌렀을 때만 선택 turn의 질문·답변·신고 사유와 제한된 출처 메타데이터를 현재 생성 모델에 보내며, 모델은 1~5개의 자연어 최소 조건과 대상 별칭만 구조화해 제안한다. 제안은 후보를 변경하거나 승인하지 않고 운영자가 화면에서 수정한 뒤 별도로 저장·승인한다. VectorDB 답변 조건은 기본적으로 `답변에 대상 표현 존재`, `선택 출처 메타데이터에 같은 대상 존재`, `그 출처 순위 인용`을 모두 만족해야 통과하므로, 예를 들어 “SK하이닉스 자료가 없다”는 문장에 이름만 등장해도 하이닉스 출처와 인용이 없으면 실패한다. 모델 호출·구조화 검증 실패 시 기존 후보 계약은 그대로 유지한다. 품질 프로파일, 성능 예산, 재현 입력과 매니페스트는 고급 내부 설정으로 기존 값을 자동 유지하며 수동 UI 검사가 필요한 경우에만 한 줄짜리 확인 조건을 추가한다.
 
@@ -202,9 +200,7 @@ PDF 추출 엔진 비교는 문제 문서가 의심될 때만 연다. 파일별 
 2. 무결성 검사는 V2 snapshot, membership, manifest, runtime, cleanup backlog만 본다.
 3. 정확도는 스키마·hash·실제 runtime provenance가 모두 검증된 Native V2 run만 집계한다.
 4. 신고와 회귀 후보 discovery도 V2 계약만 사용한다.
-5. 과거 산출물은 자동 삭제하거나 현재 지표로 변환하지 않는다.
-
-범용 legacy loader는 과거 artifact의 명시적 점검·변환과 기존 회귀 테스트를 위해 남아 있지만, `render_global_monitoring_page()`와 `render_chat_monitoring_page()`에서는 호출하지 않는다.
+5. 계약이 유효하지 않은 산출물은 현재 지표로 집계하지 않는다.
 
 ## 6. 주요 구현 파일
 
@@ -216,7 +212,6 @@ PDF 추출 엔진 비교는 문제 문서가 의심될 때만 연다. 파일별 
 | V2 issue report 저장과 discovery | `src/core/issue_report_store.py` |
 | Native V2 상태 | `src/core/status.py` |
 | 응답 metadata 생성 | `src/graphs/state.py`, `src/nodes/*` |
-| 평가 묶음 Phase 1 자료 계약 | `src/core/evaluation_bundle.py` |
 
 ## 7. 실행과 검증
 
@@ -232,7 +227,6 @@ streamlit run apps/gui/app.py
 
 ```bash
 python -m pytest -q tests/test_monitoring.py tests/test_gui_view_contracts.py tests/test_feedback_loop.py
-python -m pytest -q tests/test_evaluation_bundle.py tests/test_artifact_io.py
 ```
 
 검증 계약은 다음을 포함한다.
@@ -245,16 +239,16 @@ python -m pytest -q tests/test_evaluation_bundle.py tests/test_artifact_io.py
 - `report_uid` 우선 문서 그룹 및 안정적 ID 미측정 상태
 - chunk/PDF/provider 본문을 turn observability metadata에 복제하지 않음
 - 근거 연결 상태와 의미 정확도를 분리
-- provenance 없는 과거 응답과 legacy runtime latency 제외
+- Native V2 provenance가 없는 응답의 latency 제외
 - latency가 정확도에 섞이지 않음
 - self-labeled/tampered run 및 runtime revision 불일치 차단
 - 평가 자료가 없을 때 `측정 전`
 - 기본 화면의 두 지표와 용도별 상단 내비게이션
-- 활성 UI에 과거 DB/vector 실행 경로가 없음
+- 활성 UI는 Native V2 catalog/snapshot만 사용
 - 스키마 없는 report/candidate/run의 활성 discovery 제외
 - Native V2 무결성 및 cleanup backlog 표시
-- Native V2가 없을 때 legacy DB/vector 상태를 읽거나 렌더하지 않음
-- issue report와 candidate lifecycle의 기존 호환 경계
+- Native V2가 없을 때 다른 DB/vector 상태를 읽거나 렌더하지 않음
+- issue report와 candidate lifecycle의 V2 계약 경계
 
 ## 8. 현재 한계
 
@@ -263,5 +257,4 @@ python -m pytest -q tests/test_evaluation_bundle.py tests/test_artifact_io.py
 - 적은 평가 표본만으로 품질 우열이나 배포 여부를 자동 결정하지 않는다.
 - issue report에는 재현에 필요한 대화 metadata가 포함될 수 있으므로 외부 전달 전에 내용을 확인한다.
 - LLM 생성·query rewrite의 독립 latency는 아직 계측하지 않으며 전체 응답시간에만 포함된다.
-- 일반 대화 observability는 conversation DB 보존 정책을 따르고, 봉인된 평가 묶음의 불변 trial evidence와 같은 저장물로 취급하지 않는다.
-- 평가 묶음은 현재 자료 계약 단계다. 논리적 고정, 삭제 방지, 실행기, 작업 복구, 봉인·현재 기준 지정과 전역 운영 UI는 개정 계획의 후속 단계다.
+- 일반 대화 observability는 conversation DB 보존 정책을 따르며 정식 평가 증거로 취급하지 않는다.

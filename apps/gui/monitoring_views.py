@@ -289,11 +289,7 @@ def _render_experiment_monitoring(status: dict | None = None) -> None:
     try:
         dataset = monitoring.load_evaluation_dataset()
     except FileNotFoundError:
-        st.info(
-            "현재 승인된 기준 질문이 없습니다. "
-            "원천 데이터 준비 후 docs/EVALUATION_DATASET.md의 절차에 따라 "
-            "생성·검토해야 합니다."
-        )
+        st.info("현재 승인된 기준 질문이 없습니다.")
         return
 
     execution_mode = "native_v2"
@@ -730,13 +726,12 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
         candidate
     )
     st.caption(
-        f"품질 프로파일: {candidate.get('quality_profile') or 'legacy'} · "
+        f"품질 프로파일: {candidate.get('quality_profile') or 'unavailable'} · "
         f"검증 방식: {candidate.get('verification_type')} · "
         f"재현 정보: {'준비됨' if readiness['ready'] else '보강 필요'}"
     )
     if not readiness["ready"]:
         st.warning(readiness["reason"])
-    snapshot_readiness = monitoring.assess_evaluation_snapshot_readiness()
     with st.expander("검증 계획과 재현 매니페스트", expanded=False):
         st.json(
             {
@@ -746,32 +741,8 @@ def _render_candidate_lifecycle(candidate: dict) -> None:
                 ),
             }
         )
-        st.markdown("##### 자동 재현 자료")
-        if snapshot_readiness["ready"]:
-            st.success("자동 재현 자료 준비됨")
-        else:
-            st.warning("자동 재현 자료 미준비")
-            missing_labels = {
-                "dataset": "고정 dataset",
-                "snapshot_manifest": "snapshot manifest",
-                "snapshot_root": "snapshot 디렉터리",
-            }
-            missing = [
-                missing_labels.get(item, item)
-                for item in snapshot_readiness["missing_inputs"]
-            ]
-            if missing:
-                st.caption("누락: " + ", ".join(missing))
-            elif snapshot_readiness["failed_checks"]:
-                st.caption(
-                    "검증 실패: "
-                    + ", ".join(snapshot_readiness["failed_checks"])
-                )
-            else:
-                st.caption(snapshot_readiness["reason"])
         st.caption(
-            "검증 계획은 판정 기준이고 재현 매니페스트는 환경 지문입니다. "
-            "자동 실행에는 별도의 유효한 고정 dataset과 snapshot이 필요합니다."
+            "검증 계획은 판정 기준이고 재현 매니페스트는 Native V2 환경 지문입니다."
         )
     form_revision_key = (
         f"feedback_candidate_form_revision_{candidate['id']}_{status}"
@@ -2324,10 +2295,9 @@ def _render_global_monitoring_area(
 
 
 def _resolve_global_monitoring_status(status: dict | None) -> dict:
-    """Reuse Native status, but keep legacy installs fail-closed."""
+    """Reuse a supplied Native status snapshot when available."""
 
-    retrieval_mode = ((status or {}).get("retrieval") or {}).get("mode")
-    if not status or retrieval_mode in {None, "legacy_v1"}:
+    if not status:
         return status_cache.get_native_v2_data_status()
     return status
 

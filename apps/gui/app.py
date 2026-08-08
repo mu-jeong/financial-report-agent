@@ -21,9 +21,9 @@ def _finish_runtime_smoke(selection) -> None:
                 "active_snapshot_id": selection.active_snapshot_id,
                 "publication_generation": selection.publication_generation,
                 "write_epoch": selection.write_epoch,
-                "v1_fallback_open": selection.v1_fallback_open,
                 "degraded": selection.degraded,
                 "write_enabled": selection.write_enabled,
+                "initialization_state": selection.initialization_state,
             },
             ensure_ascii=False,
         )
@@ -37,22 +37,15 @@ def _import_or_reload(module_name: str):
     return importlib.import_module(module_name)
 
 
-import streamlit as st
-
 config_module = _import_or_reload("src.configs.config")
 MONITORING_MODE = config_module.MONITORING_MODE
-
-st.set_page_config(
-    page_title="Finance Report Agent",
-    layout="wide",
-)
 
 if _RUNTIME_SMOKE_REQUESTED:
     from src.retrieval.bootstrap import reconcile_and_inspect_runtime
 
     try:
         _retrieval_runtime = reconcile_and_inspect_runtime(
-            config_module.DB_PATH,
+            config_module.DATA_ROOT,
             allow_live_writer_read=True,
             prefer_fast_read=True,
         )
@@ -70,6 +63,13 @@ if _RUNTIME_SMOKE_REQUESTED:
         )
         raise SystemExit(2)
     _finish_runtime_smoke(_retrieval_runtime)
+
+import streamlit as st
+
+st.set_page_config(
+    page_title="Finance Report Agent",
+    layout="wide",
+)
 
 
 def _reload_loaded_application_modules() -> None:

@@ -33,8 +33,6 @@ from src.core.followup_scope import build_answer_scope_index
 
 EVALUATION_DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "evaluation_dataset.json"
 MULTITURN_EVALUATION_DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "multiturn_evaluation_dataset.json"
-EVALUATION_SNAPSHOT_ROOT = BASE_DIR / "tests" / "fixtures" / "eval_snapshot"
-EVALUATION_SNAPSHOT_MANIFEST_PATH = EVALUATION_SNAPSHOT_ROOT / "manifest.json"
 
 _CANDIDATE_WRITE_LOCK = threading.RLock()
 _AUTOMATIC_CHECKS = {
@@ -60,7 +58,6 @@ _NATIVE_V2_DATA_SOURCE_FIELDS = {
     "profile_hash",
     "publication_generation",
     "write_epoch",
-    "v1_fallback_open",
     "degraded",
 }
 _ALL_HARD_CHECKS = _AUTOMATIC_CHECKS | {
@@ -187,195 +184,6 @@ def load_multiturn_evaluation_dataset(
     return json.loads(dataset_path.read_text(encoding="utf-8-sig"))
 
 
-def load_evaluation_snapshot_manifest(
-    path: str | Path = EVALUATION_SNAPSHOT_MANIFEST_PATH,
-) -> dict[str, Any]:
-    """고정 evaluation snapshot manifest를 로드합니다."""
-    manifest_path = Path(path)
-    return json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-
-
-def _snapshot_check(name: str, passed: bool, detail: str) -> dict[str, str]:
-    return {"name": name, "status": "pass" if passed else "fail", "detail": detail}
-
-
-def _compare_snapshot_value(
-    checks: list[dict[str, str]],
-    *,
-    name: str,
-    dataset_value: Any,
-    manifest_value: Any,
-) -> None:
-    if manifest_value is None:
-        checks.append(_snapshot_check(name, True, "manifest value not specified"))
-        return
-    checks.append(
-        _snapshot_check(
-            name,
-            dataset_value == manifest_value,
-            f"dataset={dataset_value!r}, manifest={manifest_value!r}",
-        )
-    )
-
-
-def validate_evaluation_snapshot(
-    dataset: dict[str, Any],
-    manifest: dict[str, Any],
-    snapshot_root: str | Path = EVALUATION_SNAPSHOT_ROOT,
-) -> dict[str, Any]:
-    """dataset metadata와 snapshot 파일이 같은 baseline을 가리키는지 검증합니다."""
-    root = Path(snapshot_root)
-    database = manifest.get("database") or {}
-    vector_db = manifest.get("vector_db") or {}
-    db_path = root / str(database.get("path") or "reports.db")
-    faiss_dir = root / str(vector_db.get("path") or "vector_db")
-    checks: list[dict[str, str]] = []
-
-    _compare_snapshot_value(
-        checks,
-        name="dataset_name",
-        dataset_value=dataset.get("name"),
-        manifest_value=manifest.get("dataset_name"),
-    )
-    _compare_snapshot_value(
-        checks,
-        name="dataset_version",
-        dataset_value=dataset.get("version"),
-        manifest_value=manifest.get("dataset_version"),
-    )
-    generated_from = dataset.get("generated_from") or {}
-    _compare_snapshot_value(
-        checks,
-        name="snapshot_date",
-        dataset_value=generated_from.get("snapshot_date"),
-        manifest_value=manifest.get("snapshot_date"),
-    )
-    for field in (
-        "source_row_count",
-        "embedded_row_count",
-        "min_report_date",
-        "max_report_date",
-    ):
-        _compare_snapshot_value(
-            checks,
-            name=field,
-            dataset_value=generated_from.get(field),
-            manifest_value=database.get(field),
-        )
-
-    checks.append(
-        _snapshot_check(
-            "snapshot_db_exists",
-            db_path.exists(),
-            str(db_path),
-        )
-    )
-    checks.append(
-        _snapshot_check(
-            "vector_dir_exists",
-            faiss_dir.exists(),
-            str(faiss_dir),
-        )
-    )
-    for file_name in vector_db.get("required_files") or ["index.faiss", "index.pkl"]:
-        file_path = faiss_dir / str(file_name)
-        checks.append(
-            _snapshot_check(
-                f"vector_file:{file_name}",
-                file_path.exists(),
-                str(file_path),
-            )
-        )
-
-    status = "fail" if any(check["status"] == "fail" for check in checks) else "pass"
-    return {
-        "status": status,
-        "checks": checks,
-        "snapshot_root": str(root),
-        "db_path": str(db_path),
-        "faiss_dir": str(faiss_dir),
-        "manifest": manifest,
-    }
-
-
-def assess_evaluation_snapshot_readiness(
-    *,
-    dataset_path: str | Path = EVALUATION_DATASET_PATH,
-    manifest_path: str | Path = EVALUATION_SNAPSHOT_MANIFEST_PATH,
-    snapshot_root: str | Path = EVALUATION_SNAPSHOT_ROOT,
-) -> dict[str, Any]:
-    """Check whether the fixed inputs required for automatic reproduction exist and agree."""
-
-    dataset_file = Path(dataset_path)
-    manifest_file = Path(manifest_path)
-    snapshot_directory = Path(snapshot_root)
-    inputs = {
-        "dataset": dataset_file,
-        "snapshot_manifest": manifest_file,
-        "snapshot_root": snapshot_directory,
-    }
-    missing_inputs = [
-        name for name, path in inputs.items() if not path.exists()
-    ]
-    base = {
-        "dataset_path": str(dataset_file),
-        "manifest_path": str(manifest_file),
-        "snapshot_root": str(snapshot_directory),
-        "missing_inputs": missing_inputs,
-    }
-    if missing_inputs:
-        return {
-            **base,
-            "ready": False,
-            "status": "missing",
-            "failed_checks": [],
-            "reason": "fixed automatic reproduction inputs are missing",
-        }
-
-    try:
-        dataset = load_evaluation_dataset(dataset_file)
-        manifest = load_evaluation_snapshot_manifest(manifest_file)
-    except (OSError, UnicodeError, ValueError) as exc:
-        return {
-            **base,
-            "ready": False,
-            "status": "invalid",
-            "failed_checks": [],
-            "reason": f"fixed input cannot be loaded: {type(exc).__name__}",
-        }
-    if not isinstance(dataset, dict) or not isinstance(manifest, dict):
-        return {
-            **base,
-            "ready": False,
-            "status": "invalid",
-            "failed_checks": [],
-            "reason": "fixed dataset and manifest must be JSON objects",
-        }
-
-    validation = validate_evaluation_snapshot(
-        dataset,
-        manifest,
-        snapshot_directory,
-    )
-    failed_checks = [
-        str(check.get("name") or "")
-        for check in validation.get("checks") or []
-        if check.get("status") == "fail"
-    ]
-    ready = validation.get("status") == "pass"
-    return {
-        **base,
-        "ready": ready,
-        "status": "ready" if ready else "invalid",
-        "failed_checks": failed_checks,
-        "reason": (
-            ""
-            if ready
-            else "fixed dataset and snapshot validation failed"
-        ),
-    }
-
-
 def summarize_evaluation_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
     """고정 dataset의 Monitoring Mode coverage metric을 반환합니다."""
     cases = dataset.get("cases") or []
@@ -428,7 +236,6 @@ def _message_has_native_v2_provenance(message: Mapping[str, Any]) -> bool:
         and isinstance(write_epoch, int)
         and not isinstance(write_epoch, bool)
         and write_epoch > 0
-        and runtime.get("v1_fallback_open") is False
         and runtime.get("degraded") is False
     )
 
@@ -1902,7 +1709,6 @@ def is_native_v2_evaluation_data_source(value: Any) -> bool:
         and isinstance(write_epoch, int)
         and not isinstance(write_epoch, bool)
         and write_epoch > 0
-        and value.get("v1_fallback_open") is False
         and value.get("degraded") is False
     )
 
@@ -1924,7 +1730,6 @@ def build_native_v2_evaluation_data_source(
         "profile_hash": retrieval.get("profile_hash"),
         "publication_generation": retrieval.get("publication_generation"),
         "write_epoch": retrieval.get("write_epoch"),
-        "v1_fallback_open": retrieval.get("v1_fallback_open"),
         "degraded": retrieval.get("degraded"),
         **extra,
     }

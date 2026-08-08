@@ -7,6 +7,7 @@ from src.configs.settings import (
     BASE_DIR,
     LOG_FILE_DEFAULT,
     get_config_value,
+    resolve_retrieval_path_settings,
 )
 
 load_dotenv()
@@ -16,8 +17,9 @@ load_dotenv()
 # ==============================================================================
 SAVE_DIR = get_config_value("SAVE_DIR")
 REPORT_PDF_DIR = get_config_value("REPORT_PDF_DIR")
-DB_PATH = get_config_value("DB_PATH")
-FAISS_DIR = get_config_value("FAISS_DIR")
+_RETRIEVAL_PATHS = resolve_retrieval_path_settings()
+DATA_ROOT = str(_RETRIEVAL_PATHS.data_root)
+RERANK_CACHE_DIR = str(_RETRIEVAL_PATHS.rerank_cache_dir)
 CONVERSATION_DB_PATH = get_config_value("CONVERSATION_DB_PATH")
 MONITORING_MODE = get_config_value("MONITORING_MODE")
 
@@ -39,7 +41,6 @@ PARENT_CHUNK_SIZE = get_config_value("PARENT_CHUNK_SIZE")
 CHILD_CHUNK_SIZE = get_config_value("CHILD_CHUNK_SIZE")
 CHUNK_SIZE = get_config_value("CHUNK_SIZE")
 CHUNK_OVERLAP = get_config_value("CHUNK_OVERLAP")
-TEST_LIMIT = get_config_value("TEST_LIMIT")
 SEARCH_TOP_K = get_config_value("SEARCH_TOP_K")
 SEARCH_CANDIDATE_MULTIPLIER = get_config_value("SEARCH_CANDIDATE_MULTIPLIER")
 USE_RERANKER = get_config_value("USE_RERANKER")

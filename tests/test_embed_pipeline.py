@@ -6,6 +6,21 @@ import pytest
 from src.core import embed_pipeline, pdf_extraction
 from src.core.pdf_extraction import ExtractionResult
 from src.retrieval import build_service, continuous_update
+from src.retrieval.bootstrap import (
+    inspect_runtime,
+    reconcile_and_inspect_runtime as real_reconcile_and_inspect_runtime,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_reconciliation(monkeypatch):
+    """Greenfield reconciliation is covered by retrieval integration tests."""
+
+    monkeypatch.setattr(
+        embed_pipeline,
+        "reconcile_and_inspect_runtime",
+        lambda _root: None,
+    )
 
 
 def test_run_pipeline_holds_cutover_fence_for_the_whole_update(
@@ -27,24 +42,58 @@ def test_run_pipeline_holds_cutover_fence_for_the_whole_update(
         def __exit__(self, *_args):
             events.append("unlocked")
 
-    def run_locked(
-        limit,
-        *,
-        continue_on_extraction_error=False,
-        retry_extraction_failures=False,
-    ):
+    def run_locked(*, retry_extraction_failures=False):
         assert events == ["locked"]
-        assert continue_on_extraction_error is False
         assert retry_extraction_failures is False
-        events.append(f"pipeline:{limit}")
+        events.append("pipeline")
         return 0
 
-    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr(embed_pipeline.config, "DATA_ROOT", str(data_root))
     monkeypatch.setattr(embed_pipeline, "RetrievalUpdateLock", FakeUpdateLock)
     monkeypatch.setattr(embed_pipeline, "_run_pipeline_locked", run_locked)
 
-    assert embed_pipeline.run_pipeline(test_limit=7) == 0
-    assert events == ["locked", "pipeline:7", "unlocked"]
+    assert embed_pipeline.run_pipeline() == 0
+    assert events == ["locked", "pipeline", "unlocked"]
+
+
+def test_main_reconciles_greenfield_root_to_exact_empty_without_embeddings(
+    tmp_path,
+    monkeypatch,
+):
+    data_root = tmp_path / "data"
+    source_root = tmp_path / "pdfs"
+    data_root.mkdir()
+    source_root.mkdir()
+
+    monkeypatch.setattr(embed_pipeline.config, "DATA_ROOT", str(data_root))
+    monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(source_root))
+    monkeypatch.setattr(
+        embed_pipeline,
+        "reconcile_and_inspect_runtime",
+        real_reconcile_and_inspect_runtime,
+    )
+    monkeypatch.setattr(
+        embed_pipeline,
+        "build_embeddings_fn",
+        lambda: pytest.fail("empty update initialized embeddings"),
+    )
+
+    with pytest.raises(SystemExit) as exited:
+        embed_pipeline.main([])
+    assert exited.value.code == 0
+
+    runtime = inspect_runtime(data_root)
+    assert runtime.mode == "native"
+    assert runtime.initialization_state == "empty"
+    assert (
+        runtime.active_snapshot_id,
+        runtime.active_build_id,
+        runtime.predecessor_snapshot_id,
+        runtime.publication_generation,
+        runtime.write_epoch,
+        runtime.degraded,
+        runtime.write_enabled,
+    ) == (None, None, None, 0, 0, False, False)
 
 
 def test_node_extract_pdf_uses_unembedded_extraction_engine_for_pending_docs(tmp_path, monkeypatch):
@@ -122,7 +171,7 @@ def test_node_extract_pdf_falls_back_to_default_engine_when_unembedded_engine_is
     assert result["extraction_engine"] == "pymupdf"
 
 
-def test_node_extract_pdf_keeps_v1_requested_engine_after_successful_fallback(
+def test_node_extract_pdf_keeps_requested_engine_after_successful_fallback(
     tmp_path,
     monkeypatch,
 ):
@@ -243,120 +292,15 @@ def test_node_extract_pdf_preserves_primary_and_fallback_failures(
     assert "opendataloader parser failed" in message
 
 
-def test_run_pipeline_records_extraction_engine_on_failed_pending_document(tmp_path, monkeypatch):
-    pdf_dir = tmp_path / "pdfs"
-    pdf_dir.mkdir()
-    (pdf_dir / "report.pdf").write_bytes(b"%PDF")
-    captured = {}
-
-    row = {
-        "file_name": "report.pdf",
-        "target_name": "SK하이닉스",
-        "title": "DRAM 전망",
-        "report_date": "2026-06-27",
-        "report_type": "company",
-        "broker": "테스트증권",
-    }
-
-    monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(pdf_dir))
-    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(tmp_path / "reports.db"))
-    monkeypatch.setattr(embed_pipeline.config, "FAISS_DIR", str(tmp_path / "vector_db"))
-    monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
-    monkeypatch.setattr(embed_pipeline.config, "UNEMBEDDED_EXTRACTION_ENGINE", "opendataloader", raising=False)
+def test_run_pipeline_rejects_non_native_runtime(monkeypatch):
     monkeypatch.setattr(
         embed_pipeline,
         "guard_before_retrieval_write",
         lambda _path, **_kwargs: SimpleNamespace(is_native=False),
     )
-    monkeypatch.setattr(embed_pipeline, "init_db", lambda: None)
-    monkeypatch.setattr(embed_pipeline, "sync_report_pdf_dir_env", lambda _pdf_dir: None)
-    monkeypatch.setattr(embed_pipeline, "sync_from_directory", lambda _pdf_dir: None)
-    monkeypatch.setattr(embed_pipeline, "fetch_unembedded", lambda: [row])
-    monkeypatch.setattr(embed_pipeline, "build_embeddings_fn", lambda: object())
-    monkeypatch.setattr(embed_pipeline.time, "sleep", lambda _seconds: None)
 
-    def fail_extract_pdf(state):
-        raise ValueError("broken parser")
-
-    def fake_mark_embedding_failed(file_name, error_message, *, extraction_engine=None):
-        captured["file_name"] = file_name
-        captured["error_message"] = error_message
-        captured["extraction_engine"] = extraction_engine
-
-    monkeypatch.setattr(embed_pipeline, "node_extract_pdf", fail_extract_pdf)
-    monkeypatch.setattr(embed_pipeline, "mark_embedding_failed", fake_mark_embedding_failed)
-
-    exit_code = embed_pipeline.run_pipeline(test_limit=1)
-
-    assert exit_code == 1
-    assert captured == {
-        "file_name": "report.pdf",
-        "error_message": "ValueError: broken parser",
-        "extraction_engine": "opendataloader",
-    }
-
-
-def test_quickstart_mode_continues_after_legacy_pdf_extraction_failure(
-    tmp_path,
-    monkeypatch,
-):
-    pdf_dir = tmp_path / "pdfs"
-    pdf_dir.mkdir()
-    (pdf_dir / "report.pdf").write_bytes(b"%PDF")
-    failures = []
-    row = {
-        "file_name": "report.pdf",
-        "target_name": "테스트기업",
-        "title": "테스트 리포트",
-        "report_date": "2026-07-21",
-        "report_type": "company",
-        "broker": "테스트증권",
-    }
-
-    monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(pdf_dir))
-    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(tmp_path / "reports.db"))
-    monkeypatch.setattr(embed_pipeline.config, "FAISS_DIR", str(tmp_path / "vector_db"))
-    monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
-    monkeypatch.setattr(
-        embed_pipeline.config,
-        "UNEMBEDDED_EXTRACTION_ENGINE",
-        "",
-        raising=False,
-    )
-    monkeypatch.setattr(
-        embed_pipeline,
-        "guard_before_retrieval_write",
-        lambda _path, **_kwargs: SimpleNamespace(is_native=False),
-    )
-    monkeypatch.setattr(embed_pipeline, "init_db", lambda: None)
-    monkeypatch.setattr(embed_pipeline, "sync_report_pdf_dir_env", lambda _pdf_dir: None)
-    monkeypatch.setattr(embed_pipeline, "sync_from_directory", lambda _pdf_dir: None)
-    monkeypatch.setattr(embed_pipeline, "fetch_unembedded", lambda: [row])
-    monkeypatch.setattr(embed_pipeline, "build_embeddings_fn", lambda: object())
-
-    def fail_extract_pdf(_state):
-        raise embed_pipeline.PdfExtractionError("primary and fallback failed")
-
-    monkeypatch.setattr(embed_pipeline, "node_extract_pdf", fail_extract_pdf)
-    monkeypatch.setattr(
-        embed_pipeline,
-        "mark_embedding_failed",
-        lambda file_name, error_message, **_kwargs: failures.append(
-            (file_name, error_message)
-        ),
-    )
-
-    assert embed_pipeline.run_pipeline(test_limit=1) == 1
-    failures.clear()
-    exit_code = embed_pipeline.run_pipeline(
-        test_limit=1,
-        continue_on_extraction_error=True,
-    )
-
-    assert exit_code == 0
-    assert failures == [
-        ("report.pdf", "PdfExtractionError: primary and fallback failed")
-    ]
+    with pytest.raises(RuntimeError, match="Native V2 retrieval runtime is required"):
+        embed_pipeline._run_pipeline_locked()
 
 
 def test_native_source_extraction_error_cannot_be_hidden_as_quickstart_success(
@@ -377,7 +321,7 @@ def test_native_source_extraction_error_cannot_be_hidden_as_quickstart_success(
         "guard_before_retrieval_write",
         lambda _path, **_kwargs: runtime,
     )
-    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr(embed_pipeline.config, "DATA_ROOT", str(data_root))
     monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(source_root))
     monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setattr(embed_pipeline.config, "USE_PARENT_CHILD", True)
@@ -391,7 +335,6 @@ def test_native_source_extraction_error_cannot_be_hidden_as_quickstart_success(
     monkeypatch.setattr(continuous_update, "execute_continuous_update", fail_update)
 
     assert embed_pipeline.run_pipeline() == 1
-    assert embed_pipeline.run_pipeline(continue_on_extraction_error=True) == 1
 
 
 def test_quickstart_mode_does_not_hide_native_profile_mismatch(
@@ -412,7 +355,7 @@ def test_quickstart_mode_does_not_hide_native_profile_mismatch(
         "guard_before_retrieval_write",
         lambda _path, **_kwargs: runtime,
     )
-    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr(embed_pipeline.config, "DATA_ROOT", str(data_root))
     monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(source_root))
     monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setattr(embed_pipeline.config, "USE_PARENT_CHILD", True)
@@ -425,7 +368,7 @@ def test_quickstart_mode_does_not_hide_native_profile_mismatch(
 
     monkeypatch.setattr(continuous_update, "execute_continuous_update", reject_profile)
 
-    assert embed_pipeline.run_pipeline(continue_on_extraction_error=True) == 1
+    assert embed_pipeline.run_pipeline() == 1
 
 
 def test_run_pipeline_routes_native_runtime_to_continuous_update(
@@ -460,7 +403,7 @@ def test_run_pipeline_routes_native_runtime_to_continuous_update(
         "guard_before_retrieval_write",
         lambda _path, **_kwargs: runtime,
     )
-    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr(embed_pipeline.config, "DATA_ROOT", str(data_root))
     monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(source_root))
     monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setattr(
@@ -472,26 +415,19 @@ def test_run_pipeline_routes_native_runtime_to_continuous_update(
     monkeypatch.setattr(embed_pipeline.config, "USE_PARENT_CHILD", False)
     monkeypatch.setattr(embed_pipeline.config, "CHUNK_SIZE", 777)
     monkeypatch.setattr(embed_pipeline, "build_embeddings_fn", lambda: embeddings)
-    monkeypatch.setattr(
-        embed_pipeline,
-        "init_db",
-        lambda: (_ for _ in ()).throw(AssertionError("legacy DB init is unreachable")),
-    )
 
-    def fake_execute(db_path, source_directory, **kwargs):
-        calls.append((db_path, source_directory, kwargs))
+    def fake_execute(data_root_arg, source_directory, **kwargs):
+        calls.append((data_root_arg, source_directory, kwargs))
         return completed
 
     monkeypatch.setattr(continuous_update, "execute_continuous_update", fake_execute)
 
     assert embed_pipeline.run_pipeline(
-        test_limit=1,
         retry_extraction_failures=True,
     ) == 0
     assert len(calls) == 1
-    assert calls[0][0] == str(data_root / "reports.db")
+    assert calls[0][0] == str(data_root)
     assert calls[0][1] == str(source_root)
-    assert calls[0][2]["data_root"] == data_root
     assert calls[0][2]["embeddings"] is embeddings
     assert calls[0][2]["extractor_name"] == "opendataloader"
     assert calls[0][2]["allow_extraction_fallback"] is False
@@ -565,18 +501,13 @@ def test_run_pipeline_reports_delta_batches_then_one_final_compaction(
         "guard_before_retrieval_write",
         lambda _path, **_kwargs: runtime,
     )
-    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr(embed_pipeline.config, "DATA_ROOT", str(data_root))
     monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(source_root))
     monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setattr(embed_pipeline.config, "USE_PARENT_CHILD", True)
     monkeypatch.setattr(embed_pipeline, "build_embeddings_fn", lambda: embeddings)
-    monkeypatch.setattr(
-        embed_pipeline,
-        "init_db",
-        lambda: (_ for _ in ()).throw(AssertionError("legacy DB init is unreachable")),
-    )
 
-    def fake_execute(_db_path, _source_directory, **kwargs):
+    def fake_execute(_data_root, _source_directory, **kwargs):
         calls.append(kwargs)
         for delta in deltas:
             kwargs["progress_callback"](delta)
@@ -648,7 +579,7 @@ def test_run_pipeline_native_runtime_keeps_default_extractor_fallback_policy(
         "guard_before_retrieval_write",
         lambda _path, **_kwargs: runtime,
     )
-    monkeypatch.setattr(embed_pipeline.config, "DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr(embed_pipeline.config, "DATA_ROOT", str(data_root))
     monkeypatch.setattr(embed_pipeline.config, "SAVE_DIR", str(source_root))
     monkeypatch.setattr(embed_pipeline.config, "EXTRACTION_ENGINE", "pymupdf")
     monkeypatch.setattr(
@@ -666,7 +597,7 @@ def test_run_pipeline_native_runtime_keeps_default_extractor_fallback_policy(
     monkeypatch.setattr(embed_pipeline.config, "USE_PARENT_CHILD", True)
     monkeypatch.setattr(embed_pipeline, "build_embeddings_fn", object)
 
-    def fake_execute(_db_path, _source_directory, **kwargs):
+    def fake_execute(_data_root, _source_directory, **kwargs):
         captured.update(kwargs)
         return SimpleNamespace(
             delta_publications=(),

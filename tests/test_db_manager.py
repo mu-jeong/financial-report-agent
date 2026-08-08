@@ -1,76 +1,78 @@
+import sqlite3
+from types import SimpleNamespace
+
 import pytest
 
 from src.core import db_manager
 from src.core.db_manager import parse_filename
-from src.retrieval.bootstrap import RetrievalBootstrapError
 
 
 def test_parse_filename_accepts_current_five_part_rule():
-    parsed = parse_filename("company_2026-02-05_삼성전자_미래에셋증권_HBM 전망.pdf")
+    parsed = parse_filename("company_2026-02-05_Samsung_Broker_HBM outlook.pdf")
 
     assert parsed == {
         "report_type": "company",
         "report_date": "2026-02-05",
-        "target_name": "삼성전자",
-        "broker": "미래에셋증권",
-        "title": "HBM 전망",
+        "target_name": "Samsung",
+        "broker": "Broker",
+        "title": "HBM outlook",
     }
 
 
 def test_parse_filename_preserves_underscores_inside_title():
-    parsed = parse_filename("company_2026-02-05_삼성전자_미래에셋증권_HBM_AI 전망.pdf")
+    parsed = parse_filename("company_2026-02-05_Samsung_Broker_HBM_AI outlook.pdf")
 
     assert parsed is not None
-    assert parsed["title"] == "HBM_AI 전망"
+    assert parsed["title"] == "HBM_AI outlook"
 
 
 def test_parse_filename_rejects_invalid_shape_or_date():
-    assert parse_filename("삼성전자.pdf") is None
-    assert parse_filename("company_2026-99-99_삼성전자_미래에셋증권_제목.pdf") is None
-    assert parse_filename("company_2026-02-05_삼성전자_미래에셋증권_제목.txt") is None
+    assert parse_filename("Samsung.pdf") is None
+    assert parse_filename("company_2026-99-99_Samsung_Broker_Title.pdf") is None
+    assert parse_filename("company_2026-02-05_Samsung_Broker_Title.txt") is None
 
 
-def test_embedding_failure_reason_and_extraction_engine_are_recorded_and_cleared_on_success(tmp_path, monkeypatch):
-    db_path = tmp_path / "reports.db"
-    monkeypatch.setattr(db_manager, "DB_PATH", str(db_path))
+def test_native_report_projection_is_read_only(tmp_path, monkeypatch):
+    catalog = tmp_path / "catalog.sqlite3"
+    with sqlite3.connect(catalog) as connection:
+        connection.execute(
+            """
+            CREATE TABLE active_reports (
+                report_id INTEGER,
+                report_type TEXT,
+                report_date TEXT,
+                target_name TEXT,
+                title TEXT,
+                broker TEXT,
+                canonical_relative_path TEXT
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO active_reports VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                "company",
+                "2026-02-05",
+                "Example",
+                "Outlook",
+                "Broker",
+                "pdfs/report.pdf",
+            ),
+        )
 
-    db_manager.init_db()
-    db_manager.upsert_report("company_2026-02-05_삼성전자_미래에셋증권_HBM 전망.pdf")
-
-    db_manager.mark_embedding_failed(
-        "company_2026-02-05_삼성전자_미래에셋증권_HBM 전망.pdf",
-        "ValueError: Extracted text is empty",
-        extraction_engine="opendataloader",
+    monkeypatch.setattr(
+        db_manager,
+        "_resolve_retrieval_dispatch",
+        lambda _root: SimpleNamespace(
+            mode="native",
+            paths=SimpleNamespace(catalog=catalog),
+        ),
     )
 
-    pending = db_manager.fetch_unembedded()
-    assert pending[0]["embedding_last_error"] == "ValueError: Extracted text is empty"
-    assert pending[0]["embedding_last_attempt_at"]
-    assert pending[0]["embedding_extraction_engine"] == "opendataloader"
-
-    db_manager.mark_embedded(
-        "company_2026-02-05_삼성전자_미래에셋증권_HBM 전망.pdf",
-        extraction_engine="opendataloader",
-    )
-
-    row = db_manager.fetch_all()[0]
-    assert row["is_embedded"] == 1
-    assert row["embedding_last_error"] is None
-    assert row["embedding_last_attempt_at"] is None
-    assert row["embedding_extraction_engine"] == "opendataloader"
-
-
-def test_missing_native_catalog_footprint_blocks_legacy_database_creation(
-    tmp_path,
-    monkeypatch,
-):
-    db_path = tmp_path / "reports.db"
-    evidence = tmp_path / "retrieval" / "v2" / "evidence"
-    evidence.mkdir(parents=True)
-    (evidence / "native-authority.marker").write_text("present", encoding="utf-8")
-    monkeypatch.setattr(db_manager, "DB_PATH", str(db_path))
-
-    with pytest.raises(RetrievalBootstrapError, match="V2 recovery evidence"):
-        db_manager.init_db()
-
-    assert not db_path.exists()
+    with db_manager.get_connection() as connection:
+        row = connection.execute("SELECT * FROM reports").fetchone()
+        assert row["file_name"] == "report.pdf"
+        assert row["is_embedded"] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute("DELETE FROM main.active_reports")

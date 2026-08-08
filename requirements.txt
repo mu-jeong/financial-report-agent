@@ -8,7 +8,6 @@ PyMuPDF==1.27.2
 # LangChain is split into modular packages; install only the pieces imported by src/ and tests.
 langchain-core==1.4.0
 langchain-openrouter==0.2.3
-langchain-community==0.4.1
 langchain-text-splitters==1.1.1
 faiss-cpu==1.13.2
 python-dotenv==1.2.1

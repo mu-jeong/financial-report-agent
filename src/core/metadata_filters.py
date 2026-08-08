@@ -472,22 +472,6 @@ def _metadata_revision_token(connection: sqlite3.Connection) -> tuple[Any, ...]:
     database_identity = (
         str(database[2]) if database is not None and database[2] else f":memory:{id(connection)}"
     )
-    native = connection.execute(
-        """
-        SELECT 1 FROM sqlite_schema
-        WHERE type = 'table' AND name = 'retrieval_runtime'
-        """
-    ).fetchone()
-    if native is None:
-        legacy = connection.execute(
-            """
-            SELECT COUNT(*), COALESCE(MAX(rowid), 0),
-                   COALESCE(MAX(report_date), '')
-            FROM reports
-            """
-        ).fetchone()
-        return (database_identity, "legacy", *tuple(legacy))
-
     runtime = connection.execute(
         """
         SELECT active_snapshot_id, active_build_id, publication_generation
@@ -533,21 +517,6 @@ def _metadata_revision_token(connection: sqlite3.Connection) -> tuple[Any, ...]:
 
 def _active_metadata_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     """Read active report metadata without expanding snapshot chunk membership."""
-
-    native = connection.execute(
-        """
-        SELECT 1 FROM sqlite_schema
-        WHERE type = 'table' AND name = 'retrieval_runtime'
-        """
-    ).fetchone()
-    if native is None:
-        return connection.execute(
-            """
-            SELECT target_name, broker, substr(report_date, 1, 7) AS report_month,
-                   report_type
-            FROM reports
-            """
-        ).fetchall()
 
     delta_tables = {
         row[0]

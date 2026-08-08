@@ -16,17 +16,13 @@ def _clear_status_cache() -> None:
     status_cache.clear()
 
 
-def _status_paths(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def _status_paths(tmp_path: Path) -> tuple[Path, Path, Path]:
     data_root = tmp_path / "data"
-    db_path = data_root / "reports.db"
     catalog = data_root / "retrieval" / "v2" / "catalog.sqlite3"
     save_dir = data_root / "downloaded"
-    faiss_dir = data_root / "vector_db"
 
     catalog.parent.mkdir(parents=True)
     save_dir.mkdir(parents=True)
-    faiss_dir.mkdir(parents=True)
-    db_path.write_bytes(b"legacy-anchor")
     with sqlite3.connect(catalog) as connection:
         connection.executescript(
             """
@@ -38,14 +34,13 @@ def _status_paths(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
                 predecessor_snapshot_id TEXT,
                 publication_generation INTEGER NOT NULL,
                 write_epoch INTEGER NOT NULL,
-                v1_fallback_open INTEGER NOT NULL,
                 degraded INTEGER NOT NULL,
                 write_enabled INTEGER NOT NULL,
                 updated_at TEXT NOT NULL
             );
             INSERT INTO retrieval_runtime VALUES (
                 1, 7, 'snapshot-1', 'build-1', NULL,
-                1, 1, 0, 0, 1, '2026-08-04T00:00:00Z'
+                1, 1, 0, 1, '2026-08-04T00:00:00Z'
             );
             CREATE TABLE retrieval_delta_segments (
                 segment_id TEXT PRIMARY KEY,
@@ -58,18 +53,13 @@ def _status_paths(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
             );
             """
         )
-    return save_dir, db_path, faiss_dir, catalog
+    return save_dir, data_root, catalog
 
 
-def _load_status(
-    save_dir: Path,
-    db_path: Path,
-    faiss_dir: Path,
-) -> dict:
+def _load_status(save_dir: Path, data_root: Path) -> dict:
     return status_cache.get_data_status(
         save_dir=str(save_dir),
-        db_path=str(db_path),
-        faiss_dir=str(faiss_dir),
+        data_root=str(data_root),
     )
 
 
@@ -77,7 +67,7 @@ def test_unchanged_revision_computes_status_once_across_sidebar_reload(
     tmp_path,
     monkeypatch,
 ):
-    save_dir, db_path, faiss_dir, _catalog = _status_paths(tmp_path)
+    save_dir, data_root, _catalog = _status_paths(tmp_path)
     calls = []
 
     def fake_get_data_status(**_kwargs):
@@ -87,16 +77,16 @@ def test_unchanged_revision_computes_status_once_across_sidebar_reload(
     monkeypatch.setattr(status_cache.status_module, "get_data_status", fake_get_data_status)
     monkeypatch.setattr(status_cache.data_update_jobs, "read_status", lambda: None)
 
-    first = _load_status(save_dir, db_path, faiss_dir)
+    first = _load_status(save_dir, data_root)
     importlib.reload(sidebar_views)
-    second = _load_status(save_dir, db_path, faiss_dir)
+    second = _load_status(save_dir, data_root)
 
     assert first == second == {"db": {"total_reports": 7}}
     assert calls == ["load"]
 
 
 def test_catalog_replacement_invalidates_cached_status(tmp_path, monkeypatch):
-    save_dir, db_path, faiss_dir, catalog = _status_paths(tmp_path)
+    save_dir, data_root, catalog = _status_paths(tmp_path)
     calls = []
 
     def fake_get_data_status(**_kwargs):
@@ -106,14 +96,14 @@ def test_catalog_replacement_invalidates_cached_status(tmp_path, monkeypatch):
     monkeypatch.setattr(status_cache.status_module, "get_data_status", fake_get_data_status)
     monkeypatch.setattr(status_cache.data_update_jobs, "read_status", lambda: None)
 
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 1
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 1
+    assert _load_status(save_dir, data_root)["load_count"] == 1
+    assert _load_status(save_dir, data_root)["load_count"] == 1
     catalog.write_bytes(b"catalog-was-replaced")
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 2
+    assert _load_status(save_dir, data_root)["load_count"] == 2
 
 
 def test_committed_catalog_wal_change_invalidates_cached_status(tmp_path, monkeypatch):
-    save_dir, db_path, faiss_dir, catalog = _status_paths(tmp_path)
+    save_dir, data_root, catalog = _status_paths(tmp_path)
     calls = []
 
     def fake_get_data_status(**_kwargs):
@@ -123,7 +113,7 @@ def test_committed_catalog_wal_change_invalidates_cached_status(tmp_path, monkey
     monkeypatch.setattr(status_cache.status_module, "get_data_status", fake_get_data_status)
     monkeypatch.setattr(status_cache.data_update_jobs, "read_status", lambda: None)
 
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 1
+    assert _load_status(save_dir, data_root)["load_count"] == 1
     writer = sqlite3.connect(catalog)
     try:
         writer.execute("PRAGMA journal_mode = WAL")
@@ -137,7 +127,7 @@ def test_committed_catalog_wal_change_invalidates_cached_status(tmp_path, monkey
         writer.commit()
 
         assert Path(f"{catalog}-wal").is_file()
-        assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 2
+        assert _load_status(save_dir, data_root)["load_count"] == 2
     finally:
         writer.close()
 
@@ -146,7 +136,7 @@ def test_ready_delta_invalidates_without_runtime_generation_change(
     tmp_path,
     monkeypatch,
 ):
-    save_dir, db_path, faiss_dir, catalog = _status_paths(tmp_path)
+    save_dir, data_root, catalog = _status_paths(tmp_path)
     calls = []
 
     def fake_get_data_status(**_kwargs):
@@ -156,7 +146,7 @@ def test_ready_delta_invalidates_without_runtime_generation_change(
     monkeypatch.setattr(status_cache.status_module, "get_data_status", fake_get_data_status)
     monkeypatch.setattr(status_cache.data_update_jobs, "read_status", lambda: None)
 
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 1
+    assert _load_status(save_dir, data_root)["load_count"] == 1
     with sqlite3.connect(catalog) as writer:
         writer.execute(
             """
@@ -166,11 +156,11 @@ def test_ready_delta_invalidates_without_runtime_generation_change(
             )
             """
         )
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 2
+    assert _load_status(save_dir, data_root)["load_count"] == 2
 
 
 def test_update_job_state_change_invalidates_cached_status(tmp_path, monkeypatch):
-    save_dir, db_path, faiss_dir, _catalog = _status_paths(tmp_path)
+    save_dir, data_root, _catalog = _status_paths(tmp_path)
     job_status = {"state": "running", "phase": "download", "pid": 101}
     calls = []
 
@@ -185,14 +175,14 @@ def test_update_job_state_change_invalidates_cached_status(tmp_path, monkeypatch
         lambda: dict(job_status),
     )
 
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 1
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 1
+    assert _load_status(save_dir, data_root)["load_count"] == 1
+    assert _load_status(save_dir, data_root)["load_count"] == 1
     job_status.update({"state": "succeeded", "phase": "done"})
-    assert _load_status(save_dir, db_path, faiss_dir)["load_count"] == 2
+    assert _load_status(save_dir, data_root)["load_count"] == 2
 
 
 def test_cached_status_returns_mutation_isolated_snapshots(tmp_path, monkeypatch):
-    save_dir, db_path, faiss_dir, _catalog = _status_paths(tmp_path)
+    save_dir, data_root, _catalog = _status_paths(tmp_path)
     calls = []
 
     def fake_get_data_status(**_kwargs):
@@ -207,10 +197,10 @@ def test_cached_status_returns_mutation_isolated_snapshots(tmp_path, monkeypatch
     monkeypatch.setattr(status_cache.status_module, "get_data_status", fake_get_data_status)
     monkeypatch.setattr(status_cache.data_update_jobs, "read_status", lambda: None)
 
-    first = _load_status(save_dir, db_path, faiss_dir)
+    first = _load_status(save_dir, data_root)
     first["db"]["total_reports"] = 999
     first["db"]["report_date_counts"]["2026-08-04"] = 999
-    second = _load_status(save_dir, db_path, faiss_dir)
+    second = _load_status(save_dir, data_root)
 
     assert second["db"] == {
         "total_reports": 1,
@@ -223,7 +213,7 @@ def test_pdf_count_stays_fresh_without_recomputing_catalog_status(
     tmp_path,
     monkeypatch,
 ):
-    save_dir, db_path, faiss_dir, _catalog = _status_paths(tmp_path)
+    save_dir, data_root, _catalog = _status_paths(tmp_path)
     calls = []
 
     def fake_get_data_status(**_kwargs):
@@ -233,14 +223,32 @@ def test_pdf_count_stays_fresh_without_recomputing_catalog_status(
     monkeypatch.setattr(status_cache.status_module, "get_data_status", fake_get_data_status)
     monkeypatch.setattr(status_cache.data_update_jobs, "read_status", lambda: None)
 
-    assert _load_status(save_dir, db_path, faiss_dir)["downloaded_pdfs"] == 0
+    assert _load_status(save_dir, data_root)["downloaded_pdfs"] == 0
     (save_dir / "new-report.PDF").write_bytes(b"pdf")
-    assert _load_status(save_dir, db_path, faiss_dir)["downloaded_pdfs"] == 1
+    assert _load_status(save_dir, data_root)["downloaded_pdfs"] == 1
     assert calls == ["load"]
 
 
+def test_catalog_size_refresh_uses_native_catalog_path(tmp_path, monkeypatch):
+    save_dir, data_root, catalog = _status_paths(tmp_path)
+
+    monkeypatch.setattr(
+        status_cache.status_module,
+        "get_data_status",
+        lambda **_kwargs: {
+            "paths": {"catalog_path": str(catalog)},
+            "db": {"size_bytes": 0},
+        },
+    )
+    monkeypatch.setattr(status_cache.data_update_jobs, "read_status", lambda: None)
+
+    snapshot = _load_status(save_dir, data_root)
+
+    assert snapshot["db"]["size_bytes"] == catalog.stat().st_size
+
+
 def test_native_monitoring_reuses_sidebar_snapshot(tmp_path, monkeypatch):
-    save_dir, db_path, faiss_dir, _catalog = _status_paths(tmp_path)
+    save_dir, data_root, _catalog = _status_paths(tmp_path)
     calls = []
 
     def fake_get_data_status(**_kwargs):
@@ -258,17 +266,17 @@ def test_native_monitoring_reuses_sidebar_snapshot(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(status_cache.data_update_jobs, "read_status", lambda: None)
 
-    _load_status(save_dir, db_path, faiss_dir)
+    _load_status(save_dir, data_root)
     monitoring = status_cache.get_native_v2_data_status(
         save_dir=str(save_dir),
-        db_path=str(db_path),
+        data_root=str(data_root),
     )
 
     assert monitoring["retrieval"]["mode"] == "native"
     assert calls == ["load"]
 
 
-def test_global_monitoring_rechecks_legacy_status_but_reuses_native_status(
+def test_global_monitoring_loads_missing_status_but_reuses_supplied_status(
     monkeypatch,
 ):
     native_only_status = {"retrieval": {"mode": "unavailable"}}
@@ -283,11 +291,10 @@ def test_global_monitoring_rechecks_legacy_status_but_reuses_native_status(
         "get_native_v2_data_status",
         fake_native_status,
     )
-    legacy_status = {"retrieval": {"mode": "legacy_v1"}}
     native_status = {"retrieval": {"mode": "native"}}
 
     assert (
-        monitoring_views._resolve_global_monitoring_status(legacy_status)
+        monitoring_views._resolve_global_monitoring_status(None)
         is native_only_status
     )
     assert (

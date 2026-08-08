@@ -51,7 +51,7 @@ from src.retrieval.build_service import (
     _read_catalog_sources,
     _split_full_corpus,
     _validate_incremental_profile,
-    _validate_same_space_canary,
+    _validate_active_space_canary,
     _validate_source_inventory,
     materialize_candidate,
     prepare_full_corpus_build,
@@ -165,7 +165,7 @@ class _ContinuousContext:
 
 
 def execute_continuous_update(
-    legacy_db_path: str | Path,
+    data_root: str | Path,
     source_directory: str | Path,
     *,
     embeddings: EmbeddingsPort,
@@ -176,7 +176,6 @@ def execute_continuous_update(
     fallback_extractor_name: str | None = None,
     use_parent_child: bool = True,
     single_chunk_size: int | None = None,
-    data_root: str | Path | None = None,
     extractor: ExtractorPort | None = None,
     metadata_parser: MetadataParser | None = None,
     metric: str = 'l2',
@@ -191,24 +190,22 @@ def execute_continuous_update(
 ) -> ContinuousUpdateResult | None:
     '''Publish ready reports in sparse batches, then compact exactly once.'''
 
-    root = Path(data_root or Path(legacy_db_path).parent).resolve(strict=True)
+    root = Path(data_root).resolve(strict=True)
     _positive_size(batch_size, 'batch_size')
     with NativeWriterLock(root) as writer_lease:
         StartupReconciler(root).reconcile(writer_lease=writer_lease)
         preflight = guard_before_retrieval_write(
-            legacy_db_path,
-            data_root=root,
+            root,
             allow_degraded_forward_recovery=True,
             first_successor_writer_lease=writer_lease,
         )
         if preflight.write_epoch == 0 or preflight.degraded:
-            # Epoch-zero activation and degraded forward recovery retain the
+            # Greenfield publication and degraded forward recovery retain the
             # established complete-successor boundary.  Sparse publication is
             # only valid once the native runtime is writable and healthy.
             plan = prepare_full_corpus_build(
-                legacy_db_path,
+                root,
                 source_directory,
-                data_root=root,
                 embeddings=embeddings,
                 model=model,
                 extractor_name=extractor_name,
@@ -257,9 +254,8 @@ def execute_continuous_update(
             writer_lease=writer_lease
         )
         context = _prepare_context(
-            legacy_db_path,
+            root,
             source_directory,
-            data_root=root,
             embeddings=embeddings,
             model=model,
             extractor_name=extractor_name,
@@ -301,7 +297,7 @@ def execute_continuous_update(
             return None
 
         if eligible_records:
-            _validate_same_space_canary(
+            _validate_active_space_canary(
                 context.selection,
                 embeddings,
                 metric=metric,
@@ -502,10 +498,9 @@ def materialize_and_activate_delta(
 
 
 def _prepare_context(
-    legacy_db_path: str | Path,
+    data_root: Path,
     source_directory: str | Path,
     *,
-    data_root: Path,
     embeddings: EmbeddingsPort,
     model: str,
     extractor_name: str,
@@ -524,8 +519,7 @@ def _prepare_context(
     deleted_relative_paths: Iterable[str],
 ) -> _ContinuousContext:
     selection = guard_before_retrieval_write(
-        legacy_db_path,
-        data_root=data_root,
+        data_root,
         allow_degraded_forward_recovery=True,
     )
     if not selection.is_native or not selection.active_snapshot_id:

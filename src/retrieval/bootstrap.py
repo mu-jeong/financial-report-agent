@@ -1,22 +1,13 @@
-"""Version-aware retrieval bootstrap and fail-closed runtime inspection.
-
-The native catalog is the only authority once it exists.  A legacy-only
-installation remains selectable until an off-path V2 seed is published, while
-an invalid native installation never silently falls back to arbitrary V1
-files.  Epoch-zero fallback is limited to the sealed compatibility bundle.
-"""
+"""Native retrieval bootstrap and fail-closed runtime inspection."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
-from src.retrieval.compatibility_bundle import validate_compatibility_bundle
 from src.retrieval.schema import (
     RETRIEVAL_TABLES,
     SCHEMA_VERSION,
@@ -55,55 +46,50 @@ class RuntimeSelection:
     predecessor_snapshot_id: str | None = None
     publication_generation: int = 0
     write_epoch: int = 0
-    v1_fallback_open: bool = True
     degraded: bool = False
     write_enabled: bool = False
-    compatibility_bundle_id: str | None = None
     error_code: str | None = None
+    initialization_state: str = "ready"
 
     @property
     def is_native(self) -> bool:
         return self.mode == "native"
 
+    @property
+    def is_empty(self) -> bool:
+        return self.is_native and self.initialization_state == "empty"
 
-def retrieval_paths(
-    legacy_db_path: str | Path,
-    *,
-    data_root: str | Path | None = None,
-) -> RetrievalPaths:
-    """Return the canonical native paths anchored to one local data root."""
 
-    legacy = Path(legacy_db_path).expanduser()
-    root = Path(data_root).expanduser() if data_root is not None else legacy.parent
-    root = root.resolve()
+def retrieval_paths(data_root: str | Path) -> RetrievalPaths:
+    """Return canonical Native V2 paths anchored to ``DATA_ROOT``."""
+
+    root = Path(data_root).expanduser().resolve()
     v2_root = root / "retrieval" / "v2"
     return RetrievalPaths(data_root=root, catalog=v2_root / "catalog.sqlite3", v2_root=v2_root)
 
 
 def inspect_runtime(
-    legacy_db_path: str | Path,
+    data_root: str | Path,
     *,
-    data_root: str | Path | None = None,
     validate_snapshot: bool = True,
     catalog_validation: RuntimeValidationMode = "full",
 ) -> RuntimeSelection:
-    """Inspect and validate the one supported retrieval runtime.
-
-    Absence of both a native catalog and every V2 footprint means the
-    installation is still V1. Once any durable V2 state exists, a missing or
-    invalid catalog fails closed instead of reopening the legacy path.
-    """
+    """Inspect and validate the one supported retrieval runtime."""
 
     if catalog_validation not in {"full", "read"}:
         raise ValueError("catalog_validation must be 'full' or 'read'")
 
-    paths = retrieval_paths(legacy_db_path, data_root=data_root)
+    paths = retrieval_paths(data_root)
     if not paths.catalog.exists():
         if _has_native_footprint(paths):
             raise RetrievalBootstrapError(
                 "native catalog is missing while V2 recovery evidence exists"
             )
-        return RuntimeSelection(mode="legacy_v1", paths=paths)
+        return RuntimeSelection(
+            mode="uninitialized",
+            paths=paths,
+            initialization_state="uninitialized",
+        )
     if paths.catalog.is_symlink() or not paths.catalog.is_file():
         raise RetrievalBootstrapError("native catalog must be a real local file")
 
@@ -133,8 +119,7 @@ def inspect_runtime(
         row = connection.execute(
             """
             SELECT active_snapshot_id, active_build_id, predecessor_snapshot_id,
-                   publication_generation, write_epoch, v1_fallback_open,
-                   degraded, write_enabled
+                   publication_generation, write_epoch, degraded, write_enabled
             FROM retrieval_runtime
             WHERE runtime_id = 1
             """
@@ -150,13 +135,18 @@ def inspect_runtime(
             predecessor_snapshot_id=row[2],
             publication_generation=int(row[3]),
             write_epoch=int(row[4]),
-            v1_fallback_open=bool(row[5]),
-            degraded=bool(row[6]),
-            write_enabled=bool(row[7]),
+            degraded=bool(row[5]),
+            write_enabled=bool(row[6]),
         )
         if not selection.active_snapshot_id or not selection.active_build_id:
+            if _is_exact_empty_runtime(row, selection.predecessor_snapshot_id):
+                return RuntimeSelection(
+                    **{
+                        **selection.__dict__,
+                        "initialization_state": "empty",
+                    }
+                )
             raise RetrievalBootstrapError("native catalog has no active complete snapshot")
-
         descriptor_row = connection.execute(
             """
             SELECT snapshot.relative_path, snapshot.file_sha256,
@@ -180,7 +170,9 @@ def inspect_runtime(
                     VectorIndexError,
                 )
             except (ImportError, OSError) as exc:
-                return _epoch_zero_fallback_or_raise(connection, selection, exc)
+                raise RetrievalBootstrapError(
+                    f"active native snapshot loader is unavailable: {exc}"
+                ) from exc
 
             try:
                 snapshot_path = _anchored_path(paths.data_root, descriptor_row[0])
@@ -197,28 +189,57 @@ def inspect_runtime(
                     ),
                 )
             except (OSError, VectorIndexError, RetrievalBootstrapError) as exc:
-                return _epoch_zero_fallback_or_raise(connection, selection, exc)
+                raise RetrievalBootstrapError(
+                    f"active native snapshot is invalid: {exc}"
+                ) from exc
         return selection
     finally:
         connection.close()
 
 
 def reconcile_and_inspect_runtime(
-    legacy_db_path: str | Path,
+    data_root: str | Path,
     *,
-    data_root: str | Path | None = None,
     allow_live_writer_read: bool = False,
     prefer_fast_read: bool = False,
 ) -> RuntimeSelection:
     """Recover when needed, with an optional zero-scan path for trusted reads."""
 
-    paths = retrieval_paths(legacy_db_path, data_root=data_root)
+    paths = retrieval_paths(data_root)
     if paths.catalog.is_symlink() or (
         paths.catalog.exists() and not paths.catalog.is_file()
     ):
         raise RetrievalBootstrapError("native catalog must be a real local file")
     if not paths.catalog.exists() and not _has_native_footprint(paths):
-        return RuntimeSelection(mode="legacy_v1", paths=paths)
+        if _has_complete_v1_install(paths.data_root):
+            raise RetrievalBootstrapError(
+                "V1 retrieval data was detected; close the old app and run "
+                "MIGRATE_V2.bat before starting Native V2"
+            )
+        from src.retrieval.initializer import initialize_empty_native
+        from src.retrieval.update_lock import RetrievalUpdateLock
+        from src.retrieval.writer_lock import NativeWriterLock
+
+        with RetrievalUpdateLock(paths.data_root):
+            with NativeWriterLock(paths.data_root) as writer_lease:
+                initialize_empty_native(
+                    paths.data_root,
+                    writer_lease=writer_lease,
+                )
+        return inspect_runtime(
+            paths.data_root,
+            validate_snapshot=False,
+            catalog_validation="read",
+        )
+
+    if paths.catalog.exists():
+        preflight = inspect_runtime(
+            paths.data_root,
+            validate_snapshot=False,
+            catalog_validation="read",
+        )
+        if preflight.is_empty:
+            return preflight
 
     from src.retrieval.recovery import RecoveryDisposition, StartupReconciler
     from src.retrieval.garbage_collector import (
@@ -236,8 +257,7 @@ def reconcile_and_inspect_runtime(
             if prefer_fast_read:
                 try:
                     selection = inspect_runtime(
-                        legacy_db_path,
-                        data_root=paths.data_root,
+                        paths.data_root,
                         validate_snapshot=True,
                         catalog_validation="read",
                     )
@@ -273,8 +293,7 @@ def reconcile_and_inspect_runtime(
                     f"native snapshot garbage reconciliation failed: {exc}"
                 ) from exc
             selection = inspect_runtime(
-                legacy_db_path,
-                data_root=paths.data_root,
+                paths.data_root,
                 validate_snapshot=True,
                 catalog_validation="read",
             )
@@ -295,8 +314,7 @@ def reconcile_and_inspect_runtime(
         # durable floor make the last committed active snapshot safe to inspect
         # concurrently, so readers remain available between batch publications.
         selection = inspect_runtime(
-            legacy_db_path,
-            data_root=paths.data_root,
+            paths.data_root,
             validate_snapshot=True,
             catalog_validation="read",
         )
@@ -310,12 +328,9 @@ def reconcile_and_inspect_runtime(
 
 
 def _has_native_footprint(paths: RetrievalPaths) -> bool:
-    """Distinguish a fresh V1 root from a damaged or interrupted V2 root."""
+    """Distinguish a fresh root from a damaged or interrupted native root."""
 
-    for candidate in (
-        paths.v2_root,
-        paths.data_root / "retrieval" / "compat" / "v1",
-    ):
+    for candidate in (paths.v2_root,):
         if candidate.is_symlink():
             return True
         if not candidate.exists():
@@ -323,32 +338,69 @@ def _has_native_footprint(paths: RetrievalPaths) -> bool:
         if not candidate.is_dir():
             return True
         try:
-            next(candidate.iterdir())
-        except StopIteration:
-            continue
+            children = tuple(candidate.iterdir())
         except OSError:
             return True
+        if candidate == paths.v2_root and children and all(
+            _is_empty_initializer_temporary(child)
+            or _is_empty_startup_guard(child)
+            for child in children
+        ):
+            # The initializer owns these narrowly named files and will remove
+            # them while holding both startup locks before retrying atomically.
+            continue
+        if not children:
+            continue
         return True
     return False
 
 
-def resolve_epoch_zero_compatibility_bundle_id(
-    selection: RuntimeSelection,
-) -> str:
-    """Validate and return bridge evidence without changing runtime selection."""
+def _has_complete_v1_install(data_root: Path) -> bool:
+    """Recognize only the standard legacy footprint so startup can guide users."""
 
-    if (
-        selection.write_epoch != 0
-        or not selection.v1_fallback_open
-        or not selection.active_snapshot_id
-    ):
-        raise RetrievalBootstrapError("epoch-zero compatibility evidence is unavailable")
-    connection = _open_read_only(selection.paths.catalog)
-    try:
-        _validate_catalog(connection)
-        return _compatibility_bundle_id_from_evidence(connection, selection)
-    finally:
-        connection.close()
+    candidates = (
+        data_root / "reports.db",
+        data_root / "vector_db" / "index.faiss",
+        data_root / "vector_db" / "index.pkl",
+    )
+    return all(path.exists() or path.is_symlink() for path in candidates)
+
+
+def _is_empty_startup_guard(path: Path) -> bool:
+    """Ignore the inert writer mutex created before a greenfield catalog."""
+
+    return path.name == "writer.guard" and not path.is_symlink() and path.is_file()
+
+
+def _is_empty_initializer_temporary(path: Path) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    name = path.name
+    prefix = "catalog.empty."
+    if not name.startswith(prefix):
+        return False
+    token_and_suffix = name[len(prefix) :]
+    if token_and_suffix.endswith(".tmp-wal"):
+        token = token_and_suffix[: -len(".tmp-wal")]
+    elif token_and_suffix.endswith(".tmp-shm"):
+        token = token_and_suffix[: -len(".tmp-shm")]
+    elif token_and_suffix.endswith(".tmp"):
+        token = token_and_suffix[: -len(".tmp")]
+    else:
+        return False
+    return len(token) == 32 and all(character in "0123456789abcdef" for character in token)
+
+
+def _is_exact_empty_runtime(row: sqlite3.Row | tuple, predecessor: str | None) -> bool:
+    return bool(
+        row[0] is None
+        and row[1] is None
+        and predecessor is None
+        and int(row[3]) == 0
+        and int(row[4]) == 0
+        and not bool(row[5])
+        and not bool(row[6])
+    )
 
 
 def _open_read_only(path: Path) -> sqlite3.Connection:
@@ -474,67 +526,6 @@ def _catalog_requires_garbage_reconciliation(catalog_path: Path) -> bool:
         connection.close()
 
 
-def _epoch_zero_fallback_or_raise(
-    connection: sqlite3.Connection,
-    selection: RuntimeSelection,
-    snapshot_error: Exception,
-) -> RuntimeSelection:
-    if selection.write_epoch != 0 or not selection.v1_fallback_open:
-        raise RetrievalBootstrapError(
-            f"active native snapshot is invalid after fallback closure: {snapshot_error}"
-        ) from snapshot_error
-
-    try:
-        bundle_id = _compatibility_bundle_id_from_evidence(connection, selection)
-    except RetrievalBootstrapError as exc:
-        raise exc from snapshot_error
-    return RuntimeSelection(
-        **{
-            **selection.__dict__,
-            "mode": "epoch_zero_compatibility",
-            "compatibility_bundle_id": bundle_id,
-            "error_code": "ACTIVE_SNAPSHOT_INVALID",
-            "write_enabled": False,
-        }
-    )
-
-
-def _compatibility_bundle_id_from_evidence(
-    connection: sqlite3.Connection,
-    selection: RuntimeSelection,
-) -> str:
-    evidence = connection.execute(
-        """
-        SELECT evidence_manifest_relative_path, evidence_manifest_sha256
-        FROM publication_runs
-        WHERE to_snapshot_id = ? AND state = 'fully_complete'
-        ORDER BY created_at DESC, publication_id DESC
-        LIMIT 1
-        """,
-        (selection.active_snapshot_id,),
-    ).fetchone()
-    if evidence is None or not evidence[0] or not evidence[1]:
-        raise RetrievalBootstrapError(
-            "epoch-zero snapshot is invalid and has no sealed compatibility evidence"
-        )
-    manifest_path = _anchored_path(selection.paths.data_root, evidence[0])
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        raise RetrievalBootstrapError("compatibility evidence manifest is unavailable")
-    if _sha256_file(manifest_path) != str(evidence[1]).lower():
-        raise RetrievalBootstrapError("compatibility evidence manifest hash changed")
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RetrievalBootstrapError("compatibility evidence manifest is invalid") from exc
-    bundle_id = payload.get("compatibility_bundle_id")
-    if not isinstance(bundle_id, str) or not bundle_id.strip():
-        raise RetrievalBootstrapError("compatibility bundle identity is missing")
-
-    try:
-        validate_compatibility_bundle(selection.paths.data_root, bundle_id)
-    except Exception as exc:
-        raise RetrievalBootstrapError("sealed compatibility bundle validation failed") from exc
-    return bundle_id
 
 
 def _anchored_path(data_root: Path, relative_path: str) -> Path:
@@ -547,11 +538,3 @@ def _anchored_path(data_root: Path, relative_path: str) -> Path:
     except ValueError as exc:
         raise RetrievalBootstrapError("catalog path escapes the data root") from exc
     return resolved
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()

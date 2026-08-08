@@ -33,7 +33,6 @@ from src.retrieval.runtime_guard import (
 from src.retrieval.vector_index import SnapshotDescriptor
 from src.retrieval.writer_lock import NativeWriterLock
 from tests.retrieval.test_retrieval_publication import (
-    COMPATIBILITY_BUNDLE_ID,
     _insert_build_and_snapshot,
     make_native_install,
 )
@@ -73,6 +72,7 @@ def _add_retired_snapshot(
             build_id=build_id,
             snapshot_id=snapshot_id,
             vector=vector,
+            chunk_uid="60" * 32,
         )
         row = connection.execute(
             """
@@ -326,8 +326,7 @@ def test_production_fast_startup_sweeps_compacted_artifact_gc(
     )
 
     selection = reconcile_and_inspect_runtime(
-        data_root / "reports.db",
-        data_root=data_root,
+        data_root,
         prefer_fast_read=True,
     )
 
@@ -550,8 +549,7 @@ def test_postcommit_gc_failure_is_normalized_on_startup_and_collected_later(
     assert delta_path.is_file()
 
     selection = reconcile_and_inspect_runtime(
-        data_root / "reports.db",
-        data_root=data_root,
+        data_root,
     )
     assert selection.active_snapshot_id == next_revision.snapshot_id
     with sqlite3.connect(catalog) as connection:
@@ -652,7 +650,7 @@ def test_leased_snapshot_stays_pending_and_blocks_the_next_publication(
     assert retired.snapshot_path.is_file()
     assert _snapshot_state(catalog, retired.snapshot_id) == "garbage_pending"
     with pytest.raises(RetrievalWriteBlocked, match="garbage"):
-        guard_before_retrieval_write(data_root / "reports.db", data_root=data_root)
+        guard_before_retrieval_write(data_root)
     with pytest.raises(PublicationError, match="garbage"):
         PublicationCoordinator(data_root).publish(request)
 
@@ -685,8 +683,7 @@ def test_permission_error_remains_pending_until_clean_startup_retry(
     assert _snapshot_state(catalog, retired.snapshot_id) == "garbage_pending"
 
     selection = reconcile_and_inspect_runtime(
-        data_root / "reports.db",
-        data_root=data_root,
+        data_root,
     )
     assert selection.is_native
     assert not retired.snapshot_path.exists()
@@ -706,43 +703,3 @@ def test_active_and_verified_predecessor_are_never_marked_for_gc(
 
     assert _snapshot_state(catalog, "snapshot-successor") == "ready"
     assert _snapshot_state(catalog, "snapshot-seed") == "ready"
-
-
-def test_closed_compatibility_bundle_requires_explicit_retention_approval(
-    tmp_path: Path,
-) -> None:
-    data_root, catalog = _published_install(tmp_path)
-    bundle = (
-        data_root
-        / "retrieval"
-        / "compat"
-        / "v1"
-        / COMPATIBILITY_BUNDLE_ID
-    )
-    collector = RetrievalGarbageCollector(data_root, cache=SnapshotCache())
-
-    retained = collector.collect_compatibility_bundle(COMPATIBILITY_BUNDLE_ID)
-    assert retained.state == "retained"
-    assert bundle.is_dir()
-
-    collected = collector.collect_compatibility_bundle(
-        COMPATIBILITY_BUNDLE_ID,
-        validation_window_elapsed=True,
-    )
-    replay = collector.collect_compatibility_bundle(
-        COMPATIBILITY_BUNDLE_ID,
-        validation_window_elapsed=True,
-    )
-    assert collected.state == replay.state == "garbage_collected"
-    assert not bundle.exists()
-
-    connection = sqlite3.connect(catalog)
-    try:
-        assert connection.execute(
-            """
-            SELECT write_epoch, v1_fallback_open
-            FROM retrieval_runtime WHERE runtime_id = 1
-            """
-        ).fetchone() == (1, 0)
-    finally:
-        connection.close()

@@ -1,407 +1,81 @@
-"""
-db_manager.py
--------------
-SQLite를 이용해 다운로드된 PDF 리포트 정보를 관리하는 모듈.
+"""Read-only relational access to the active Native V2 retrieval catalog."""
 
-테이블 스키마:
-    reports (
-        id          INTEGER  PRIMARY KEY AUTOINCREMENT,
-        report_type TEXT     NOT NULL,        -- 'company', 'industry', 'economy'
-        report_date TEXT     NOT NULL,        -- 'YYYY-MM-DD'
-        target_name TEXT,                     -- 종목명, 산업분류 등 (경제 리포트는 null/empty)
-        title       TEXT     NOT NULL,        -- 리포트 제목
-        broker      TEXT     NOT NULL,        -- 증권사
-        file_name   TEXT     NOT NULL UNIQUE, -- 실제 파일명 (중복 방지 / Vector DB 연결 키)
-                                              -- file_path는 os.path.join(save_dir, file_name) 으로 재조합
-        is_embedded INTEGER  NOT NULL DEFAULT 0  -- 0: 미처리 / 1: Vector DB 임베딩 완료
-    )
+from __future__ import annotations
 
-Vector DB 연동 흐름:
-    1. 크롤러가 PDF 다운로드 → is_embedded=0 으로 INSERT
-    2. LLM 파이프라인이 fetch_unembedded() 로 미처리 항목 조회
-    3. os.path.join(save_dir, row["file_name"]) 으로 경로 재조합 → PDF 로딩
-    4. 텍스트 추출 → 임베딩 생성 → Vector DB 저장
-    5. mark_embedded(file_name) 호출 → is_embedded=1 로 업데이트
-"""
-
-import os
-import sys
 import sqlite3
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import quote
 
-# 프로젝트 루트 경로를 참조할 수 있도록 설정
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-
-from src.configs.config import DB_PATH, SAVE_DIR, get_logger
-from src.retrieval.bootstrap import retrieval_paths
-
-logger = get_logger(__name__)
+from src.configs.config import DATA_ROOT
 
 
-EMBEDDING_FAILURE_COLUMNS = {
-    "embedding_last_error": "TEXT",
-    "embedding_last_attempt_at": "TEXT",
-    "embedding_extraction_engine": "TEXT",
-}
+def _read_only_uri(path: Path) -> str:
+    encoded = quote(path.resolve().as_posix(), safe="/:")
+    return f"file:{encoded}?mode=ro"
 
 
-def get_connection(db_path: str | None = None) -> sqlite3.Connection:
-    """DB 커넥션 반환. Row를 dict처럼 접근 가능하도록 설정."""
-    effective_db_path = db_path or DB_PATH
-    dispatch = _resolve_retrieval_dispatch(effective_db_path)
-    if dispatch.mode != "legacy_v1":
-        db_uri = f"file:{dispatch.paths.catalog.resolve().as_posix()}?mode=ro"
-        conn = sqlite3.connect(db_uri, uri=True)
-        conn.create_function(
-            "v2_basename",
-            1,
-            lambda value: str(value or "").replace("\\", "/").rsplit("/", 1)[-1],
-            deterministic=True,
-        )
-        conn.execute(
-            """
-            CREATE TEMP VIEW reports AS
-            SELECT report_id AS id, report_type, report_date, target_name,
-                   title, broker, v2_basename(canonical_relative_path) AS file_name,
-                   1 AS is_embedded
-            FROM main.active_reports
-            """
-        )
-        conn.execute("PRAGMA query_only = ON")
-    else:
-        conn = sqlite3.connect(effective_db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _native_catalog_exists() -> bool:
-    return _resolve_retrieval_dispatch(DB_PATH).mode != "legacy_v1"
-
-
-def _resolve_retrieval_dispatch(db_path: str):
-    """Reuse a process-validated native reader instead of rescanning per query."""
+def _resolve_retrieval_dispatch(data_root: str | Path):
+    """Reuse the process-validated Native V2 reader selection."""
 
     from src.retrieval.dispatch import resolve_retrieval_dispatch
 
-    return resolve_retrieval_dispatch(
-        db_path,
-        validate_snapshot=True,
+    return resolve_retrieval_dispatch(data_root, validate_snapshot=True)
+
+
+def get_connection() -> sqlite3.Connection:
+    """Open the active Native V2 report projection read-only."""
+
+    dispatch = _resolve_retrieval_dispatch(DATA_ROOT)
+    if dispatch.mode != "native":
+        raise RuntimeError("normal RDB access requires Native V2")
+
+    connection = sqlite3.connect(_read_only_uri(dispatch.paths.catalog), uri=True)
+    connection.create_function(
+        "v2_basename",
+        1,
+        lambda value: str(value or "").replace("\\", "/").rsplit("/", 1)[-1],
+        deterministic=True,
     )
+    connection.execute(
+        """
+        CREATE TEMP VIEW reports AS
+        SELECT report_id AS id,
+               report_type,
+               report_date,
+               target_name,
+               title,
+               broker,
+               v2_basename(canonical_relative_path) AS file_name,
+               1 AS is_embedded
+        FROM main.active_reports
+        """
+    )
+    connection.execute("PRAGMA query_only = ON")
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
-def init_db() -> None:
-    """테이블이 없으면 생성 (멱등 실행 가능)."""
-    if _native_catalog_exists():
-        with get_connection() as conn:
-            conn.execute("SELECT 1 FROM reports LIMIT 1").fetchone()
-        logger.info("[DB] Native V2 catalog validated; legacy schema creation skipped")
-        return
-    with get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS reports (
-                id          INTEGER  PRIMARY KEY AUTOINCREMENT,
-                report_type TEXT     NOT NULL,
-                report_date TEXT     NOT NULL,
-                target_name TEXT,
-                title       TEXT     NOT NULL,
-                broker      TEXT     NOT NULL,
-                file_name   TEXT     NOT NULL UNIQUE,
-                is_embedded INTEGER  NOT NULL DEFAULT 0,
-                embedding_last_error TEXT,
-                embedding_last_attempt_at TEXT,
-                embedding_extraction_engine TEXT
-            )
-        """)
-        _ensure_reports_failure_columns(conn)
-        # Parent-Child Chunking을 위한 부모 청크 저장 테이블
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS parent_chunks (
-                id          TEXT PRIMARY KEY,
-                content     TEXT NOT NULL,
-                file_name   TEXT NOT NULL,
-                metadata    TEXT
-            )
-        """)
-        conn.commit()
-    logger.info(f"[DB] 초기화 완료 → {DB_PATH}")
+def parse_filename(file_name: str) -> dict[str, str] | None:
+    """Parse ``type_date_target_broker_title.pdf`` metadata."""
 
-
-def _ensure_reports_failure_columns(conn: sqlite3.Connection) -> None:
-    """Add embedding failure diagnostics columns to existing reports tables."""
-    existing_columns = {
-        row["name"] if isinstance(row, sqlite3.Row) else row[1]
-        for row in conn.execute("PRAGMA table_info(reports)").fetchall()
-    }
-    for column_name, column_type in EMBEDDING_FAILURE_COLUMNS.items():
-        if column_name not in existing_columns:
-            conn.execute(f"ALTER TABLE reports ADD COLUMN {column_name} {column_type}")
-
-
-# ── Parent-Child Chunking 관리 ──────────────────────────────────────────────────
-
-def insert_parent_chunks(chunks: list[dict]) -> None:
-    """Parent 청크들을 DB에 배치 저장. chunks는 {'id', 'content', 'file_name', 'metadata'} 리스트."""
-    if _native_catalog_exists():
-        raise RuntimeError("native V2 parent rows are written only by the full-corpus build service")
-    with get_connection() as conn:
-        conn.executemany(
-            """
-            INSERT OR REPLACE INTO parent_chunks (id, content, file_name, metadata)
-            VALUES (:id, :content, :file_name, :metadata)
-            """,
-            chunks
-        )
-        conn.commit()
-
-def fetch_parent_content(parent_id: str) -> str | None:
-    """parent_id로 부모 청크의 원본 텍스트를 조회."""
-    if _native_catalog_exists():
-        native = retrieval_paths(DB_PATH)
-        connection = sqlite3.connect(native.catalog)
-        try:
-            row = connection.execute(
-                "SELECT content FROM retrieval_parents WHERE parent_uid = ?",
-                (parent_id,),
-            ).fetchone()
-            return str(row[0]) if row else None
-        finally:
-            connection.close()
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT content FROM parent_chunks WHERE id = ?",
-            (parent_id,)
-        ).fetchone()
-        return row["content"] if row else None
-
-
-# ── 파일명 파싱 ───────────────────────────────────────────────────────────────
-
-def parse_filename(file_name: str) -> dict | None:
-    """
-    파일명 '[유형]_[YYYY-MM-DD]_[대상]_[증권사]_[제목].pdf' 을 파싱해 dict 반환.
-    파싱 실패 시 None 반환.
-    """
     if not file_name.lower().endswith(".pdf"):
         return None
 
-    name_without_ext = file_name[:-4]
-    
-    # 5개의 파트로 나눔: 종류, 날짜, 대상, 증권사, 제목
-    parts = name_without_ext.split("_", 4)
-
+    parts = file_name[:-4].split("_", 4)
     if len(parts) < 5:
-        # 기존 종목명 포맷 등 하위호환성이 필요할 수 있으나, 현재 규칙상 5개 부문 필수
         return None
 
-    r_type, date_str, target_name, broker, title = parts[0], parts[1], parts[2], parts[3], parts[4]
-
+    report_type, report_date, target_name, broker, title = parts
     try:
-        datetime.strptime(date_str, "%Y-%m-%d")
+        datetime.strptime(report_date, "%Y-%m-%d")
     except ValueError:
         return None
 
     return {
-        "report_type": r_type, 
-        "report_date": date_str, 
-        "target_name": target_name, 
+        "report_type": report_type,
+        "report_date": report_date,
+        "target_name": target_name,
         "broker": broker,
-        "title": title
+        "title": title,
     }
-
-
-# ── 쓰기 ─────────────────────────────────────────────────────────────────────
-
-def upsert_report(file_name: str) -> bool:
-    """
-    PDF 파일명을 파싱하여 DB에 INSERT (이미 있으면 무시).
-    성공적으로 삽입되면 True, 중복이면 False 반환.
-    file_path는 저장하지 않고 필요 시 os.path.join(save_dir, file_name) 으로 재조합.
-    """
-    if _native_catalog_exists():
-        raise RuntimeError("native V2 source changes require a complete full-corpus build")
-    parsed = parse_filename(file_name)
-    if not parsed:
-        logger.warning(f"[DB] ⚠️  파싱 실패, 건너뜀: {file_name}")
-        return False
-
-    with get_connection() as conn:
-        try:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO reports
-                    (report_type, report_date, target_name, title, broker, file_name)
-                VALUES
-                    (:report_type, :report_date, :target_name, :title, :broker, :file_name)
-                """,
-                {**parsed, "file_name": file_name},
-            )
-            conn.commit()
-            inserted = conn.execute("SELECT changes()").fetchone()[0]
-            return inserted > 0
-        except sqlite3.Error as e:
-            logger.error(f"[DB] ❌ 오류 발생: {e}")
-            return False
-
-
-def mark_embedded(file_name: str, *, extraction_engine: str | None = None) -> None:
-    """Vector DB 임베딩 완료 후 호출 — is_embedded 를 1로 업데이트."""
-    if _native_catalog_exists():
-        raise RuntimeError("native V2 does not expose per-report embedding state")
-    with get_connection() as conn:
-        _ensure_reports_failure_columns(conn)
-        conn.execute(
-            """
-            UPDATE reports
-            SET is_embedded = 1,
-                embedding_last_error = NULL,
-                embedding_last_attempt_at = NULL,
-                embedding_extraction_engine = COALESCE(?, embedding_extraction_engine)
-            WHERE file_name = ?
-            """,
-            (_compact_optional_text(extraction_engine, 120), file_name),
-        )
-        conn.commit()
-
-
-def mark_embedding_failed(
-    file_name: str,
-    error_message: str,
-    *,
-    extraction_engine: str | None = None,
-) -> None:
-    """Record the latest per-file embedding failure while keeping it pending."""
-    if _native_catalog_exists():
-        raise RuntimeError("native V2 records failure at whole-build scope")
-    compact_error = " ".join(str(error_message or "Unknown error").split())
-    compact_engine = _compact_optional_text(extraction_engine, 120)
-    with get_connection() as conn:
-        _ensure_reports_failure_columns(conn)
-        conn.execute(
-            """
-            UPDATE reports
-            SET is_embedded = 0,
-                embedding_last_error = ?,
-                embedding_last_attempt_at = ?,
-                embedding_extraction_engine = ?
-            WHERE file_name = ?
-            """,
-            (
-                compact_error[:1000],
-                datetime.now().isoformat(timespec="seconds"),
-                compact_engine,
-                file_name,
-            ),
-        )
-        conn.commit()
-
-
-def _compact_optional_text(value: str | None, max_chars: int) -> str | None:
-    compact = " ".join(str(value or "").split())
-    return compact[:max_chars] if compact else None
-
-
-def sync_from_directory(directory: str = SAVE_DIR) -> None:
-    """
-    지정 폴더의 PDF를 전부 스캔하여 DB에 동기화.
-    이미 등록된 파일은 INSERT OR IGNORE로 건너뜀.
-    잦은 연결을 방지하기 위해 단일 커넥션으로 executemany(Batch) 처리합니다.
-    """
-    if _native_catalog_exists():
-        logger.info("[DB] Native V2 source discovery is owned by the full-corpus build service")
-        return
-    if not os.path.isdir(directory):
-        logger.warning(f"[DB] 폴더를 찾을 수 없습니다: {directory}")
-        return
-
-    pdf_files = [f for f in os.listdir(directory) if f.lower().endswith(".pdf")]
-    logger.info(f"[DB] {len(pdf_files)}개의 PDF 발견 → 동기화 시작")
-
-    parsed_list = []
-    for file_name in sorted(pdf_files):
-        parsed = parse_filename(file_name)
-        if parsed:
-            parsed['file_name'] = file_name
-            parsed_list.append(parsed)
-        else:
-            logger.warning(f"[DB] ⚠️  파싱 실패, 건너뜀: {file_name}")
-
-    if not parsed_list:
-        logger.info("[DB] 동기화할 유효한 파일이 없습니다.")
-        return
-
-    with get_connection() as conn:
-        try:
-            # 삽입 전 데이터 개수 확인
-            before_count = conn.execute("SELECT count(*) FROM reports").fetchone()[0]
-            
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO reports
-                    (report_type, report_date, target_name, title, broker, file_name)
-                VALUES
-                    (:report_type, :report_date, :target_name, :title, :broker, :file_name)
-                """,
-                parsed_list
-            )
-            conn.commit()
-            
-            # 삽입 후 데이터 개수 확인
-            after_count = conn.execute("SELECT count(*) FROM reports").fetchone()[0]
-            inserted = after_count - before_count
-            skipped = len(parsed_list) - inserted
-            logger.info(f"[DB] 동기화 완료 — 신규: {inserted}건 / 중복 스킵: {skipped}건")
-        except sqlite3.Error as e:
-            logger.error(f"[DB] ❌ DB 배치 동기화 중 오류 발생: {e}")
-
-
-# ── 조회 ─────────────────────────────────────────────────────────────────────
-
-def fetch_all(order_by: str = "report_date DESC") -> list[sqlite3.Row]:
-    """전체 리포트 목록 조회."""
-    with get_connection() as conn:
-        return conn.execute(
-            f"SELECT * FROM reports ORDER BY {order_by}"
-        ).fetchall()
-
-
-def fetch_unembedded() -> list[sqlite3.Row]:
-    """임베딩이 안 된 리포트만 조회 — LLM 파이프라인 진입점."""
-    with get_connection() as conn:
-        return conn.execute(
-            "SELECT * FROM reports WHERE is_embedded = 0 ORDER BY report_date DESC"
-        ).fetchall()
-
-
-def fetch_by_target(target_name: str) -> list[sqlite3.Row]:
-    """대상명(종목명/산업분류 등)으로 조회 (부분 일치)."""
-    with get_connection() as conn:
-        return conn.execute(
-            "SELECT * FROM reports WHERE target_name LIKE ? ORDER BY report_date DESC",
-            (f"%{target_name}%",),
-        ).fetchall()
-
-
-def fetch_by_date_range(start: str, end: str) -> list[sqlite3.Row]:
-    """날짜 범위로 조회 (YYYY-MM-DD 형식)."""
-    with get_connection() as conn:
-        return conn.execute(
-            """
-            SELECT * FROM reports
-            WHERE report_date BETWEEN ? AND ?
-            ORDER BY report_date DESC
-            """,
-            (start, end),
-        ).fetchall()
-
-
-# ── 단독 실행 시 동기화 ───────────────────────────────────────────────────────
-if __name__ == "__main__":
-    init_db()
-    sync_from_directory(SAVE_DIR)
-
-    print("\n[미리보기] 최근 등록된 리포트 5건:")
-    for row in fetch_all()[:5]:
-        print(f"  {row['report_type']} | {row['report_date']} | {row['target_name']} | {row['broker']} | {row['title'][:30]}")
-
-    unembedded = fetch_unembedded()
-    print(f"\n[Vector DB 대기 중] 미처리 리포트: {len(unembedded)}건")

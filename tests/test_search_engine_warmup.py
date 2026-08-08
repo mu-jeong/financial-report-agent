@@ -20,12 +20,12 @@ def test_graph_import_requests_zero_scan_read_startup(monkeypatch):
             active_build_id="build-v2",
             publication_generation=3,
             write_epoch=2,
-            v1_fallback_open=False,
             degraded=False,
+            initialization_state="ready",
         )
 
     modules = {
-        "src.configs.config": SimpleNamespace(DB_PATH="reports.db"),
+        "src.configs.config": SimpleNamespace(DATA_ROOT="data-root"),
         "src.retrieval.bootstrap": SimpleNamespace(
             reconcile_and_inspect_runtime=reconcile
         ),
@@ -40,7 +40,7 @@ def test_graph_import_requests_zero_scan_read_startup(monkeypatch):
     assert search_engine._import_graph_app() is graph_app
     assert calls == [
         (
-            ("reports.db",),
+            ("data-root",),
             {
                 "allow_live_writer_read": True,
                 "prefer_fast_read": True,
@@ -53,8 +53,8 @@ def test_graph_import_requests_zero_scan_read_startup(monkeypatch):
         "active_build_id": "build-v2",
         "publication_generation": 3,
         "write_epoch": 2,
-        "v1_fallback_open": False,
         "degraded": False,
+        "initialization_state": "ready",
     }
 
 

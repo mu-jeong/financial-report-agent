@@ -44,9 +44,6 @@ def _selection(tmp_path, *, mode: str = "native") -> RuntimeSelection:
         paths=paths,
         active_snapshot_id="snapshot-1" if mode == "native" else None,
         active_build_id="build-1" if mode == "native" else None,
-        compatibility_bundle_id=(
-            "bundle-1" if mode == "epoch_zero_compatibility" else None
-        ),
     )
 
 
@@ -79,8 +76,8 @@ def test_two_native_resolutions_inspect_and_construct_at_most_once(
     monkeypatch.setattr(dispatch_module, "CatalogRepository", FakeRepository)
     monkeypatch.setattr(dispatch_module, "NativeRetrievalReader", FakeReader)
 
-    first = resolve_retrieval_dispatch(tmp_path / "reports.db")
-    second = resolve_retrieval_dispatch(tmp_path / "reports.db")
+    first = resolve_retrieval_dispatch(tmp_path)
+    second = resolve_retrieval_dispatch(tmp_path)
 
     assert first.mode == second.mode == "native"
     assert first.native is second.native
@@ -92,13 +89,13 @@ def test_two_native_resolutions_inspect_and_construct_at_most_once(
 
     reset_native_dispatchers(selection.paths.data_root)
     assert calls["close"] == 1
-    rebuilt = resolve_retrieval_dispatch(tmp_path / "reports.db")
+    rebuilt = resolve_retrieval_dispatch(tmp_path)
     assert rebuilt.native is not first.native
     assert calls == {"inspect": 2, "repository": 2, "reader": 2, "close": 1}
 
 
 def test_same_process_reconciliation_primes_native_dispatch(tmp_path, monkeypatch):
-    legacy, _snapshot = _native_install(tmp_path)
+    data_root, _snapshot = _native_install(tmp_path)
     primed = []
     original_prime = dispatch_module.prime_native_dispatch
 
@@ -108,7 +105,7 @@ def test_same_process_reconciliation_primes_native_dispatch(tmp_path, monkeypatc
 
     monkeypatch.setattr(dispatch_module, "prime_native_dispatch", recording_prime)
 
-    selection = reconcile_and_inspect_runtime(legacy)
+    selection = reconcile_and_inspect_runtime(data_root)
     monkeypatch.setattr(
         dispatch_module,
         "inspect_runtime",
@@ -116,7 +113,7 @@ def test_same_process_reconciliation_primes_native_dispatch(tmp_path, monkeypatc
             AssertionError("primed native dispatch re-inspected the runtime")
         ),
     )
-    resolved = resolve_retrieval_dispatch(legacy)
+    resolved = resolve_retrieval_dispatch(data_root)
 
     assert primed == [selection]
     assert resolved.mode == "native"
@@ -124,17 +121,17 @@ def test_same_process_reconciliation_primes_native_dispatch(tmp_path, monkeypatc
 
 
 def test_lax_cold_resolution_cannot_poison_strict_snapshot_validation(tmp_path):
-    legacy, snapshot = _native_install(tmp_path, epoch=1)
+    data_root, snapshot = _native_install(tmp_path)
     snapshot.write_bytes(b"corrupt")
 
     with pytest.raises(
         RetrievalDispatchStateError,
         match="requires active snapshot validation",
     ):
-        resolve_retrieval_dispatch(legacy, validate_snapshot=False)
+        resolve_retrieval_dispatch(data_root, validate_snapshot=False)
 
-    with pytest.raises(RetrievalBootstrapError, match="fallback closure"):
-        resolve_retrieval_dispatch(legacy)
+    with pytest.raises(RetrievalBootstrapError, match="invalid"):
+        resolve_retrieval_dispatch(data_root)
 
 
 def test_concurrent_native_first_resolution_constructs_once(tmp_path, monkeypatch):
@@ -171,7 +168,7 @@ def test_concurrent_native_first_resolution_constructs_once(tmp_path, monkeypatc
         resolved = list(
             pool.map(
                 lambda _offset: resolve_retrieval_dispatch(
-                    tmp_path / "reports.db"
+                    tmp_path
                 ),
                 range(16),
             )
@@ -218,14 +215,11 @@ def test_reused_native_dispatch_observes_next_publication_generation(tmp_path):
     assert second.revision.publication_generation == 8
 
 
-def test_legacy_and_compatibility_modes_are_reinspected_and_never_cached(
+def test_uninitialized_mode_is_reinspected_and_never_cached(
     tmp_path,
     monkeypatch,
 ):
-    selections = [
-        _selection(tmp_path, mode="legacy_v1"),
-        _selection(tmp_path, mode="epoch_zero_compatibility"),
-    ]
+    selections = [_selection(tmp_path, mode="uninitialized") for _ in range(2)]
     calls = []
 
     def fake_inspect(*_args, **_kwargs):
@@ -241,12 +235,11 @@ def test_legacy_and_compatibility_modes_are_reinspected_and_never_cached(
         ),
     )
 
-    legacy = resolve_retrieval_dispatch(tmp_path / "reports.db")
-    compatibility = resolve_retrieval_dispatch(tmp_path / "reports.db")
+    first = resolve_retrieval_dispatch(tmp_path)
+    second = resolve_retrieval_dispatch(tmp_path)
 
-    assert legacy.mode == "legacy_v1"
-    assert compatibility.mode == "epoch_zero_compatibility"
-    assert legacy.native is compatibility.native is None
-    assert legacy.selection is not None
-    assert compatibility.selection is not None
+    assert first.mode == second.mode == "uninitialized"
+    assert first.native is second.native is None
+    assert first.selection is not None
+    assert second.selection is not None
     assert len(calls) == 2

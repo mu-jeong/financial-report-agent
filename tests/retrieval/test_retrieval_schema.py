@@ -235,24 +235,11 @@ def test_schema_contains_exactly_the_nine_native_tables_and_active_view(connecti
     assert connection.execute('PRAGMA foreign_keys').fetchone()[0] == 1
 
 
-def test_native_schema_has_no_legacy_tables_or_columns(connection):
-    table_columns = {
-        table: {
-            row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')
-        }
-        for table in RETRIEVAL_TABLES
-    }
+def test_install_schema_rejects_unexpected_application_tables(connection):
+    connection.execute("CREATE TABLE obsolete_storage (value TEXT)")
 
-    assert 'parent_chunks' not in table_columns
-    assert 'report_revisions' not in table_columns
-    assert 'is_embedded' not in table_columns['reports']
-    assert 'file_name' not in table_columns['reports']
-    assert 'content' not in table_columns['retrieval_chunks']
-    assert not any(
-        column.startswith('legacy_')
-        for columns in table_columns.values()
-        for column in columns
-    )
+    with pytest.raises(SchemaError, match="unexpected tables"):
+        install_schema(connection)
 
 
 def test_report_path_is_non_unique_but_report_uid_and_source_identity_are_unique(
@@ -519,14 +506,14 @@ def test_snapshot_cannot_be_ready_until_membership_equals_ntotal(connection):
         )
 
 
-def test_runtime_is_singleton_and_epoch_and_fallback_cannot_move_backward(connection):
+def test_runtime_is_singleton_and_generation_and_epoch_cannot_move_backward(connection):
     assert connection.execute(
         '''
         SELECT runtime_id, schema_version, publication_generation, write_epoch,
-               v1_fallback_open, degraded, write_enabled
+               degraded, write_enabled
         FROM retrieval_runtime
         '''
-    ).fetchall() == [(1, SCHEMA_VERSION, 0, 0, 1, 0, 0)]
+    ).fetchall() == [(1, SCHEMA_VERSION, 0, 0, 0, 0)]
 
     with pytest.raises(sqlite3.IntegrityError, match='CHECK'):
         connection.execute(
@@ -539,8 +526,7 @@ def test_runtime_is_singleton_and_epoch_and_fallback_cannot_move_backward(connec
         '''
         UPDATE retrieval_runtime
         SET publication_generation = 2,
-            write_epoch = 1,
-            v1_fallback_open = 0
+            write_epoch = 1
         WHERE runtime_id = 1
         '''
     )
@@ -552,12 +538,6 @@ def test_runtime_is_singleton_and_epoch_and_fallback_cannot_move_backward(connec
         connection.execute(
             'UPDATE retrieval_runtime SET write_epoch = 0 WHERE runtime_id = 1'
         )
-    with pytest.raises(sqlite3.IntegrityError, match='monotonic'):
-        connection.execute(
-            'UPDATE retrieval_runtime SET v1_fallback_open = 1 WHERE runtime_id = 1'
-        )
-
-
 def test_publication_phase_and_terminal_state_are_monotonic(connection):
     connection.execute(
         "INSERT INTO publication_runs (publication_id) VALUES ('publication-v2')"
@@ -731,7 +711,7 @@ def test_file_backed_native_catalog_uses_wal_with_full_durability(tmp_path):
 
 
 def test_catalog_storage_assertion_does_not_transition_rollback_journal(tmp_path):
-    database_path = tmp_path / 'legacy-storage.sqlite3'
+    database_path = tmp_path / 'rollback-journal.sqlite3'
     connection = sqlite3.connect(database_path)
     connection.execute('CREATE TABLE existing (value INTEGER)')
     connection.commit()

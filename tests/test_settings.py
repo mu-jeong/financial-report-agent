@@ -1,6 +1,12 @@
 from datetime import date
 
-from src.configs.settings import BASE_DIR, get_config_value, quickstart_env_updates, render_env_example
+from src.configs.settings import (
+    BASE_DIR,
+    get_config_value,
+    quickstart_env_updates,
+    render_env_example,
+    resolve_retrieval_path_settings,
+)
 
 
 def test_get_config_value_parses_typed_environment(monkeypatch):
@@ -8,16 +14,16 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
     monkeypatch.setenv("USE_RERANKER", "yes")
     monkeypatch.setenv("RERANK_TIMEOUT", "12.5")
     monkeypatch.setenv("MONITORING_MODE", "on")
-    monkeypatch.setenv("DB_PATH", "/tmp/eval/reports.db")
-    monkeypatch.setenv("FAISS_DIR", "/tmp/eval/vector_db")
+    monkeypatch.setenv("DATA_ROOT", "/tmp/eval")
+    monkeypatch.setenv("RERANK_CACHE_DIR", "/tmp/model-cache")
     monkeypatch.setenv("COMPANY_INDUSTRY_DATA_PATH", "/tmp/eval/listed_company_industries.csv")
 
     assert get_config_value("CRAWLER_LOOKBACK_DAYS") == 14
     assert get_config_value("USE_RERANKER") is True
     assert get_config_value("RERANK_TIMEOUT") == 12.5
     assert get_config_value("MONITORING_MODE") is True
-    assert get_config_value("DB_PATH") == "/tmp/eval/reports.db"
-    assert get_config_value("FAISS_DIR") == "/tmp/eval/vector_db"
+    assert get_config_value("DATA_ROOT") == "/tmp/eval"
+    assert get_config_value("RERANK_CACHE_DIR") == "/tmp/model-cache"
     assert get_config_value("COMPANY_INDUSTRY_DATA_PATH") == "/tmp/eval/listed_company_industries.csv"
 
 
@@ -49,8 +55,7 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     monkeypatch.delenv("PDF_EXTRACTION_FALLBACK_ENGINE", raising=False)
     monkeypatch.delenv("UNEMBEDDED_PDF_EXTRACTION_ENGINE", raising=False)
     monkeypatch.delenv("MONITORING_MODE", raising=False)
-    monkeypatch.delenv("DB_PATH", raising=False)
-    monkeypatch.delenv("FAISS_DIR", raising=False)
+    monkeypatch.delenv("DATA_ROOT", raising=False)
     monkeypatch.delenv("SEARCH_CANDIDATE_MULTIPLIER", raising=False)
     monkeypatch.setenv("CRAWLER_TARGET_DATE", "")
     monkeypatch.setenv("UNEMBEDDED_EXTRACTION_ENGINE", "")
@@ -60,9 +65,35 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     assert get_config_value("PDF_EXTRACTION_FALLBACK_ENGINE") == ""
     assert get_config_value("UNEMBEDDED_PDF_EXTRACTION_ENGINE") == ""
     assert get_config_value("MONITORING_MODE") is False
-    assert get_config_value("DB_PATH") == str(BASE_DIR / "data" / "reports.db")
-    assert get_config_value("FAISS_DIR") == str(BASE_DIR / "data" / "vector_db")
+    assert get_config_value("DATA_ROOT") == str(BASE_DIR / "data")
     assert get_config_value("SEARCH_CANDIDATE_MULTIPLIER") == 1
+
+
+def test_data_root_is_the_canonical_retrieval_authority(tmp_path):
+    root = tmp_path / "native data"
+
+    paths = resolve_retrieval_path_settings(
+        {
+            "DATA_ROOT": str(root),
+        }
+    )
+
+    assert paths.data_root == root.resolve()
+    assert paths.rerank_cache_dir == root.resolve() / "cache" / "flashrank"
+
+
+def test_rerank_cache_can_be_configured_independently(tmp_path):
+    root = tmp_path / "native"
+    cache = tmp_path / "cache elsewhere"
+
+    paths = resolve_retrieval_path_settings(
+        {
+            "DATA_ROOT": str(root),
+            "RERANK_CACHE_DIR": str(cache),
+        }
+    )
+
+    assert paths.rerank_cache_dir == cache.resolve()
 
 
 def test_pdf_extraction_fallback_can_be_disabled_with_an_explicit_blank(monkeypatch):
@@ -101,6 +132,7 @@ def test_render_env_example_contains_generated_defaults():
     assert "PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader" in content
     assert "UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf" in content
     assert "REPORT_PDF_DIR=" in content
+    assert "DATA_ROOT=" in content
     assert "COMPANY_INDUSTRY_DATA_PATH=" in content
     assert "MONITORING_MODE=false" in content
     assert "SEARCH_CANDIDATE_MULTIPLIER=1" in content

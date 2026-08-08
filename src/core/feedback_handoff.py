@@ -675,9 +675,7 @@ def validate_codex_handoff_payload(payload: Mapping[str, Any]) -> None:
         {"app_version", "backend_mode", "snapshot_id", "data_revision", "config_fingerprint"},
         "provenance",
     )
-    if provenance["backend_mode"] not in {
-        "legacy_v1", "native", "fixed_snapshot", "synthetic_test"
-    }:
+    if provenance["backend_mode"] not in {"native", "synthetic_test"}:
         raise FeedbackHandoffError("invalid_payload", "backend_mode is invalid")
     for key in ("app_version", "data_revision"):
         _require_string(provenance[key], f"provenance.{key}")

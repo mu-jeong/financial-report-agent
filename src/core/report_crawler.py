@@ -19,10 +19,13 @@ REPORT_CATEGORY_URLS = {
 def guard_before_report_download():
     """Fail closed before crawler dependencies, network, or source writes start."""
 
-    from src.configs.config import DB_PATH
+    from src.configs.config import DATA_ROOT
     from src.retrieval.runtime_guard import guard_before_retrieval_write
 
-    return guard_before_retrieval_write(DB_PATH)
+    return guard_before_retrieval_write(
+        DATA_ROOT,
+        allow_empty_preflight=True,
+    )
 
 
 def normalize_report_categories(categories: str | list[str] | tuple[str, ...] | None) -> list[str]:
@@ -104,11 +107,11 @@ def download_naver_reports(
     max_lookback_days: int = 30,
     categories: str | list[str] | tuple[str, ...] | None = None,
 ):
-    """Download reports while holding the V1/V2 cutover fence."""
+    """Download reports while holding the native retrieval update fence."""
 
-    from src.configs.config import DB_PATH
+    from src.configs.config import DATA_ROOT
 
-    with RetrievalUpdateLock(Path(DB_PATH).parent):
+    with RetrievalUpdateLock(Path(DATA_ROOT)):
         guard_before_report_download()
         return _download_naver_reports_locked(
             target_date_str,

@@ -125,7 +125,6 @@ EXPLICIT_WIDGET_KEYS = {
     "'retry_search_engine_warmup'",
     "'sidebar_data_status_bottom'",
     "'unembedded_report_display_limit'",
-    "'unembedded_embedding_limit'",
     "'start_unembedded_embedding_job'",
     "'monitoring_area_group'",
     "'monitoring_operations_area'",
@@ -339,8 +338,6 @@ def test_monitoring_defaults_to_speed_accuracy_and_defers_problem_detail():
     )
     assert "global_monitoring_category" not in source
     assert "build_monitoring_tab_labels" not in source
-    assert "_fixed_snapshot_assets_present" not in source
-    assert "_run_candidate_snapshot_evaluation" not in source
 
 
 def test_monitoring_groups_horizontal_navigation_by_operator_purpose():
@@ -448,9 +445,6 @@ def test_chat_monitoring_exposes_turn_observability_and_global_keeps_accuracy():
     assert "detail[\"used_documents\"]" in source
     assert "_render_chat_latency_table" in chat_source
     assert "_render_answer_metrics" in global_source
-    assert '"db_path": "data/reports.db"' not in source
-    assert '"faiss_dir": "data/vector_db"' not in source
-    assert "V1" not in source
 
 
 def test_chat_job_and_view_pure_helpers_preserve_current_outputs():
@@ -542,15 +536,18 @@ def test_each_session_reruns_when_the_process_queue_becomes_available():
     class FakeStreamlit:
         def __init__(self):
             self.session_state = {"search_engine_queue_was_pending": True}
+            self.fragment_intervals: list[float | None] = []
             self.reruns: list[str | None] = []
             self.messages: list[str] = []
 
-        @staticmethod
-        def fragment(*, run_every):
+        def fragment(self, *, run_every):
+            self.fragment_intervals.append(run_every)
             return lambda function: function
 
         def info(self, message):
             self.messages.append(message)
+
+        caption = info
 
         def rerun(self, *, scope=None):
             self.reruns.append(scope)
@@ -558,12 +555,14 @@ def test_each_session_reruns_when_the_process_queue_becomes_available():
     class FakeSearchEngine:
         @staticmethod
         def start_search_engine_warmup():
-            return {"state": "warming"}
+            return {"state": "ready"}
 
     class FakeChatJobs:
+        pending_states = iter((True, False))
+
         @staticmethod
         def has_pending_search_engine_job():
-            return False
+            return next(FakeChatJobs.pending_states)
 
     fake_st = FakeStreamlit()
     namespace = _load_helpers(
@@ -582,7 +581,173 @@ def test_each_session_reruns_when_the_process_queue_becomes_available():
     namespace["render_search_engine_status"]()
 
     assert fake_st.session_state["search_engine_queue_was_pending"] is False
+    assert fake_st.fragment_intervals == [1.0]
     assert fake_st.reruns == ["app"]
+
+
+def test_search_status_polling_stops_after_terminal_state_without_changing_fragment_identity():
+    class FakeStreamlit:
+        def __init__(self):
+            self.session_state = {"search_engine_queue_was_pending": False}
+            self.fragment_intervals: list[float | None] = []
+            self.fragment_names: list[str] = []
+            self.reruns: list[str | None] = []
+            self.messages: list[str] = []
+
+        def fragment(self, *, run_every):
+            self.fragment_intervals.append(run_every)
+
+            def decorate(function):
+                self.fragment_names.append(function.__qualname__)
+                return function
+
+            return decorate
+
+        def info(self, message):
+            self.messages.append(message)
+
+        caption = info
+
+        def rerun(self, *, scope=None):
+            self.reruns.append(scope)
+
+    class FakeSearchEngine:
+        states = iter(("warming", "ready", "ready", "ready"))
+
+        @staticmethod
+        def start_search_engine_warmup():
+            return {"state": next(FakeSearchEngine.states)}
+
+    class FakeChatJobs:
+        @staticmethod
+        def has_pending_search_engine_job():
+            return False
+
+    fake_st = FakeStreamlit()
+    namespace = _load_helpers(
+        CHAT_VIEWS_PATH,
+        "render_search_engine_status",
+        extra_namespace={
+            "st": fake_st,
+            "search_engine": FakeSearchEngine(),
+            "chat_jobs": FakeChatJobs(),
+            "_search_engine_status_content": (
+                lambda status: ("info", f"검색 엔진 {status['state']}")
+            ),
+        },
+    )
+
+    namespace["render_search_engine_status"]()
+    namespace["render_search_engine_status"]()
+
+    assert fake_st.fragment_intervals == [1.0, None]
+    assert fake_st.fragment_names[0] == fake_st.fragment_names[1]
+    assert fake_st.reruns == ["app"]
+
+
+def test_failed_search_status_retry_rebuilds_the_app_to_restart_polling():
+    class FakeStreamlit:
+        def __init__(self):
+            self.session_state = {"search_engine_queue_was_pending": False}
+            self.fragment_intervals: list[float | None] = []
+            self.reruns: list[str | None] = []
+
+        def fragment(self, *, run_every):
+            self.fragment_intervals.append(run_every)
+            return lambda function: function
+
+        @staticmethod
+        def error(_message):
+            return None
+
+        @staticmethod
+        def button(*_args, **_kwargs):
+            return True
+
+        def rerun(self, *, scope=None):
+            self.reruns.append(scope)
+
+    class FakeSearchEngine:
+        retry_calls = 0
+
+        @staticmethod
+        def start_search_engine_warmup():
+            return {"state": "failed"}
+
+        @classmethod
+        def retry_search_engine_warmup(cls):
+            cls.retry_calls += 1
+
+    class FakeChatJobs:
+        @staticmethod
+        def has_pending_search_engine_job():
+            return False
+
+    fake_st = FakeStreamlit()
+    namespace = _load_helpers(
+        CHAT_VIEWS_PATH,
+        "render_search_engine_status",
+        extra_namespace={
+            "st": fake_st,
+            "search_engine": FakeSearchEngine(),
+            "chat_jobs": FakeChatJobs(),
+            "_search_engine_status_content": (
+                lambda _status: ("error", "검색 엔진 준비 실패")
+            ),
+        },
+    )
+
+    namespace["render_search_engine_status"]()
+
+    assert fake_st.fragment_intervals == [None]
+    assert FakeSearchEngine.retry_calls == 1
+    assert fake_st.reruns == ["app"]
+
+
+def test_search_status_fragment_uses_a_stable_region_after_dynamic_chat_history():
+    tree = ast.parse(
+        CHAT_VIEWS_PATH.read_text(encoding="utf-8-sig"),
+        filename=str(CHAT_VIEWS_PATH),
+    )
+    render_chat = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_chat"
+    )
+    container_lines = {
+        target.id: node.lineno
+        for node in render_chat.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance((target := node.targets[0]), ast.Name)
+        and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) == "st.container"
+    }
+    history_region = next(
+        node
+        for node in render_chat.body
+        if isinstance(node, ast.With)
+        and ast.unparse(node.items[0].context_expr) == "chat_history_region"
+    )
+    status_region = next(
+        node
+        for node in render_chat.body
+        if isinstance(node, ast.With)
+        and ast.unparse(node.items[0].context_expr) == "search_engine_status_region"
+    )
+
+    assert container_lines["chat_history_region"] < history_region.lineno
+    assert container_lines["search_engine_status_region"] < history_region.lineno
+    assert any(
+        isinstance(node, ast.Call) and ast.unparse(node.func) == "_render_message"
+        for node in ast.walk(history_region)
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and ast.unparse(node.func) == "render_search_engine_status"
+        for node in ast.walk(status_region)
+    )
+    assert history_region.lineno < status_region.lineno
 
 
 def test_warming_engine_queues_exactly_one_chat_worker():
@@ -1004,7 +1169,6 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
                 "active_build_id": "build-v2",
                 "publication_generation": 3,
                 "write_epoch": 2,
-                "v1_fallback_open": False,
                 "degraded": False,
             }
 
@@ -1304,8 +1468,14 @@ def test_initial_status_import_does_not_load_native_vector_runtime():
                 for keyword in node.keywords
                 if keyword.arg == "run_every"
             )
-            assert isinstance(run_every, ast.Constant)
-            assert isinstance(run_every.value, (int, float))
+            if isinstance(run_every, ast.Constant):
+                assert isinstance(run_every.value, (int, float))
+                continue
+            assert isinstance(run_every, ast.IfExp)
+            assert isinstance(run_every.body, ast.Constant)
+            assert isinstance(run_every.body.value, (int, float))
+            assert isinstance(run_every.orelse, ast.Constant)
+            assert run_every.orelse.value is None
 
 
 def test_gui_widget_and_session_keys_remain_stable_across_module_moves():
@@ -1451,7 +1621,6 @@ class TestSliceACandidateUi:
     def test_candidate_lifecycle_exposes_approved_evidence_controls(self):
         source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
 
-        assert "run_candidate_evaluation_snapshot.py" not in source
         assert "Native V2 revision을 고정한 실행 결과" in source
         assert "monitoring.record_candidate_run(" in source
         assert "monitoring.record_candidate_manual_evidence(" in source
@@ -1469,7 +1638,7 @@ class TestSliceACandidateUi:
         assert 'to_status="duplicate"' not in source
         assert "현재 기대 결과(읽기 전용)" in source
         assert "승인 여부:" in source
-        assert "자동 재현 자료 미준비" in source
+        assert "재현 매니페스트는 Native V2 환경 지문입니다." in source
         assert "최종 평가 묶음보다 앞선 단계" in source
         assert "LLM으로 최소 조건 제안" in source
         assert "최소 답변 조건" in source

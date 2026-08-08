@@ -9,7 +9,6 @@ from pathlib import Path
 import faiss
 import numpy as np
 import pytest
-from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_core.documents import Document
 
 from src.migrations.v2 import assess as assessment_module
@@ -18,6 +17,7 @@ from src.migrations.v2.assess import (
     ProvenanceEvidence,
     assess_v1_install,
 )
+from tests.migrations.v2.legacy_pickle_fixture import InMemoryDocstore
 
 
 def _sha256(path: Path) -> str:

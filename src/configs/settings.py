@@ -24,12 +24,12 @@ def _default_save_dir() -> str:
     return str(BASE_DIR / "data" / "downloaded")
 
 
-def _default_db_path() -> str:
-    return str(BASE_DIR / "data" / "reports.db")
+def _default_data_root() -> str:
+    return str(BASE_DIR / "data")
 
 
-def _default_faiss_dir() -> str:
-    return str(BASE_DIR / "data" / "vector_db")
+def _default_rerank_cache_dir() -> str:
+    return str(Path(_default_data_root()) / "cache" / "flashrank")
 
 
 def _default_conversation_db_path() -> str:
@@ -75,6 +75,38 @@ class ConfigSpec:
         if value is None:
             return ""
         return str(value)
+
+
+@dataclass(frozen=True)
+class RetrievalPathSettings:
+    """Canonical runtime paths derived from one retrieval authority root."""
+
+    data_root: Path
+    rerank_cache_dir: Path
+
+
+def _configured_path(name: str, environ: dict[str, str]) -> Path | None:
+    raw = environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    return Path(raw.strip()).expanduser().resolve(strict=False)
+
+
+def resolve_retrieval_path_settings(
+    environ: dict[str, str] | None = None,
+) -> RetrievalPathSettings:
+    """Resolve Native V2 runtime storage from ``DATA_ROOT``."""
+
+    env = os.environ if environ is None else environ
+    data_root = _configured_path("DATA_ROOT", env)
+    if data_root is None:
+        data_root = Path(_default_data_root()).resolve(strict=False)
+
+    rerank_cache = _configured_path("RERANK_CACHE_DIR", env)
+    return RetrievalPathSettings(
+        data_root=data_root,
+        rerank_cache_dir=rerank_cache or data_root / "cache" / "flashrank",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,16 +275,6 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 parser=as_int,
                 description="Multiply SEARCH_TOP_K by this value when fetching candidates.",
                 section="Search",
-            ),
-        ),
-        (
-            "TEST_LIMIT",
-            ConfigSpec(
-                name="TEST_LIMIT",
-                default=10,
-                parser=as_int,
-                description="Default embedding run limit. 0 processes every pending file.",
-                section="Embedding",
             ),
         ),
         (
@@ -436,23 +458,29 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
             ),
         ),
         (
-            "DB_PATH",
+            "DATA_ROOT",
             ConfigSpec(
-                name="DB_PATH",
-                default=_default_db_path,
+                name="DATA_ROOT",
+                default=_default_data_root,
                 parser=as_str,
-                description="SQLite reports database path. Override for fixed evaluation snapshots.",
+                description=(
+                    "Canonical Native V2 retrieval root. Normal runtime derives its "
+                    "catalog and snapshot paths from this directory."
+                ),
                 section="Paths",
                 env_example="",
             ),
         ),
         (
-            "FAISS_DIR",
+            "RERANK_CACHE_DIR",
             ConfigSpec(
-                name="FAISS_DIR",
-                default=_default_faiss_dir,
+                name="RERANK_CACHE_DIR",
+                default=_default_rerank_cache_dir,
                 parser=as_str,
-                description="FAISS vector index directory. Override for fixed evaluation snapshots.",
+                description=(
+                    "FlashRank model cache. Leave blank to use "
+                    "<DATA_ROOT>/cache/flashrank."
+                ),
                 section="Paths",
                 env_example="",
             ),
@@ -553,7 +581,7 @@ def render_env_example() -> str:
 
 # Non-env path constants are kept here too so path defaults live in one module.
 SAVE_DIR_DEFAULT = _default_save_dir
-DB_PATH_DEFAULT = _default_db_path
-FAISS_DIR_DEFAULT = _default_faiss_dir
+DATA_ROOT_DEFAULT = _default_data_root
+RERANK_CACHE_DIR_DEFAULT = _default_rerank_cache_dir
 CONVERSATION_DB_PATH_DEFAULT = _default_conversation_db_path
 LOG_FILE_DEFAULT = _default_log_file

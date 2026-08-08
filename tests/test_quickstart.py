@@ -70,8 +70,6 @@ def test_prepare_data_runs_write_guard_before_crawler(monkeypatch):
         "python",
         "-m",
         "src.core.embed_pipeline",
-        "--all",
-        "--continue-on-extraction-error",
     ]
 
 

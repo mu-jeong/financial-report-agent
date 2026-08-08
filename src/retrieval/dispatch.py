@@ -1,9 +1,4 @@
-"""Process-scoped native retrieval dispatch without request-scoped state.
-
-Only a validated native runtime is cached. Legacy and epoch-zero compatibility
-selection stays authoritative per request so a later V2 introduction or
-fallback closure cannot be hidden by process state.
-"""
+"""Process-scoped native retrieval dispatch without request-scoped state."""
 
 from __future__ import annotations
 
@@ -82,9 +77,15 @@ class ResolvedRetrievalDispatch:
 
     def __post_init__(self) -> None:
         if self.mode == "native":
-            if self.native is None or self.selection is not None:
+            holder_dispatch = self.native is not None and self.selection is None
+            empty_dispatch = (
+                self.native is None
+                and self.selection is not None
+                and self.selection.is_empty
+            )
+            if not (holder_dispatch or empty_dispatch):
                 raise RetrievalDispatchStateError(
-                    "native dispatch must use the process-scoped holder"
+                    "native dispatch must use a holder or an exact empty selection"
                 )
         elif self.native is not None or self.selection is None:
             raise RetrievalDispatchStateError(
@@ -99,18 +100,17 @@ _HOLDERS: dict[Path, NativeReaderHolder] = {}
 def prime_native_dispatch(selection: RuntimeSelection) -> NativeReaderHolder:
     """Initialize or return the one native holder for ``selection``'s root."""
 
-    if not selection.is_native:
+    if not selection.is_native or selection.is_empty:
         raise RetrievalDispatchStateError(
-            "only a validated native runtime can prime native dispatch"
+            "only a validated non-empty native runtime can prime native dispatch"
         )
     with _HOLDERS_LOCK:
         return _prime_native_dispatch_locked(selection.paths)
 
 
 def resolve_retrieval_dispatch(
-    legacy_db_path: str | Path,
+    data_root: str | Path,
     *,
-    data_root: str | Path | None = None,
     validate_snapshot: bool = True,
     catalog_validation: RuntimeValidationMode = "full",
 ) -> ResolvedRetrievalDispatch:
@@ -121,7 +121,7 @@ def resolve_retrieval_dispatch(
     retained and will therefore be inspected again on the next request.
     """
 
-    expected_paths = retrieval_paths(legacy_db_path, data_root=data_root)
+    expected_paths = retrieval_paths(data_root)
     root = expected_paths.data_root.resolve()
     with _HOLDERS_LOCK:
         holder = _HOLDERS.get(root)
@@ -135,8 +135,7 @@ def resolve_retrieval_dispatch(
             )
 
         selection = inspect_runtime(
-            legacy_db_path,
-            data_root=root,
+            root,
             validate_snapshot=validate_snapshot,
             catalog_validation=catalog_validation,
         )
@@ -145,6 +144,13 @@ def resolve_retrieval_dispatch(
                 "cold native dispatch requires active snapshot validation"
             )
         if selection.is_native:
+            if selection.is_empty:
+                return ResolvedRetrievalDispatch(
+                    mode="native",
+                    paths=selection.paths,
+                    native=None,
+                    selection=selection,
+                )
             holder = _prime_native_dispatch_locked(selection.paths)
             return ResolvedRetrievalDispatch(
                 mode="native",

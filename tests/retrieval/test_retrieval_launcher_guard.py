@@ -10,13 +10,16 @@ import pytest
 
 from src.configs import config as config_module
 from src.retrieval import launcher_guard
+from src.retrieval.bootstrap import reconcile_and_inspect_runtime
 from src.retrieval.writer_lock import NativeWriterLock
-from tests.retrieval.test_retrieval_build_service import _native_seed
+from tests.retrieval.native_build_fixtures import _native_seed
 
 
 def test_launcher_guard_reports_validated_native_runtime(tmp_path, monkeypatch, capsys):
-    data_root, _sources = _native_seed(tmp_path)
-    monkeypatch.setattr(config_module, "DB_PATH", str(data_root / "reports.db"))
+    data_root = tmp_path / "empty-native"
+    data_root.mkdir()
+    reconcile_and_inspect_runtime(data_root)
+    monkeypatch.setattr(config_module, "DATA_ROOT", str(data_root))
 
     result = launcher_guard.main([])
 
@@ -27,23 +30,7 @@ def test_launcher_guard_reports_validated_native_runtime(tmp_path, monkeypatch, 
     assert payload["predecessor_snapshot_id"] is None
     assert payload["write_epoch"] == 0
     assert payload["write_enabled"] is False
-
-
-def test_launcher_guard_write_mode_fails_closed_at_epoch_zero(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
-    data_root, _sources = _native_seed(tmp_path)
-    monkeypatch.setattr(config_module, "DB_PATH", str(data_root / "reports.db"))
-
-    result = launcher_guard.main(["--write"])
-
-    payload = json.loads(capsys.readouterr().out)
-    assert result == 2
-    assert payload["status"] == "blocked"
-    assert payload["error"] == "RetrievalWriteBlocked"
-    assert "writes are disabled" in payload["message"]
+    assert payload["initialization_state"] == "empty"
 
 
 def test_launcher_guard_keeps_reads_available_but_blocks_writes_during_live_writer(
@@ -52,7 +39,7 @@ def test_launcher_guard_keeps_reads_available_but_blocks_writes_during_live_writ
     capsys,
 ):
     data_root, _sources = _native_seed(tmp_path)
-    monkeypatch.setattr(config_module, "DB_PATH", str(data_root / "reports.db"))
+    monkeypatch.setattr(config_module, "DATA_ROOT", str(data_root))
 
     with NativeWriterLock(data_root):
         read_result = launcher_guard.main([])
@@ -77,8 +64,8 @@ def test_supported_launchers_guard_before_update_or_graph_import():
     quickstart = (root / "scripts" / "quickstart.py").read_text(encoding="utf-8")
     run_quickstart = (root / "RUN_QUICKSTART.bat").read_text(encoding="utf-8")
 
-    assert gui.index("import streamlit as st") < gui.index(
-        "_finish_runtime_smoke(_retrieval_runtime)"
+    assert gui.index("_finish_runtime_smoke(_retrieval_runtime)") < gui.index(
+        "import streamlit as st"
     )
     assert search_engine.index("reconcile_and_inspect_runtime") < search_engine.index(
         'importlib.import_module("src.graphs.main_graph")'
@@ -111,7 +98,7 @@ def test_gui_runtime_smoke_executes_the_gui_entrypoint(tmp_path):
     data_root, _sources = _native_seed(tmp_path)
     root = Path(__file__).resolve().parents[2]
     environment = os.environ.copy()
-    environment["DB_PATH"] = str(data_root / "reports.db")
+    environment["DATA_ROOT"] = str(data_root)
 
     completed = subprocess.run(
         [sys.executable, "apps/gui/app.py", "--runtime-smoke"],
@@ -128,4 +115,4 @@ def test_gui_runtime_smoke_executes_the_gui_entrypoint(tmp_path):
     assert payload["status"] == "ok"
     assert payload["surface"] == "gui"
     assert payload["mode"] == "native"
-    assert payload["write_epoch"] == 0
+    assert payload["write_epoch"] == 1

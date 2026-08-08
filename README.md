@@ -17,25 +17,27 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 
 일부 PDF가 PyMuPDF와 OpenDataLoader에서 모두 파싱되지 않아도 실패 파일만 V2 manifest에 제외 상태로 기록하고, 나머지 문서의 파싱·임베딩·snapshot 게시와 앱 실행은 계속합니다. OpenDataLoader가 한 PDF에서 5분 안에 반환하지 않는 경우도 추출 실패로 기록해 전체 작업이 무기한 멈추지 않게 합니다. 기록된 문서는 Monitoring Mode의 `임베딩 누락 문서`에서 명시적으로 다시 시도할 수 있습니다.
 
-기존 V1 검색 데이터가 있다면 `MIGRATE_V2.bat`을 더블클릭해 백업·임베딩 공간 확인·GUI 실행 테스트를 거친 뒤, 기존 청크와 벡터를 그대로 사용하는 쓰기 가능한 V2로 안전하게 전환할 수 있습니다. 전체 PDF를 다시 파싱하거나 재임베딩하지 않으며, 전환 후에는 새 문서와 변경된 문서만 처리합니다. 설계 배경은 [V2 마이그레이션과 검색 아키텍처](docs/migrations/v2/V2_MIGRATION.md), 실행 절차는 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
+### 기존 V1 사용자는 먼저 마이그레이션하세요
+
+V1의 `reports.db`와 `vector_db`를 사용 중인 기존 사용자는 업데이트된 앱을 실행하기 전에 프로젝트 루트의 `MIGRATE_V2.bat`을 실행하세요. 이 작업은 기존 청크와 FAISS 벡터를 그대로 재사용하므로 전체 PDF 재처리나 전체 재임베딩 비용이 발생하지 않습니다. 전환이 정상 완료되면 V1 `reports.db`와 `vector_db`는 삭제되며, 이후 업데이트와 재구축에 필요한 `downloaded` PDF는 유지됩니다. 자세한 내용은 [V1 → Native V2 사용자 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
 ### `tools\recovery\REBUILD_V2.bat`은 언제 필요한가
 
-> **대부분의 사용자는 `tools\recovery\REBUILD_V2.bat`을 실행할 필요가 없습니다.** 과거 버전에서 만든 V2의 PDF 추출 설정을 현재 기본값인 `PyMuPDF 우선 → OpenDataLoader fallback`으로 바로잡을 때만 사용하세요.
+> **대부분의 사용자는 `tools\recovery\REBUILD_V2.bat`을 실행할 필요가 없습니다.** 활성 Native V2 snapshot을 현재 추출·임베딩 설정으로 전체 재구축해야 할 때만 사용하세요.
 
 | 하려는 작업 | 실행할 항목 |
 | --- | --- |
 | 처음 설치 | `RUN_QUICKSTART.bat` |
-| 기존 V1을 V2로 전환 | `MIGRATE_V2.bat` — 재구축 불필요 |
+| 기존 V1 데이터를 그대로 전환 | 앱을 모두 닫고 `MIGRATE_V2.bat` |
 | 리포트 추가·변경 | 앱의 일반 데이터 업데이트 — 재구축 불필요 |
 | 파싱 실패 문서만 재시도 | Monitoring Mode의 `임베딩 누락 문서 → 파싱 실패 문서 재시도` |
-| 과거 V2의 추출 설정을 바로잡기 | 먼저 `tools\recovery\REBUILD_V2.bat --check` |
+| 현재 설정으로 전체 재구축 | 먼저 `tools\recovery\REBUILD_V2.bat --check` |
 
-`--check` 결과가 `[확인]`이면 아무 작업도 하지 마세요. `[조치 필요]`이고 표시된 현재·목표 설정이 실제로 다를 때만 `tools\recovery\REBUILD_V2.bat`을 실행하세요. 전체 PDF를 다시 처리하므로 시간과 API 비용이 발생합니다. 자세한 내용은 [일반 사용자용 V2 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md#활성-v2-전체-재구축)을 참고하세요.
+`--check`에서 현재 profile과 요청 profile이 다를 때만 `tools\recovery\REBUILD_V2.bat`을 실행하세요. 전체 PDF를 다시 처리하므로 시간과 API 비용이 발생합니다. 자세한 내용은 [Native V2 전체 재구축](docs/migrations/v2/V2_REBUILD.md)을 참고하세요.
 
 ---
 
-증권사 리포트 PDF를 수집하고 V2 SQLite catalog와 immutable FAISS snapshot에 색인한 뒤, LangGraph 기반 RAG 파이프라인으로 재무 질문에 답하는 프로젝트입니다. 기존 V1 `reports.db`/`vector_db`는 마이그레이션 전 설치에서만 검색 권위로 사용합니다. 생성 모델, 임베딩, 선택형 rerank는 OpenRouter API를 기준으로 연동합니다.
+증권사 리포트 PDF를 수집하고 V2 SQLite catalog와 immutable FAISS snapshot에 색인한 뒤, LangGraph 기반 RAG 파이프라인으로 재무 질문에 답하는 프로젝트입니다. 생성 모델, 임베딩, 선택형 rerank는 OpenRouter API를 기준으로 연동합니다.
 
 > 이 프로젝트는 투자 조언이나 매수/매도 추천을 제공하지 않습니다. 답변은 수집·색인된 리포트와 공개 데이터 기반의 참고 정보로만 사용하세요.
 
@@ -43,7 +45,7 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 
 - 증권사 리포트 PDF 다운로드 및 파일명 기반 메타데이터 파싱
 - `company`, `industry`, `economy` 카테고리별 리포트 수집
-- V2 SQLite catalog(`data/retrieval/v2/catalog.sqlite3`)와 immutable FAISS snapshot의 membership·publication 동기화
+- Native V2 SQLite catalog(`DATA_ROOT/retrieval/v2/catalog.sqlite3`)와 immutable FAISS snapshot의 membership·publication 동기화
 - PyMuPDF, OpenDataLoader, Marker, Docling, pdf-to-markdown 중 선택 가능한 PDF 텍스트 추출 엔진
 - Parent-Child Chunking 기반 문맥 확장 검색
 - LangGraph 기반 query rewrite, routing, RDB 검색, VectorDB 검색, 답변 생성
@@ -159,14 +161,12 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 ## 임베딩 인덱스 생성
 
 ```bash
-python -m src.core.embed_pipeline              # V1: TEST_LIMIT 적용, V2: 전체 inventory 검사
-python -m src.core.embed_pipeline --all        # V1: pending 전체, V2: 같은 incremental 검사
-python -m src.core.embed_pipeline --limit 100  # V1에서만 처리량 제한
+python -m src.core.embed_pipeline
 ```
 
-V1에서는 `TEST_LIMIT`, `--limit`, `--all`이 pending 처리량을 결정합니다. V2에서는 limit 옵션을 무시하고 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩합니다. 성공한 문서는 작은 불변 업데이트 단위로 즉시 검색에 반영되므로 전체 작업 중에도 기존 검색을 계속 사용할 수 있습니다. 모든 문서 처리가 끝나면 기존 청크와 벡터까지 재사용해 완전한 snapshot을 한 번만 게시합니다. primary와 fallback이 모두 실패한 변경 문서는 이전 검색 가능 버전을 유지한 채 실패 상태로 기록하고 나머지를 계속 처리합니다. 같은 바이트의 기존 실패는 일반 업데이트에서 반복 파싱하지 않으며, Monitoring Mode의 `임베딩 누락 문서`에서 재시도할 때만 다시 처리합니다. 새 변경도 정리할 중간 상태도 없으면 publication을 만들지 않습니다. 자세한 동작과 복구 경계는 [`docs/CONTINUOUS_UPDATES.md`](docs/CONTINUOUS_UPDATES.md)를 참고하세요.
+파이프라인은 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩합니다. 성공한 문서는 작은 불변 업데이트 단위로 즉시 검색에 반영되므로 전체 작업 중에도 기존 검색을 계속 사용할 수 있습니다. 모든 문서 처리가 끝나면 기존 청크와 벡터까지 재사용해 완전한 snapshot을 한 번만 게시합니다. primary와 fallback이 모두 실패한 변경 문서는 이전 검색 가능 버전을 유지한 채 실패 상태로 기록하고 나머지를 계속 처리합니다. 같은 바이트의 기존 실패는 일반 업데이트에서 반복 파싱하지 않으며, Monitoring Mode의 `임베딩 누락 문서`에서 재시도할 때만 다시 처리합니다. 새 변경도 정리할 중간 상태도 없으면 publication을 만들지 않습니다. 자세한 동작과 복구 경계는 [`docs/CONTINUOUS_UPDATES.md`](docs/CONTINUOUS_UPDATES.md)를 참고하세요.
 
-V2 활성 상태에서는 `data/retrieval/v2`, `data/reports.db`, `data/vector_db`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. 위 표의 추출 정책 변경에 해당할 때만 `tools\recovery\REBUILD_V2.bat --check`로 점검한 뒤 `tools\recovery\REBUILD_V2.bat`으로 검증된 full-corpus successor를 만드세요.
+V2 활성 상태에서는 `DATA_ROOT/retrieval/v2`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. 위 표의 추출 정책 변경에 해당할 때만 `tools\recovery\REBUILD_V2.bat --check`로 점검한 뒤 `tools\recovery\REBUILD_V2.bat`으로 검증된 full-corpus successor를 만드세요.
 
 PDF 추출 엔진 비교는 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.
 
@@ -195,9 +195,9 @@ GUI 답변 생성은 백그라운드 thread에서 실행됩니다. 답변 생성
 
 채팅 입력창 아래의 `⚠ 신고` 버튼은 현재 대화에서 발생한 문제를 사람이 읽는 `debug/issue_report_*.txt`와 같은 stem의 구조화 `.json` sidecar로 저장합니다. `debug/` 폴더 내용은 Git에 포함하지 않습니다(`debug/.gitkeep`만 폴더 유지용). 민감정보가 포함될 수 있으므로 외부로 전달하기 전에 두 파일을 모두 확인하세요.
 
-참고 문서의 `열기` 버튼은 브라우저 링크가 아니라 Streamlit 서버가 실행 중인 PC에서 PDF를 직접 엽니다. 파일은 `REPORT_PDF_DIR` 환경 변수의 폴더와 참고 문서의 파일명을 조합해 찾습니다. V1 임베딩 경로는 이 값을 `.env`에 자동 동기화합니다. V2는 기존 `REPORT_PDF_DIR` 또는 기본 `data/downloaded`를 사용하므로 PDF 위치를 바꿨다면 `.env`에서 직접 갱신하세요. 로컬 사용에는 적합하지만 원격 배포에서는 서버 PC에서 파일이 열립니다.
+참고 문서의 `열기` 버튼은 브라우저 링크가 아니라 Streamlit 서버가 실행 중인 PC에서 PDF를 직접 엽니다. 파일은 `REPORT_PDF_DIR` 환경 변수의 폴더와 참고 문서의 파일명을 조합해 찾습니다. 기본값은 `data/downloaded`이며, PDF 위치를 바꿨다면 `.env`에서 직접 갱신하세요. 로컬 사용에는 적합하지만 원격 배포에서는 서버 PC에서 파일이 열립니다.
 
-사이드바 캘린더는 검색 가능한 리포트 날짜를 데이터 있음으로 표시합니다. V1은 `reports.is_embedded=1`, V2는 현재 base snapshot과 이미 반영된 업데이트를 합친 `active_reports`를 기준으로 집계합니다. 데이터 업데이트에서는 `company`, `industry`, `economy` 카테고리를 선택할 수 있고, 선택한 카테고리 중 하나라도 비어 있는 평일은 업데이트 대상으로 포함합니다. 필요한 다운로드와 임베딩은 백그라운드 작업으로 실행되며, 처리 완료 문서는 작업 종료 전에도 검색과 캘린더에 순차 반영됩니다.
+사이드바 캘린더는 현재 base snapshot과 이미 반영된 업데이트를 합친 `active_reports`를 기준으로 검색 가능한 리포트 날짜를 표시합니다. 데이터 업데이트에서는 `company`, `industry`, `economy` 카테고리를 선택할 수 있고, 선택한 카테고리 중 하나라도 비어 있는 평일은 업데이트 대상으로 포함합니다. 필요한 다운로드와 임베딩은 백그라운드 작업으로 실행되며, 처리 완료 문서는 작업 종료 전에도 검색과 캘린더에 순차 반영됩니다.
 
 ### 대화 후속 질문과 참고 문서 표시
 
@@ -225,7 +225,7 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## PDF 추출 엔진 비교
 
-`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있으며 기본값은 `pymupdf`입니다. 배포용 `.env.example`은 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하지만, 이 키가 없거나 빈 값이면 fallback을 사용하지 않습니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`은 미임베딩 문서에 적용할 primary 엔진이며 배포 템플릿에서는 `pymupdf`를 사용합니다. 이 값이 primary와 다르면 명시적 override로 간주해 자동 fallback하지 않습니다. 기존 `EXTRACTION_ENGINE`, `EXTRACTION_FALLBACK_ENGINE`, `UNEMBEDDED_EXTRACTION_ENGINE` 환경변수도 alias로 동작합니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다. Native V2 incremental update는 active profile에 기록된 primary/fallback 정책과 현재 설정이 정확히 같을 때만 실행되며, 정책 변경에는 검증된 full-corpus successor가 필요합니다.
+`PDF_EXTRACTION_ENGINE`은 `pymupdf`, `marker`, `opendataloader`, `docling`, `pdf-to-markdown` 중 하나로 설정할 수 있으며 기본값은 `pymupdf`입니다. 배포용 `.env.example`은 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하지만, 이 키가 없거나 빈 값이면 fallback을 사용하지 않습니다. `UNEMBEDDED_PDF_EXTRACTION_ENGINE`은 미임베딩 문서에 적용할 primary 엔진이며 배포 템플릿에서는 `pymupdf`를 사용합니다. 이 값이 primary와 다르면 명시적 override로 간주해 자동 fallback하지 않습니다. 모든 엔진 출력은 downstream 색인 전에 공통 표 제거 로직을 통과합니다. Native V2 incremental update는 active profile에 기록된 primary/fallback 정책과 현재 설정이 정확히 같을 때만 실행되며, 정책 변경에는 검증된 full-corpus successor가 필요합니다.
 
 ```bash
 python -m src.core.compare_pdf_extractors --limit 10
@@ -242,31 +242,18 @@ python -m src.core.compare_pdf_extractors --engines pymupdf opendataloader marke
 python -m pytest -q
 ```
 
-현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, 답변 섹션 기반 follow-up scope 결정, 섹션 follow-up의 문서 coverage, OpenRouter embedding/rerank payload, PDF 추출 엔진/표 제거 계약, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다. 또한 native V2 schema/catalog, V1 무재임베딩 변환, launcher guard, snapshot publication·recovery·rollback, writer/update lock, reader parity와 변경 문서만 처리하는 incremental vector reuse를 검증합니다.
-
-### 평가용 테스트셋
-
-현재 승인된 정식 evaluation fixture는 없습니다. 임시 데이터나 과거 run을 정확도 기준으로 사용하지 않으며, Monitoring 화면은 이 경우 정확도를 `측정 전`으로 표시합니다.
-
-향후 fixture는 Native V2 data/index revision과 함께 고정하고, 질문·기대 라우팅·필터·출처·상태만 저장합니다. PDF 본문은 포함하지 않습니다. 준비 기준과 절차는 [`docs/EVALUATION_DATASET.md`](docs/EVALUATION_DATASET.md)를 참고하세요.
-
-```bash
-python -m pytest tests/test_evaluation_dataset.py -q
-```
-
-평가 계약은 향후 parsing, chunking, retrieval/rerank, 모델 변경에 따른 정확도와 latency 회귀를 분리해 측정합니다. 현재 자동 evaluator는 provider cost나 answer similarity를 직접 계산하지 않습니다.
+현재 테스트는 파일명 파싱, SQL guardrail, 상태 요약, metadata filter와 날짜 해석, query rewrite, 후속 질문 검색 범위 재사용, 답변 섹션 기반 follow-up scope 결정, 섹션 follow-up의 문서 coverage, OpenRouter embedding/rerank payload, PDF 추출 엔진/표 제거 계약, conversation store, citation 링크 변환, 문서 단위 citation 재번호, Quick Start, 백그라운드 데이터 업데이트, VectorDB no-result 재시도 로직을 검증합니다. 또한 Native V2 schema/catalog, snapshot publication·recovery, writer/update lock과 변경 문서만 처리하는 incremental vector reuse를 검증합니다.
 
 ## 주의사항
 
 - 이 프로젝트는 투자 조언이나 매수/매도 추천을 제공하지 않습니다.
 - 오래된 PDF와 잘못 추출된 표, 누락된 리포트는 답변 품질에 영향을 줄 수 있습니다.
 - `.env`에는 실제 API 키가 들어가므로 커밋하지 마세요.
-- FAISS의 `index.pkl`은 pickle 역직렬화를 사용하므로 신뢰할 수 없는 파일을 로드하지 마세요.
 - 로컬 GUI에서 PDF `열기` 기능은 Streamlit 서버가 실행 중인 PC 기준으로 동작합니다. 원격 서버에 배포하면 서버 PC에서 파일을 열려고 시도합니다.
 
 ## Monitoring Mode
 
-Monitoring Mode는 전체 Native V2 운영 상태와 개별 대화 turn을 분리해 확인하는 개발자 화면입니다. 전체 Monitoring은 평가 묶음 제작·시험·승인·봉인 운영 계획을 기준으로 확장하고, 개별 답변 모니터링은 처리시간과 실제 답변 근거를 추적합니다. 일반 GUI에서는 숨기고 `.env`에서 명시적으로 켰을 때만 노출합니다. 구현 계약은 [`docs/MONITORING.md`](docs/MONITORING.md)에 정리되어 있습니다.
+Monitoring Mode는 전체 Native V2 운영 상태와 개별 대화 turn을 분리해 확인하는 개발자 화면입니다. 개별 답변 모니터링은 처리시간과 실제 답변 근거를 추적합니다. 일반 GUI에서는 숨기고 `.env`에서 명시적으로 켰을 때만 노출합니다. 구현 계약은 [`docs/MONITORING.md`](docs/MONITORING.md)에 정리되어 있습니다.
 
 ### 실행 방법
 
@@ -282,24 +269,23 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 현재 대화의 최근·평균 응답시간과 RDB·Vector DB 평균 조회시간을 보여주며, 각 turn에서 compact state와 설정/요청/fetch/context k를 확인할 수 있습니다. Vector DB는 prompt에 사용한 chunk·문서 ID와 순위를, RDB는 참고 문서를 별도 근거로 표시합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여줍니다. 상세 화면은 상단의 `운영 모니터링`과 `성능 개선 실험`으로 나뉩니다. 운영 모니터링에는 현재 문제·전역 응답 trace·검색 자료 상태를, 성능 개선 실험에는 정확도 평가·parsing 비교·issue report와 회귀 후보를 둡니다. 회귀 후보의 최소 기대 조건은 운영자가 JSON을 작성하는 대신 LLM 제안을 자연어로 검토·수정해 저장하며, 제안만으로 자동 승인되지는 않습니다. 평가 묶음 운영은 자료 계약부터 개정 계획의 단계 순서대로 추가합니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 현재 대화의 최근·평균 응답시간과 RDB·Vector DB 평균 조회시간을 보여주며, 각 turn에서 compact state와 설정/요청/fetch/context k를 확인할 수 있습니다. Vector DB는 prompt에 사용한 chunk·문서 ID와 순위를, RDB는 참고 문서를 별도 근거로 표시합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여줍니다. 상세 화면은 상단의 `운영 모니터링`과 `성능 개선 실험`으로 나뉩니다. 운영 모니터링에는 현재 문제·전역 응답 trace·검색 자료 상태를, 성능 개선 실험에는 정확도 평가·parsing 비교·issue report와 회귀 후보를 둡니다. 회귀 후보의 최소 기대 조건은 운영자가 JSON을 작성하는 대신 LLM 제안을 자연어로 검토·수정해 저장하며, 제안만으로 자동 승인되지는 않습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
 
 ### 테스트 방법
 
 ```bash
 python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_gui_view_contracts.py tests/test_feedback_loop.py -q
-python -m pytest tests/test_evaluation_bundle.py tests/test_artifact_io.py -q
 python -m pytest -q
 ```
 
 ### 화면 원칙
 
 - 속도는 assistant 응답 latency의 P95로 표시합니다.
-- 속도는 실제 Native V2 runtime provenance가 저장된 응답만 집계해 과거 V1 기록을 제외합니다.
+- 속도는 실제 Native V2 runtime provenance가 저장된 응답만 집계합니다.
 - 정확도는 snapshot/build/profile/generation과 hash가 검증된 Native V2 평가 run의 correctness 검사만 집계하며 latency는 제외합니다.
 - 평가 자료가 없으면 0%가 아니라 `측정 전`으로 표시합니다.
 - Native V2 상태가 없을 때 과거 지표로 우회하지 않습니다.
-- 스키마 없는 과거 report·candidate·run은 활성 화면에서 제외하되 자동 삭제하지 않습니다.
+- 스키마가 유효하지 않은 report·candidate·run은 활성 화면에서 제외합니다.
 - 개별 turn의 근거 연결 상태는 의미 정확도 점수가 아니며, 청크/PDF 본문이나 provider 원문 응답은 monitoring metadata에 복제하지 않습니다.
 
 ### 용도별 상세 영역
@@ -319,5 +305,5 @@ python -m pytest -q
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
 - [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.
+- [x] Native V2를 V1 SQLite·FAISS·pickle 경로에서 분리하고 기본 설치의 `langchain-community` 의존성을 제거한 뒤, 일회성 마이그레이션 완료 시 남은 V1 artifacts를 삭제합니다.
 - [ ] 복수 기업 질문을 retrieval-only LangGraph `Send` fan-out과 단일 fan-in·rerank·답변·전역 citation으로 처리합니다.
-- [ ] Native V2를 V1 SQLite·FAISS·pickle 경로에서 분리하고 기본 설치의 `langchain-community` 의존성을 제거한 뒤, 검증된 격리·승인 절차로 남은 V1 artifacts를 퇴역합니다.

@@ -411,7 +411,7 @@ def render_data_update_controls(db_status: dict) -> None:
 def render_unembedded_reports(status: dict) -> None:
     """Render DB reports that have not been embedded yet and allow embedding retry."""
     db_status = status["db"]
-    db_path = (status.get("paths") or {}).get("db_path")
+    data_root = (status.get("paths") or {}).get("data_root")
     pending_count = int(db_status.get("pending_reports") or 0)
     st.subheader("DB에는 있지만 임베딩되지 않은 문서")
     st.caption(
@@ -436,10 +436,10 @@ def render_unembedded_reports(status: dict) -> None:
     try:
         reports = (
             status_module.list_unembedded_reports(
-                db_path,
+                data_root,
                 limit=int(display_limit),
             )
-            if db_path
+            if data_root
             else []
         )
     except (OSError, sqlite3.Error, ValueError) as exc:
@@ -447,15 +447,10 @@ def render_unembedded_reports(status: dict) -> None:
         list_error = f"{type(exc).__name__}: {exc}"
     rows = status_module.build_unembedded_report_rows(reports)
     retrieval_status = status.get("retrieval") or {}
-    native_v2 = retrieval_status.get("mode") in {
-        "native",
-        "epoch_zero_compatibility",
-    }
     native_retry_ready = (
         retrieval_status.get("mode") == "native"
         and int(retrieval_status.get("write_epoch") or 0) > 0
         and bool(retrieval_status.get("active_snapshot_id"))
-        and not bool(retrieval_status.get("v1_fallback_open"))
         and (
             bool(retrieval_status.get("write_enabled"))
             or bool(retrieval_status.get("degraded"))
@@ -475,53 +470,32 @@ def render_unembedded_reports(status: dict) -> None:
     job_active = _is_update_job_active(status_payload)
     if job_active:
         st.info("이미 데이터 업데이트/임베딩 작업이 실행 중입니다.")
-    if status.get("embedding_limit_active"):
-        st.warning("TEST_LIMIT가 설정되어 있습니다. 전체 처리 버튼은 --all로 실행하지만, 설정값을 확인해 주세요.")
 
     st.markdown("#### 임베딩 시도")
-    if native_v2:
-        embed_limit = 0
-        if native_retry_ready:
-            st.info(
-                "V2는 일반 업데이트에서 이전 파싱 실패를 건너뜁니다. "
-                "아래 버튼을 누를 때만 실패 문서를 다시 파싱하며, 재실패해도 "
-                "다른 문서 처리는 계속됩니다."
-            )
-        else:
-            st.warning(
-                "현재 V2는 쓰기 가능한 active 상태가 아닙니다. "
-                "V2 활성화 또는 복구를 완료한 뒤 재시도할 수 있습니다."
-            )
-        button_label = "모든 파싱 실패/미임베딩 문서 다시 처리"
+    if native_retry_ready:
+        st.info(
+            "V2는 일반 업데이트에서 이전 파싱 실패를 건너뜁니다. "
+            "아래 버튼을 누를 때만 실패 문서를 다시 파싱하며, 재실패해도 "
+            "다른 문서 처리는 계속됩니다."
+        )
     else:
-        embed_limit = st.number_input(
-            "이번에 처리할 최대 문서 수 (0 = 전체)",
-            min_value=0,
-            max_value=max(pending_count, 1),
-            value=min(pending_count, 20) if pending_count else 0,
-            step=1,
-            key="unembedded_embedding_limit",
-            help="작게 시작해 로그를 확인하거나, 0을 선택해 모든 미임베딩 문서를 처리합니다.",
+        st.warning(
+            "현재 V2는 쓰기 가능한 active 상태가 아닙니다. "
+            "V2 활성화 또는 복구를 완료한 뒤 재시도할 수 있습니다."
         )
-        button_label = (
-            "미임베딩 문서 전체 임베딩 시도"
-            if int(embed_limit) == 0
-            else f"미임베딩 문서 {int(embed_limit)}건 임베딩 시도"
-        )
+    button_label = "모든 파싱 실패/미임베딩 문서 다시 처리"
     if st.button(
         button_label,
         key="start_unembedded_embedding_job",
         disabled=(
             job_active
             or pending_count == 0
-            or (native_v2 and not native_retry_ready)
+            or not native_retry_ready
         ),
         use_container_width=True,
     ):
-        limit = None if int(embed_limit) == 0 else int(embed_limit)
         data_update_jobs.start_embedding_job(
             label=button_label,
-            limit=limit,
             retry_extraction_failures=native_retry_ready,
         )
         st.success("임베딩 작업을 시작했습니다. 아래 진행 상태를 확인하세요.")
