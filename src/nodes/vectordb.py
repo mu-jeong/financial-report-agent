@@ -125,7 +125,19 @@ def _report_universe_query(filters: dict | None) -> tuple[str, list]:
     filters = filters or {}
     clauses = ["is_embedded = 1"]
     params: list = []
-    for column in ("report_type", "target_name", "broker"):
+    report_types = filters.get("report_types")
+    if report_types is not None:
+        normalized_types = [str(report_type) for report_type in report_types]
+        if normalized_types:
+            placeholders = ", ".join("?" for _ in normalized_types)
+            clauses.append(f"report_type IN ({placeholders})")
+            params.extend(normalized_types)
+        else:
+            clauses.append("1 = 0")
+    elif filters.get("report_type"):
+        clauses.append("report_type = ?")
+        params.append(filters["report_type"])
+    for column in ("target_name", "broker"):
         if filters.get(column):
             clauses.append(f"{column} = ?")
             params.append(filters[column])
@@ -357,9 +369,19 @@ def _file_name_matches_filters(file_name: str, filters: dict | None) -> bool:
     if not normalized_file:
         return False
 
-    report_type = filters.get("report_type")
-    if report_type and not normalized_file.startswith(f"{str(report_type).casefold()}_"):
-        return False
+    report_types = filters.get("report_types")
+    if report_types is not None:
+        prefixes = tuple(
+            f"{str(report_type).casefold()}_" for report_type in report_types
+        )
+        if not prefixes or not normalized_file.startswith(prefixes):
+            return False
+    else:
+        report_type = filters.get("report_type")
+        if report_type and not normalized_file.startswith(
+            f"{str(report_type).casefold()}_"
+        ):
+            return False
 
     target_name = filters.get("target_name")
     if target_name and str(target_name).casefold().replace(" ", "") not in normalized_file:

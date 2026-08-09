@@ -171,6 +171,18 @@ def test_execute_sql_blocks_unauthorized_tables_inside_cte():
     assert result.startswith("Error:")
 
 
+def test_execute_sql_returns_error_when_projection_setup_fails(monkeypatch):
+    monkeypatch.setattr(
+        rdb,
+        "get_connection",
+        lambda: (_ for _ in ()).throw(sqlite3.OperationalError("projection failed")),
+    )
+
+    result = rdb.execute_sql("SELECT * FROM reports")
+
+    assert result == "Error: projection failed"
+
+
 def test_rdb_execute_node_records_query_duration_on_blocked_result(monkeypatch):
     ticks = iter([1_000_000_000, 1_125_000_000])
     monkeypatch.setattr(rdb.time, "perf_counter_ns", lambda: next(ticks))

@@ -149,9 +149,10 @@ def sql_guardrail(func):
 
 @sql_guardrail
 def execute_sql(query: str):
-    conn = get_connection()
-    cursor = conn.cursor()
+    conn = None
     try:
+        conn = get_connection()
+        cursor = conn.cursor()
         cursor.execute(query)
         rows = [tuple(row) for row in cursor.fetchall()]
         columns = [description[0] for description in cursor.description] if cursor.description else []
@@ -159,7 +160,8 @@ def execute_sql(query: str):
     except Exception as exc:
         return f"Error: {exc}"
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def rdb_execute_node(state: State) -> dict:

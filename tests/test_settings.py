@@ -14,6 +14,8 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
     monkeypatch.setenv("USE_RERANKER", "yes")
     monkeypatch.setenv("RERANK_TIMEOUT", "12.5")
     monkeypatch.setenv("MONITORING_MODE", "on")
+    monkeypatch.setenv("ISSUE_REPORT_REMOTE_ENABLED", "off")
+    monkeypatch.setenv("ISSUE_REPORT_INGEST_URL", "https://example.supabase.co/functions/v1/issue-report-ingest")
     monkeypatch.setenv("DATA_ROOT", "/tmp/eval")
     monkeypatch.setenv("RERANK_CACHE_DIR", "/tmp/model-cache")
     monkeypatch.setenv("COMPANY_INDUSTRY_DATA_PATH", "/tmp/eval/listed_company_industries.csv")
@@ -22,6 +24,8 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
     assert get_config_value("USE_RERANKER") is True
     assert get_config_value("RERANK_TIMEOUT") == 12.5
     assert get_config_value("MONITORING_MODE") is True
+    assert get_config_value("ISSUE_REPORT_REMOTE_ENABLED") is False
+    assert get_config_value("ISSUE_REPORT_INGEST_URL") == "https://example.supabase.co/functions/v1/issue-report-ingest"
     assert get_config_value("DATA_ROOT") == "/tmp/eval"
     assert get_config_value("RERANK_CACHE_DIR") == "/tmp/model-cache"
     assert get_config_value("COMPANY_INDUSTRY_DATA_PATH") == "/tmp/eval/listed_company_industries.csv"
@@ -55,6 +59,9 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     monkeypatch.delenv("PDF_EXTRACTION_FALLBACK_ENGINE", raising=False)
     monkeypatch.delenv("UNEMBEDDED_PDF_EXTRACTION_ENGINE", raising=False)
     monkeypatch.delenv("MONITORING_MODE", raising=False)
+    monkeypatch.delenv("ISSUE_REPORT_REMOTE_ENABLED", raising=False)
+    monkeypatch.setenv("ISSUE_REPORT_INGEST_URL", "")
+    monkeypatch.setenv("ISSUE_REPORT_PUBLISHABLE_KEY", "")
     monkeypatch.delenv("DATA_ROOT", raising=False)
     monkeypatch.delenv("SEARCH_CANDIDATE_MULTIPLIER", raising=False)
     monkeypatch.setenv("CRAWLER_TARGET_DATE", "")
@@ -65,6 +72,14 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     assert get_config_value("PDF_EXTRACTION_FALLBACK_ENGINE") == ""
     assert get_config_value("UNEMBEDDED_PDF_EXTRACTION_ENGINE") == ""
     assert get_config_value("MONITORING_MODE") is False
+    assert get_config_value("ISSUE_REPORT_REMOTE_ENABLED") is True
+    assert get_config_value("ISSUE_REPORT_INGEST_URL") == (
+        "https://rjjnhvoontxpimhiabou.supabase.co/functions/v1/"
+        "issue-report-ingest"
+    )
+    assert get_config_value("ISSUE_REPORT_PUBLISHABLE_KEY") == (
+        "sb_publishable_O5bQ-b9VvY1fcwDz0IQlPg_prsFM87B"
+    )
     assert get_config_value("DATA_ROOT") == str(BASE_DIR / "data")
     assert get_config_value("SEARCH_CANDIDATE_MULTIPLIER") == 1
 
@@ -131,10 +146,22 @@ def test_render_env_example_contains_generated_defaults():
     assert "PDF_EXTRACTION_ENGINE=pymupdf" in content
     assert "PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader" in content
     assert "UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf" in content
+    assert "# --- Optional path overrides (leave blank to use defaults) ---" in content
+    assert "Optional override for the canonical Native V2 retrieval root." in content
     assert "REPORT_PDF_DIR=" in content
     assert "DATA_ROOT=" in content
     assert "COMPANY_INDUSTRY_DATA_PATH=" in content
     assert "MONITORING_MODE=false" in content
+    assert "ISSUE_REPORT_REMOTE_ENABLED=true" in content
+    assert (
+        "ISSUE_REPORT_INGEST_URL=https://rjjnhvoontxpimhiabou.supabase.co/"
+        "functions/v1/issue-report-ingest"
+    ) in content
+    assert (
+        "ISSUE_REPORT_PUBLISHABLE_KEY="
+        "sb_publishable_O5bQ-b9VvY1fcwDz0IQlPg_prsFM87B"
+    ) in content
+    assert "ISSUE_REPORT_OUTBOX_DIR=" in content
     assert "SEARCH_CANDIDATE_MULTIPLIER=1" in content
     assert "RERANK_CANDIDATE_MULTIPLIER" not in content
 

@@ -18,6 +18,13 @@ import os
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off"}
+DEFAULT_ISSUE_REPORT_INGEST_URL = (
+    "https://rjjnhvoontxpimhiabou.supabase.co/functions/v1/"
+    "issue-report-ingest"
+)
+DEFAULT_ISSUE_REPORT_PUBLISHABLE_KEY = (
+    "sb_publishable_O5bQ-b9VvY1fcwDz0IQlPg_prsFM87B"
+)
 
 
 def _default_save_dir() -> str:
@@ -441,8 +448,11 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 name="REPORT_PDF_DIR",
                 default=_default_save_dir,
                 parser=as_str,
-                description="Directory used by the GUI to open referenced PDF files. Leave blank to use data/downloaded.",
-                section="Paths",
+                description=(
+                    "Optional override for the directory used by the GUI to open "
+                    "referenced PDF files. Leave blank to use <PROJECT_ROOT>/data/downloaded."
+                ),
+                section="Optional path overrides (leave blank to use defaults)",
                 env_example="",
             ),
         ),
@@ -452,8 +462,11 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 name="SAVE_DIR",
                 default=_default_save_dir,
                 parser=as_str,
-                description="Directory where downloaded report PDFs are stored.",
-                section="Paths",
+                description=(
+                    "Optional override for downloaded report PDFs and the V2 source "
+                    "inventory. Leave blank to use <PROJECT_ROOT>/data/downloaded."
+                ),
+                section="Optional path overrides (leave blank to use defaults)",
                 env_example="",
             ),
         ),
@@ -464,10 +477,11 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 default=_default_data_root,
                 parser=as_str,
                 description=(
-                    "Canonical Native V2 retrieval root. Normal runtime derives its "
-                    "catalog and snapshot paths from this directory."
+                    "Optional override for the canonical Native V2 retrieval root. "
+                    "Leave blank to use <PROJECT_ROOT>/data; normal runtime derives "
+                    "its catalog and snapshot paths from this directory."
                 ),
-                section="Paths",
+                section="Optional path overrides (leave blank to use defaults)",
                 env_example="",
             ),
         ),
@@ -478,10 +492,10 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 default=_default_rerank_cache_dir,
                 parser=as_str,
                 description=(
-                    "FlashRank model cache. Leave blank to use "
+                    "Optional override for the FlashRank model cache. Leave blank to use "
                     "<DATA_ROOT>/cache/flashrank."
                 ),
-                section="Paths",
+                section="Optional path overrides (leave blank to use defaults)",
                 env_example="",
             ),
         ),
@@ -491,8 +505,11 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 name="CONVERSATION_DB_PATH",
                 default=_default_conversation_db_path,
                 parser=as_str,
-                description="SQLite conversation database path.",
-                section="Paths",
+                description=(
+                    "Optional override for the SQLite conversation database path. "
+                    "Leave blank to use <PROJECT_ROOT>/data/conversations.db."
+                ),
+                section="Optional path overrides (leave blank to use defaults)",
                 env_example="",
             ),
         ),
@@ -502,8 +519,12 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 name="COMPANY_INDUSTRY_DATA_PATH",
                 default=_default_company_industry_data_path,
                 parser=as_optional_str,
-                description="Optional KRX listed-company industry CSV path for sector/company universe lookup.",
-                section="Paths",
+                description=(
+                    "Optional override for the KRX listed-company industry CSV used "
+                    "for sector/company universe lookup. Leave blank to use "
+                    "<PROJECT_ROOT>/data/listed_company_industries.csv."
+                ),
+                section="Optional path overrides (leave blank to use defaults)",
                 env_example="",
             ),
         ),
@@ -515,6 +536,62 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 parser=as_bool,
                 description="Enable the Streamlit Monitoring Mode UI for performance metric review.",
                 section="Monitoring",
+            ),
+        ),
+        (
+            "ISSUE_REPORT_REMOTE_ENABLED",
+            ConfigSpec(
+                name="ISSUE_REPORT_REMOTE_ENABLED",
+                default=True,
+                parser=as_bool,
+                description=(
+                    "Allow user-approved issue reports to be queued for the "
+                    "operator-managed remote ingest endpoint."
+                ),
+                section="Issue reporting",
+            ),
+        ),
+        (
+            "ISSUE_REPORT_INGEST_URL",
+            ConfigSpec(
+                name="ISSUE_REPORT_INGEST_URL",
+                default=DEFAULT_ISSUE_REPORT_INGEST_URL,
+                parser=as_optional_str,
+                description=(
+                    "Public Supabase Edge Function URL for central issue-report "
+                    "collection. Override only when using another deployment; "
+                    "set ISSUE_REPORT_REMOTE_ENABLED=false to disable submission."
+                ),
+                section="Issue reporting",
+            ),
+        ),
+        (
+            "ISSUE_REPORT_PUBLISHABLE_KEY",
+            ConfigSpec(
+                name="ISSUE_REPORT_PUBLISHABLE_KEY",
+                default=DEFAULT_ISSUE_REPORT_PUBLISHABLE_KEY,
+                parser=as_optional_str,
+                description=(
+                    "Public Supabase publishable key accepted by the issue-report "
+                    "Edge Function. This is not a secret; override it only when "
+                    "using another deployment."
+                ),
+                section="Issue reporting",
+            ),
+        ),
+        (
+            "ISSUE_REPORT_OUTBOX_DIR",
+            ConfigSpec(
+                name="ISSUE_REPORT_OUTBOX_DIR",
+                default=None,
+                parser=as_optional_str,
+                description=(
+                    "Optional retry-only issue-report outbox path. Leave blank "
+                    "to use <DATA_ROOT>/issue-report-outbox. Report payloads are "
+                    "removed after delivery, rejection, or expiry."
+                ),
+                section="Issue reporting",
+                env_example="",
             ),
         ),
     )

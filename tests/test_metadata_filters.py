@@ -130,7 +130,7 @@ def test_native_metadata_candidates_follow_active_manifest_and_delta_revision(
         monkeypatch.setattr(
             metadata_filters_module,
             "get_connection",
-            lambda: connection,
+            lambda **_kwargs: connection,
         )
         monkeypatch.setattr(
             metadata_filters_module,
@@ -200,6 +200,75 @@ def test_infer_search_filters_detects_report_type_keywords():
     )
 
     assert filters == {"report_type": "economy"}
+
+
+def test_infer_search_filters_preserves_multiple_report_types():
+    filters = infer_search_filters(
+        "지난 주에 발간된 경제, 산업, 기업 리포트를 각각 알려줘",
+        {
+            "target_name": [],
+            "broker": [],
+            "report_month": [],
+        },
+        current_date=date(2026, 8, 9),
+    )
+
+    assert filters == {
+        "report_date_start": "2026-07-27",
+        "report_date_end": "2026-08-02",
+        "report_types": ["company", "industry", "economy"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_type"),
+    [
+        ("삼성전자 기업 리포트에서 금리 영향", "company"),
+        ("기업 리포트의 환율 리스크", "company"),
+        ("자동차 산업 리포트에서 금리 전망", "industry"),
+    ],
+)
+def test_explicit_report_type_wins_over_economic_topic_keywords(query, expected_type):
+    filters = infer_search_filters(
+        query,
+        {
+            "target_name": [],
+            "broker": [],
+            "report_month": [],
+        },
+    )
+
+    assert filters == {"report_type": expected_type}
+
+
+def test_metadata_matches_accepts_any_requested_report_type():
+    filters = {"report_types": ["company", "industry"]}
+
+    assert metadata_matches({"report_type": "company"}, filters)
+    assert metadata_matches({"report_type": "industry"}, filters)
+    assert not metadata_matches({"report_type": "economy"}, filters)
+
+
+def test_metadata_matches_rejects_missing_report_type_for_plural_filter():
+    filters = {"report_types": ["company"]}
+
+    assert not metadata_matches({}, filters)
+    assert not metadata_matches(
+        {"file_name": "economy_2026-08-01_example.pdf"},
+        filters,
+    )
+
+
+def test_current_report_types_replace_incompatible_prior_scalar_filter():
+    merged = search_scope._merge_prior_filters_with_current(
+        {"report_type": "company", "broker": "하나증권"},
+        {"report_types": ["industry", "economy"]},
+    )
+
+    assert merged == {
+        "report_types": ["industry", "economy"],
+        "broker": "하나증권",
+    }
 
 
 def test_infer_search_filters_does_not_match_report_type_across_word_boundary():

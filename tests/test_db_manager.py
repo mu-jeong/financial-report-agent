@@ -35,9 +35,9 @@ def test_parse_filename_rejects_invalid_shape_or_date():
 def test_native_report_projection_is_read_only(tmp_path, monkeypatch):
     catalog = tmp_path / "catalog.sqlite3"
     with sqlite3.connect(catalog) as connection:
-        connection.execute(
+        connection.executescript(
             """
-            CREATE TABLE active_reports (
+            CREATE TABLE source_reports (
                 report_id INTEGER,
                 report_type TEXT,
                 report_date TEXT,
@@ -45,11 +45,17 @@ def test_native_report_projection_is_read_only(tmp_path, monkeypatch):
                 title TEXT,
                 broker TEXT,
                 canonical_relative_path TEXT
-            )
+            );
+            CREATE TABLE active_membership (report_id INTEGER);
+            CREATE VIEW active_reports AS
+            SELECT DISTINCT report.*
+            FROM source_reports AS report
+            JOIN active_membership AS membership
+              ON membership.report_id = report.report_id;
             """
         )
         connection.execute(
-            "INSERT INTO active_reports VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO source_reports VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 1,
                 "company",
@@ -60,6 +66,7 @@ def test_native_report_projection_is_read_only(tmp_path, monkeypatch):
                 "pdfs/report.pdf",
             ),
         )
+        connection.execute("INSERT INTO active_membership VALUES (?)", (1,))
 
     monkeypatch.setattr(
         db_manager,
@@ -74,5 +81,29 @@ def test_native_report_projection_is_read_only(tmp_path, monkeypatch):
         row = connection.execute("SELECT * FROM reports").fetchone()
         assert row["file_name"] == "report.pdf"
         assert row["is_embedded"] == 1
+        projection = connection.execute(
+            "SELECT type, sql FROM sqlite_temp_master WHERE name = 'reports'"
+        ).fetchone()
+        assert projection[0] == "table"
+        assert [column[1] for column in connection.execute("PRAGMA table_info(reports)")] == [
+            "id",
+            "report_type",
+            "report_date",
+            "target_name",
+            "title",
+            "broker",
+            "file_name",
+            "is_embedded",
+        ]
         with pytest.raises(sqlite3.OperationalError):
-            connection.execute("DELETE FROM main.active_reports")
+            connection.execute("DELETE FROM reports")
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute("DELETE FROM main.source_reports")
+
+    with db_manager.get_connection(materialize_reports=False) as connection:
+        projection = connection.execute(
+            "SELECT type FROM sqlite_temp_master WHERE name = 'reports'"
+        ).fetchone()
+        assert projection is None
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute("DELETE FROM main.source_reports")

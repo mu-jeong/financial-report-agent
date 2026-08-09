@@ -63,6 +63,7 @@ _SOFT_OBJECTIVES = {
 _FILTER_KEYS = {
     "target_name",
     "report_type",
+    "report_types",
     "report_date",
     "report_date_start",
     "report_date_end",
@@ -300,6 +301,31 @@ def _copy_allowed_mapping(
         )
     mapping = value
     return {key: mapping[key] for key in keys if key in mapping}
+
+
+def _validate_filter_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    filters = _require_exact_keys(value, _FILTER_KEYS, label, required=set())
+    if "report_type" in filters and "report_types" in filters:
+        raise FeedbackHandoffError(
+            "invalid_payload",
+            f"{label}.report_type and report_types are mutually exclusive",
+        )
+    for key, item in filters.items():
+        if key in {"file_names", "report_types"}:
+            if not isinstance(item, list) or any(
+                not isinstance(member, str) for member in item
+            ):
+                raise FeedbackHandoffError(
+                    "invalid_payload",
+                    f"{label}.{key} is invalid",
+                )
+        elif item is not None and not isinstance(item, str):
+            raise FeedbackHandoffError(
+                "invalid_payload",
+                f"{label}.{key} is invalid",
+            )
+    _validate_string_tree(filters)
+    return filters
 
 
 def _copy_prior_search_scope(value: Any) -> dict[str, Any]:
@@ -618,11 +644,9 @@ def validate_codex_handoff_payload(payload: Mapping[str, Any]) -> None:
                 "invalid_payload",
                 "prior_search_scope.route is invalid",
             )
-        _require_exact_keys(
+        _validate_filter_mapping(
             prior_scope["search_filters"],
-            _FILTER_KEYS,
             "reproduction.prior_search_scope.search_filters",
-            required=set(),
         )
         if "file_names" in prior_scope and (
             not isinstance(prior_scope["file_names"], list)
@@ -652,11 +676,9 @@ def validate_codex_handoff_payload(payload: Mapping[str, Any]) -> None:
                 section_map["label"],
                 "prior_search_scope.sections[].label",
             )
-            _require_exact_keys(
+            _validate_filter_mapping(
                 section_map["filters"],
-                _FILTER_KEYS,
                 "prior_search_scope.sections[].filters",
-                required=set(),
             )
             if not isinstance(
                 section_map["file_names"],
@@ -704,26 +726,13 @@ def validate_codex_handoff_payload(payload: Mapping[str, Any]) -> None:
     for label, section in (("observed", observed), ("expected", expected)):
         if section["route"] not in {None, "vectordb", "rdb"}:
             raise FeedbackHandoffError("invalid_payload", f"{label}.route is invalid")
-        filters = _require_exact_keys(section["filters"], _FILTER_KEYS, f"{label}.filters", required=set())
+        filters = _validate_filter_mapping(section["filters"], f"{label}.filters")
         state = _require_exact_keys(section["state"], _STATE_KEYS, f"{label}.state", required=set())
-        for key, value in filters.items():
-            if key == "file_names":
-                if not isinstance(value, list) or any(
-                    not isinstance(item, str) for item in value
-                ):
-                    raise FeedbackHandoffError(
-                        "invalid_payload", f"{label}.filters.file_names is invalid"
-                    )
-            elif value is not None and not isinstance(value, str):
-                raise FeedbackHandoffError(
-                    "invalid_payload", f"{label}.filters.{key} is invalid"
-                )
         for key, value in state.items():
             if value is not None and not isinstance(value, str):
                 raise FeedbackHandoffError(
                     "invalid_payload", f"{label}.state.{key} is invalid"
                 )
-        _validate_string_tree(filters)
         _validate_string_tree(state)
         if not isinstance(section["sources"], list):
             raise FeedbackHandoffError("invalid_payload", f"{label}.sources must be a list")

@@ -39,12 +39,11 @@ _PROBLEM_AREA_LABELS = {
     "search_data": "검색 자료 준비",
     "evaluation": "정확도 평가",
     "parsing": "문서 읽기 품질 비교",
-    "issues": "신고·수정 확인 · 묶음 전 단계",
 }
 
 _MONITORING_AREA_GROUPS = {
     "operations": ("summary", "response", "search_data"),
-    "experiments": ("evaluation", "parsing", "issues"),
+    "experiments": ("evaluation", "parsing"),
 }
 
 _MONITORING_GROUP_LABELS = {
@@ -2289,8 +2288,6 @@ def _render_global_monitoring_area(
         _render_experiment_monitoring(status)
     elif problem_area == "parsing":
         _render_parsing_engine_evaluation()
-    else:
-        _render_issue_report_monitoring()
 
 
 def _resolve_global_monitoring_status(status: dict | None) -> dict:

@@ -29,6 +29,8 @@ htmlcov/
 dist/
 build/
 .eggs/
+supabase/functions/**/node_modules/
+supabase/.temp/
 
 # ── 가상환경 ─────────────────────────────────────────────────────────────────
 .venv/

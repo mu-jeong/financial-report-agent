@@ -19,13 +19,17 @@ from src.core.db_manager import get_connection
 
 logger = get_logger(__name__)
 
-SearchFilters = dict[str, str]
+SearchFilters = dict[str, Any]
 TemporalContext = dict[str, str]
 
 REPORT_TYPE_KEYWORDS = {
     "company": ("company", "종목", "기업", "회사", "개별주", "개별 종목"),
     "industry": ("industry", "산업", "업종", "섹터"),
-    "economy": ("economy", "경제", "매크로", "금리", "환율"),
+    "economy": ("economy", "경제", "매크로"),
+}
+
+REPORT_TYPE_TOPIC_KEYWORDS = {
+    "economy": ("금리", "환율"),
 }
 
 NOSPACE_REPORT_TYPE_KEYWORDS = {
@@ -382,7 +386,7 @@ def get_metadata_candidates() -> dict[str, tuple[str, ...]]:
     long-lived graph sees newly published report metadata.
     """
     try:
-        with get_connection() as connection:
+        with get_connection(materialize_reports=False) as connection:
             revision = _metadata_revision_token(connection)
     except sqlite3.Error as exc:
         logger.warning(f"[MetadataFilter] metadata revision scan failed: {exc}")
@@ -402,7 +406,7 @@ def _metadata_candidates_for_revision(
     """Load candidates once for one immutable runtime/delta revision."""
 
     try:
-        with get_connection() as conn:
+        with get_connection(materialize_reports=False) as conn:
             rows = _active_metadata_rows(conn)
     except sqlite3.Error as exc:
         logger.warning(f"[MetadataFilter] metadata candidate scan failed: {exc}")
@@ -611,7 +615,7 @@ def infer_search_filters(
     candidates: dict[str, Iterable[str]] | None = None,
     *,
     current_date: date | None = None,
-) -> dict[str, str]:
+) -> SearchFilters:
     """Infer exact metadata filters from explicit names in a query.
 
     This intentionally only matches values already present in local metadata.
@@ -641,17 +645,32 @@ def infer_search_filters(
         filters.pop("target_name", None)
         target = None
 
-    for report_type, keywords in PLAIN_REPORT_TYPE_KEYWORDS.items():
-        if any(_contains_report_type_keyword(query, keyword, allow_nospace=False) for keyword in keywords):
-            filters["report_type"] = report_type
-            break
-    else:
-        for report_type, keywords in NOSPACE_REPORT_TYPE_KEYWORDS.items():
-            if any(_contains_report_type_keyword(query, keyword, allow_nospace=True) for keyword in keywords):
-                filters["report_type"] = report_type
-                break
+    explicit_report_types = [
+        report_type
+        for report_type in REPORT_TYPE_KEYWORDS
+        if any(
+            _contains_report_type_keyword(query, keyword, allow_nospace=False)
+            for keyword in PLAIN_REPORT_TYPE_KEYWORDS[report_type]
+        )
+        or any(
+            _contains_report_type_keyword(query, keyword, allow_nospace=True)
+            for keyword in NOSPACE_REPORT_TYPE_KEYWORDS[report_type]
+        )
+    ]
+    report_types = explicit_report_types or [
+        report_type
+        for report_type, keywords in REPORT_TYPE_TOPIC_KEYWORDS.items()
+        if any(
+            _contains_report_type_keyword(query, keyword, allow_nospace=False)
+            for keyword in keywords
+        )
+    ]
+    if len(report_types) == 1:
+        filters["report_type"] = report_types[0]
+    elif report_types:
+        filters["report_types"] = report_types
 
-    if target and "report_type" not in filters:
+    if target and not ({"report_type", "report_types"} & filters.keys()):
         target_report_types = values.get("target_report_types")
         if isinstance(target_report_types, dict):
             report_types = tuple(target_report_types.get(target, ()))
@@ -683,9 +702,20 @@ def metadata_matches(metadata: dict[str, Any], filters: SearchFilters) -> bool:
 
         if key == "report_type":
             actual = metadata.get("report_type")
-            # Older vector metadata may not contain report_type. In that case,
-            # do not reject the candidate solely on a missing optional field.
-            if actual and _normalize_text(actual) != _normalize_text(expected):
+            if not actual or _normalize_text(actual) != _normalize_text(expected):
+                return False
+            continue
+
+        if key == "report_types":
+            if not isinstance(expected, (list, tuple, set, frozenset)):
+                return False
+            expected_types = {
+                _normalize_text(report_type) for report_type in (expected or [])
+            }
+            if not expected_types:
+                return False
+            actual = metadata.get("report_type")
+            if not actual or _normalize_text(actual) not in expected_types:
                 return False
             continue
 

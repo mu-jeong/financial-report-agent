@@ -146,6 +146,10 @@ def search_scope_prepare_node(state: State) -> dict:
     temporal_context = None if full_period_request else resolve_temporal_context(question)
     prior_filters = dict((state.get("prior_search_scope") or {}).get("search_filters") or {})
     base_filters = dict(prior_filters)
+    if "report_types" in current_question_filters:
+        base_filters.pop("report_type", None)
+    elif "report_type" in current_question_filters:
+        base_filters.pop("report_types", None)
     base_filters.update(
         {
             key: value
@@ -186,13 +190,19 @@ def _drop_incompatible_target_filter(filters: dict) -> dict:
     cleaned = dict(filters or {})
     target_name = cleaned.get("target_name")
     report_type = cleaned.get("report_type")
-    if not target_name or not report_type:
+    report_types = cleaned.get("report_types")
+    requested_report_types = (
+        {str(report_type)}
+        if report_type
+        else {str(value) for value in (report_types or [])}
+    )
+    if not target_name or not requested_report_types:
         return cleaned
     target_report_types = get_metadata_candidates().get("target_report_types")
     if not isinstance(target_report_types, dict):
         return cleaned
     known_report_types = tuple(target_report_types.get(target_name, ()))
-    if known_report_types and report_type not in known_report_types:
+    if known_report_types and requested_report_types.isdisjoint(known_report_types):
         cleaned.pop("target_name", None)
     return cleaned
 
@@ -212,6 +222,10 @@ def _merge_prior_filters_with_current(prior_filters: dict, current_filters: dict
         if "broker" not in current:
             merged.pop("broker", None)
         merged.pop("file_names", None)
+    if "report_types" in current:
+        merged.pop("report_type", None)
+    elif "report_type" in current:
+        merged.pop("report_types", None)
     merged.update(current)
     if "target_name" in current:
         merged.pop("file_names", None)
@@ -290,7 +304,7 @@ def search_scope_node(state: State) -> dict:
                     prior_filters["report_date_start"] = current_temporal_context["report_date_start"]
                     prior_filters["report_date_end"] = current_temporal_context["report_date_end"]
                     prior_filters.pop("file_names", None)
-                if "report_type" in current_non_temporal_filters:
+                if {"report_type", "report_types"} & current_non_temporal_filters.keys():
                     prior_filters.pop("file_names", None)
                 if full_period_request:
                     prior_filters.pop("report_date_start", None)
@@ -307,7 +321,10 @@ def search_scope_node(state: State) -> dict:
             prior_route = _valid_route(prior_search_scope.get("route"))
             if full_period_request or (current_temporal_context and not has_vector_intent):
                 route_hint = prior_route or "rdb"
-            if "report_type" in current_non_temporal_filters and not has_vector_intent:
+            if (
+                {"report_type", "report_types"} & current_non_temporal_filters.keys()
+                and not has_vector_intent
+            ):
                 route_hint = "rdb"
 
     scope_selection_request = None
@@ -319,7 +336,7 @@ def search_scope_node(state: State) -> dict:
             "filters": {
                 key: value
                 for key, value in search_filters.items()
-                if key not in {"target_name", "file_names", "report_type"}
+                if key not in {"target_name", "file_names", "report_type", "report_types"}
             },
         }
 
@@ -357,6 +374,7 @@ def search_scope_merge_node(state: State) -> dict:
 
     search_filters = dict(result.get("search_filters") or {})
     search_filters.pop("target_name", None)
+    search_filters.pop("report_types", None)
     search_filters["report_type"] = "company"
     scope_decision = {
         "matched": True,
@@ -385,6 +403,7 @@ def rdb_scope_preflight_node(state: State) -> dict:
     search_filters = dict(state.get("search_filters") or {})
     search_filters.pop("target_name", None)
     search_filters.pop("file_names", None)
+    search_filters.pop("report_types", None)
     search_filters["report_type"] = "company"
     search_filters["target_names"] = company_names
     scope_decision = dict(state.get("scope_decision") or {})
@@ -413,6 +432,7 @@ def vectordb_scope_preflight_node(state: State) -> dict:
 
     search_filters = dict(state.get("search_filters") or {})
     search_filters.pop("target_name", None)
+    search_filters.pop("report_types", None)
     search_filters["report_type"] = "company"
     report_scope = resolve_report_file_scope_for_companies(
         company_names,

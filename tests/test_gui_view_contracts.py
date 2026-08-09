@@ -137,7 +137,8 @@ EXPLICIT_WIDGET_KEYS = {
     "f\"issue_report_response_mode_{current_thread['id']}\"",
     "f\"issue_report_selected_response_{current_thread['id']}\"",
     "f\"issue_report_submit_{current_thread['id']}\"",
-    "f\"issue_report_include_context_{current_thread['id']}\"",
+    "f\"issue_report_include_remote_comment_{current_thread['id']}\"",
+    "f\"issue_report_include_remote_content_{current_thread['id']}\"",
     "f\"candidate_approve_{candidate['id']}\"",
     "f\"candidate_attach_handoff_{item['handoff_id']}\"",
     "f\"candidate_attach_run_{run['run_id']}\"",
@@ -194,7 +195,7 @@ SESSION_STATE_KEYS = {
     "chat_job_toasts",
     "current_thread_id",
     "editing_thread_id",
-    "issue_report_success",
+    "issue_report_notice",
     "latest_evaluation_run",
     "latest_parsing_evaluation",
     "latest_regression_candidate_run",
@@ -322,6 +323,33 @@ def test_monitoring_exposes_cleanup_backlog_in_user_language():
     assert "pending_cleanup_file_count" in source
 
 
+def test_issue_reporting_uses_retry_only_outbox_without_local_file_ui():
+    chat_source = CHAT_VIEWS_PATH.read_text(encoding="utf-8-sig")
+    monitoring_source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
+
+    assert "issue_report_store.build_issue_report(" in chat_source
+    assert "issue_report_outbox.queue_report(" in chat_source
+    assert "issue_report_store.create_issue_report(" not in chat_source
+    assert "issue_report_outbox.queue_saved_report(" not in chat_source
+    assert "로컬 신고 파일" not in chat_source
+    assert "file_path" not in chat_source
+    assert "json_path" not in chat_source
+    assert "전체 대화 첨부" not in chat_source
+    assert '"experiments": ("evaluation", "parsing")' in monitoring_source
+
+
+def test_issue_reporting_acknowledges_click_without_transport_status_ui():
+    chat_source = CHAT_VIEWS_PATH.read_text(encoding="utf-8-sig")
+
+    assert '"message": "신고가 접수되었습니다."' in chat_source
+    assert "접수 후 전송과 재시도는 백그라운드에서 처리" in chat_source
+    assert (
+        "delivery_result = issue_report_outbox.queue_report(" not in chat_source
+    )
+    assert "신고를 제출하지 못했습니다" not in chat_source
+    assert "전송 실패 시 자동으로 다시 시도합니다" not in chat_source
+
+
 def test_monitoring_defaults_to_speed_accuracy_and_defers_problem_detail():
     source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
 
@@ -358,7 +386,7 @@ def test_monitoring_groups_horizontal_navigation_by_operator_purpose():
 
     assert ast.literal_eval(assignment.value) == {
         "operations": ("summary", "response", "search_data"),
-        "experiments": ("evaluation", "parsing", "issues"),
+        "experiments": ("evaluation", "parsing"),
     }
     assert '"operations": "운영 모니터링"' in source
     assert '"experiments": "성능 개선 실험"' in source

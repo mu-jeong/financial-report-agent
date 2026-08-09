@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 REPORT_TYPE_FILTER_KEY = "report_type"
+REPORT_TYPES_FILTER_KEY = "report_types"
 DATE_FILTER_KEYS = ("report_date_start", "report_date_end")
 
 DEFAULT_REPORT_TYPE_SECTIONS: tuple[dict[str, Any], ...] = (
@@ -99,6 +100,7 @@ def build_answer_scope_index(
     sources = list(sources or [])
     base_filters = _base_filters_without_file_scope(search_scope)
     base_filters.pop(REPORT_TYPE_FILTER_KEY, None)
+    base_filters.pop(REPORT_TYPES_FILTER_KEY, None)
 
     file_names_by_type: dict[str, list[str]] = {}
     for source in sources:
@@ -112,10 +114,21 @@ def build_answer_scope_index(
         if file_name not in bucket:
             bucket.append(str(file_name))
 
-    explicit_report_type = (search_scope.get("search_filters") or {}).get(REPORT_TYPE_FILTER_KEY)
+    search_filters = search_scope.get("search_filters") or {}
+    explicit_report_type = search_filters.get(REPORT_TYPE_FILTER_KEY)
+    explicit_report_types = search_filters.get(REPORT_TYPES_FILTER_KEY)
     section_ids: list[str]
     if file_names_by_type:
         section_ids = [section["id"] for section in DEFAULT_REPORT_TYPE_SECTIONS if section["id"] in file_names_by_type]
+    elif explicit_report_types is not None:
+        requested_types = {
+            str(report_type) for report_type in explicit_report_types
+        }
+        section_ids = [
+            section["id"]
+            for section in DEFAULT_REPORT_TYPE_SECTIONS
+            if section["id"] in requested_types
+        ]
     elif explicit_report_type in {"company", "industry", "economy"}:
         section_ids = [str(explicit_report_type)]
     else:
@@ -166,6 +179,12 @@ def resolve_section_followup_scope(
     prior_filters = _base_filters_without_file_scope(prior_search_scope)
     inherited_filters = _date_filters(prior_filters)
     section_filters = dict(section.get("filters") or {})
+    if REPORT_TYPES_FILTER_KEY in current_filters:
+        current_filters.pop(REPORT_TYPE_FILTER_KEY, None)
+        section_filters.pop(REPORT_TYPE_FILTER_KEY, None)
+    elif REPORT_TYPE_FILTER_KEY in current_filters:
+        current_filters.pop(REPORT_TYPES_FILTER_KEY, None)
+        section_filters.pop(REPORT_TYPES_FILTER_KEY, None)
     added_filters = {
         key: value
         for key, value in section_filters.items()

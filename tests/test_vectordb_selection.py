@@ -21,6 +21,37 @@ def test_requested_candidate_count_uses_one_configurable_multiplier(monkeypatch)
     assert vectordb._requested_candidate_count() == 120
 
 
+def test_report_universe_query_uses_in_clause_for_multiple_report_types():
+    import src.nodes.vectordb as vectordb
+
+    query, params = vectordb._report_universe_query(
+        {
+            "report_types": ["company", "industry", "economy"],
+            "report_date_start": "2026-07-27",
+            "report_date_end": "2026-08-02",
+        }
+    )
+
+    assert "report_type IN (?, ?, ?)" in query
+    assert params == [
+        "company",
+        "industry",
+        "economy",
+        "2026-07-27",
+        "2026-08-02",
+    ]
+
+
+def test_file_name_filter_accepts_multiple_report_type_prefixes():
+    import src.nodes.vectordb as vectordb
+
+    filters = {"report_types": ["company", "industry"]}
+
+    assert vectordb._file_name_matches_filters("company_2026-08-01_A.pdf", filters)
+    assert vectordb._file_name_matches_filters("industry_2026-08-01_B.pdf", filters)
+    assert not vectordb._file_name_matches_filters("economy_2026-08-01_C.pdf", filters)
+
+
 def test_ensure_document_coverage_keeps_small_filtered_document_set():
     docs_with_scores = [
         (

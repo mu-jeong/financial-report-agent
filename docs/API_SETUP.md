@@ -84,15 +84,18 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 
 `LATEST`는 실행 시점의 KST 현재 날짜를 기준으로 수집합니다. 과거 특정 날짜를 재현하려면 `SPECIFIC_DATE`와 `CRAWLER_TARGET_DATE`를 함께 사용합니다.
 
-## 경로 설정
+## 선택형 경로 override
+
+아래 설정은 **모두 선택 사항**입니다. 표준 프로젝트 `data/` 구조를 사용하면 빈 값으로 두거나 `.env`에서 생략할 수 있습니다.
 
 | 설정 | 설명 |
 | --- | --- |
-| `REPORT_PDF_DIR` | GUI의 `열기` 버튼이 PDF를 찾는 폴더. 비워두면 `data/downloaded` 사용 |
-| `SAVE_DIR` | 다운로드 PDF이자 V2 source inventory의 기본 폴더 |
-| `DATA_ROOT` | Native V2 retrieval의 기준 폴더. 비워두면 `data`를 사용하며 catalog와 snapshot은 이 폴더의 `retrieval/v2/` 아래에 저장 |
-| `CONVERSATION_DB_PATH` | GUI/CLI 대화 SQLite 경로 |
-| `COMPANY_INDUSTRY_DATA_PATH` | 선택형 KRX 업종 CSV 경로 |
+| `REPORT_PDF_DIR` | GUI의 `열기` 버튼이 PDF를 찾는 폴더. 비워두면 `<PROJECT_ROOT>/data/downloaded` 사용 |
+| `SAVE_DIR` | 다운로드 PDF이자 V2 source inventory 폴더. 비워두면 `<PROJECT_ROOT>/data/downloaded` 사용 |
+| `DATA_ROOT` | Native V2 retrieval 기준 폴더. 비워두면 `<PROJECT_ROOT>/data`를 사용하며 catalog와 snapshot은 이 폴더의 `retrieval/v2/` 아래에 저장 |
+| `RERANK_CACHE_DIR` | FlashRank 모델 cache. 비워두면 `<DATA_ROOT>/cache/flashrank` 사용 |
+| `CONVERSATION_DB_PATH` | GUI/CLI 대화 SQLite 경로. 비워두면 `<PROJECT_ROOT>/data/conversations.db` 사용 |
+| `COMPANY_INDUSTRY_DATA_PATH` | KRX 업종 CSV 경로. 비워두면 `<PROJECT_ROOT>/data/listed_company_industries.csv` 사용 |
 
 임베딩 파이프라인과 다른 위치의 PDF를 열어야 하면 `.env`에서 `REPORT_PDF_DIR`을 해당 폴더로 지정합니다.
 

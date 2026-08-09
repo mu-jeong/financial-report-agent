@@ -22,6 +22,10 @@ DATA_ROOT = str(_RETRIEVAL_PATHS.data_root)
 RERANK_CACHE_DIR = str(_RETRIEVAL_PATHS.rerank_cache_dir)
 CONVERSATION_DB_PATH = get_config_value("CONVERSATION_DB_PATH")
 MONITORING_MODE = get_config_value("MONITORING_MODE")
+ISSUE_REPORT_REMOTE_ENABLED = get_config_value("ISSUE_REPORT_REMOTE_ENABLED")
+ISSUE_REPORT_INGEST_URL = get_config_value("ISSUE_REPORT_INGEST_URL")
+ISSUE_REPORT_PUBLISHABLE_KEY = get_config_value("ISSUE_REPORT_PUBLISHABLE_KEY")
+ISSUE_REPORT_OUTBOX_DIR = get_config_value("ISSUE_REPORT_OUTBOX_DIR")
 
 # ==============================================================================
 # 2. API 키 및 인증

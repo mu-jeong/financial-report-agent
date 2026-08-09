@@ -1,6 +1,12 @@
-﻿# Finance LLM
+﻿# Financial Report Agent
 
 > Version: `0.5.1`
+
+Financial Report Agent는 여러 증권사의 기업·산업·경제 리포트를 한곳에 모아 자연어로 검색하고 분석하는 로컬 리서치 도구입니다. 원하는 기간과 기업, 산업, 증권사를 말로 지정하면 관련 리포트의 목록과 통계, 핵심 내용을 대화형 답변으로 확인할 수 있습니다.
+
+> 이 프로젝트는 투자 조언이나 매수/매도 추천을 제공하지 않습니다. 답변은 수집·색인된 리포트와 공개 데이터 기반의 참고 정보로만 사용하세요.
+
+---
 
 ## Quick Start: 간편하게 실행하기
 
@@ -16,6 +22,34 @@ Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면
 Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법과 `RUN_APP.bat` 사용 구분은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
 
 일부 PDF가 PyMuPDF와 OpenDataLoader에서 모두 파싱되지 않아도 실패 파일만 V2 manifest에 제외 상태로 기록하고, 나머지 문서의 파싱·임베딩·snapshot 게시와 앱 실행은 계속합니다. OpenDataLoader가 한 PDF에서 5분 안에 반환하지 않는 경우도 추출 실패로 기록해 전체 작업이 무기한 멈추지 않게 합니다. 기록된 문서는 Monitoring Mode의 `임베딩 누락 문서`에서 명시적으로 다시 시도할 수 있습니다.
+
+## 주요 기능
+
+현재 앱에 수집되어 검색 가능한 리포트를 바탕으로 다음과 같은 질문에 답할 수 있습니다.
+
+| 하고 싶은 일 | 질문 예시 | 얻을 수 있는 답 |
+| --- | --- | --- |
+| 기간·종류별 리포트 찾기 | “지난주에 발간된 기업, 산업, 경제 리포트를 각각 알려줘.” | 기간과 카테고리별 리포트 목록, 발간 건수, 증권사와 대상 기업 |
+| 특정 기업 분석하기 | “삼성전자 최근 리포트에서 실적 전망과 목표주가의 근거를 정리해줘.” | 여러 리포트에 나온 실적 전망, 주요 근거, 성장 요인과 위험 요인 |
+| 산업·경제 흐름 파악하기 | “최근 반도체 산업 리포트의 공통 전망과 핵심 리스크는 무엇이야?” | 여러 증권사의 공통 관점, 주요 이슈, 전망이 갈리는 지점 |
+| 리포트 비교하기 | “SK하이닉스에 대한 증권사별 전망 차이를 비교해줘.” | 리포트별 핵심 주장과 근거, 공통점과 차이점 |
+| 발간 현황 집계하기 | “7월에 하나증권이 발간한 기업 리포트는 몇 건이야?” | 날짜·월·분기·연도, 리포트 종류, 기업, 증권사별 건수와 목록 |
+| 섹터 관련 기업 찾기 | “반도체 섹터에 속한 기업 중 최근 리포트가 있는 회사를 알려줘.” | 해당 업종의 국내 상장기업과 현재 검색 가능한 관련 리포트 |
+| 답변을 이어서 탐색하기 | “그중 산업 리포트만 자세히 설명해줘.” | 직전 답변의 기간과 범위를 이어받은 후속 분석 |
+| 최근 주가와 함께 보기 | “삼성전자 리포트 내용과 최근 주가를 함께 알려줘.” | 리포트 분석과 필요한 경우 국내 상장사의 최근 주가 정보 |
+
+### 사용자가 얻는 이점
+
+- 여러 PDF를 하나씩 열지 않고도 필요한 리포트를 빠르게 찾고 핵심 내용을 한 번에 파악할 수 있습니다.
+- 자연어로 기간, 기업, 산업, 리포트 종류, 증권사를 지정할 수 있어 복잡한 검색식을 만들 필요가 없습니다.
+- 단순 목록과 건수는 구조화된 데이터로 확인하고, 전망과 근거처럼 본문을 읽어야 하는 질문은 리포트 내용을 바탕으로 분석할 수 있습니다.
+- “그중 기업 리포트만”, “위 내용의 위험 요인을 더 자세히”처럼 후속 질문을 이어가며 탐색 범위를 좁힐 수 있습니다.
+- 답변에 연결된 참고 문서에서 근거가 된 리포트를 확인하고 원본 PDF를 직접 열 수 있습니다.
+- 대화 기록을 저장하고 답변 생성이나 데이터 업데이트를 백그라운드에서 진행해 다른 대화로 이동해도 작업을 이어갈 수 있습니다.
+
+질문의 답변 범위는 현재 앱에 수집되고 색인된 리포트에 따라 달라집니다. 구현 구조와 검색 파이프라인은 [Architecture](docs/ARCHITECTURE.md), 모델과 검색 설정은 [API 설정 가이드](docs/API_SETUP.md), 운영 진단은 [Monitoring](docs/MONITORING.md), 기능 변경 내역은 [Changelog](docs/project/CHANGELOG.md)를 참고하세요.
+
+## 기존 데이터 마이그레이션과 재구축
 
 ### 기존 V1 사용자는 먼저 마이그레이션하세요
 
@@ -35,36 +69,11 @@ V1의 `reports.db`와 `vector_db`를 사용 중인 기존 사용자는 업데이
 
 `--check`에서 현재 profile과 요청 profile이 다를 때만 `tools\recovery\REBUILD_V2.bat`을 실행하세요. 전체 PDF를 다시 처리하므로 시간과 API 비용이 발생합니다. 자세한 내용은 [Native V2 전체 재구축](docs/migrations/v2/V2_REBUILD.md)을 참고하세요.
 
----
-
-증권사 리포트 PDF를 수집하고 V2 SQLite catalog와 immutable FAISS snapshot에 색인한 뒤, LangGraph 기반 RAG 파이프라인으로 재무 질문에 답하는 프로젝트입니다. 생성 모델, 임베딩, 선택형 rerank는 OpenRouter API를 기준으로 연동합니다.
-
-> 이 프로젝트는 투자 조언이나 매수/매도 추천을 제공하지 않습니다. 답변은 수집·색인된 리포트와 공개 데이터 기반의 참고 정보로만 사용하세요.
-
-## 주요 기능
-
-- 증권사 리포트 PDF 다운로드 및 파일명 기반 메타데이터 파싱
-- `company`, `industry`, `economy` 카테고리별 리포트 수집
-- Native V2 SQLite catalog(`DATA_ROOT/retrieval/v2/catalog.sqlite3`)와 immutable FAISS snapshot의 membership·publication 동기화
-- PyMuPDF, OpenDataLoader, Docling, pdf-to-markdown 중 선택 가능한 PDF 텍스트 추출 엔진
-- Parent-Child Chunking 기반 문맥 확장 검색
-- LangGraph 기반 query rewrite, routing, RDB 검색, VectorDB 검색, 답변 생성
-- SQL guardrail: `SELECT`와 `reports` 테이블 중심의 read-only SQLite 접근
-- OpenRouter 임베딩(`baai/bge-m3`) 지원
-- 선택형 OpenRouter rerank(`cohere/rerank-v3.5`) 또는 명시적으로 설정하는 로컬 FlashRank adapter 지원(자동 fallback 없음)
-- `report_date` 기준 날짜/월/분기/연도 필터링과 최신성 가중치(`RECENCY_WEIGHT`) 지원
-- KRX 상장법인 업종 CSV 기반 섹터/분야 질문의 회사 universe lookup 지원
-- VectorDB 검색 실패 시 short-term memory 영향을 제거하고 원질문으로 재검색
-- 답변의 `[숫자]` citation과 기본 접힘 상태의 참고 문서 목록 연동
-- Streamlit GUI 대화 기록 저장, 백그라운드 답변 생성, 대화 이름 변경/삭제, 참고 PDF 열기
-- FinanceDataReader 기반 주가 조회 tool calling
-- Streamlit GUI 실행 (CLI는 유지보수 전용 deprecated 모드)
-
 ## 설치
 
 ```powershell
 git clone <repository-url>
-cd finance_llm
+cd financial-report-agent
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
@@ -75,6 +84,8 @@ Python 3.10 이상을 권장합니다.
 ## 환경 변수 설정
 
 수정 가능한 설정의 기본값, 타입, 설명은 `src/configs/settings.py`에서 한 번만 관리합니다. `.env.example`은 이 파일에서 자동 생성되는 템플릿이고, `.env`는 실제 실행값만 저장합니다.
+
+`.env.example`의 **Optional path overrides** 섹션은 모두 선택 사항입니다. 표준 `data/` 구조를 사용하면 비워 두거나 실제 `.env`에서 생략해도 됩니다.
 
 수동으로 환경을 준비할 때는 루트의 `.env.example`을 `.env`로 복사한 뒤 `OPENROUTER_API_KEY`를 채웁니다.
 
@@ -193,7 +204,9 @@ GUI 대화 이력은 `data/conversations.db`에 저장됩니다. deprecated CLI�
 
 GUI 답변 생성은 백그라운드 thread에서 실행됩니다. 답변 생성 중인 대화는 입력창이 잠기고, 다른 대화로 이동해도 작업은 계속되며 완료/실패 상태가 toast와 대화 목록 배지로 표시됩니다.
 
-채팅 입력창 아래의 `⚠ 신고` 버튼은 현재 대화에서 발생한 문제를 사람이 읽는 `debug/issue_report_*.txt`와 같은 stem의 구조화 `.json` sidecar로 저장합니다. `debug/` 폴더 내용은 Git에 포함하지 않습니다(`debug/.gitkeep`만 폴더 유지용). 민감정보가 포함될 수 있으므로 외부로 전달하기 전에 두 파일을 모두 확인하세요.
+채팅 입력창 아래의 `신고` 버튼은 별도 `.txt`/`.json` 신고 파일을 만들지 않습니다. 사용자가 각각 명시적으로 동의한 설명·선택 질문·응답과 제한된 진단값만 메모리에서 민감정보/로컬 경로 redaction한 뒤 Supabase 수신함으로 비동기 전송합니다. 원격 내용 동의는 모두 기본 해제이며 실제 redaction 결과를 제출 전에 미리 볼 수 있고, 전체 대화 첨부는 제공하지 않습니다. 사용자는 제출 즉시 `신고가 접수되었습니다.` 안내만 보며 HTTP POST, 재시도, 최종 전송 실패 상태는 백그라운드에서 처리되어 화면에 노출되지 않습니다. 최초 전송 실패 후 최대 3회만 재시도하며, 전달 성공·영구 거절·재시도 소진·7일 만료 시 해당 outbox 행과 payload를 즉시 삭제합니다. 기본 배포의 공개 Supabase URL과 publishable key가 내장되어 있으며, `ISSUE_REPORT_REMOTE_ENABLED=false`로 설정하면 로컬 파일로 대체 저장하지 않고 제출을 비활성화합니다.
+
+Supabase Free 호스팅 프로젝트를 사용할 때 로컬 Supabase 서버나 Docker는 필요하지 않습니다. 이 저장소의 `supabase/migrations/`와 `supabase/functions/`를 원격 프로젝트에 적용할 때만 Supabase CLI를 사용합니다. 배포와 보안 검증 절차는 [Issue report ingest deployment](docs/production/05_ISSUE_REPORT_INGEST_DEPLOYMENT.md)를 따릅니다.
 
 참고 문서의 `열기` 버튼은 브라우저 링크가 아니라 Streamlit 서버가 실행 중인 PC에서 PDF를 직접 엽니다. 파일은 `REPORT_PDF_DIR` 환경 변수의 폴더와 참고 문서의 파일명을 조합해 찾습니다. 기본값은 `data/downloaded`이며, PDF 위치를 바꿨다면 `.env`에서 직접 갱신하세요. 로컬 사용에는 적합하지만 원격 배포에서는 서버 PC에서 파일이 열립니다.
 

@@ -12,11 +12,9 @@ from apps.gui import chat_jobs
 from apps.gui import search_engine
 from src.configs import config as config_module
 from src.core import conversation_store
+from src.core import issue_report_outbox
 from src.core import issue_report_store
-from src.core.chat_ui_helpers import (
-    build_clipboard_copy_html,
-    build_no_result_suggestions,
-)
+from src.core.chat_ui_helpers import build_no_result_suggestions
 from src.utils import citations
 
 
@@ -77,20 +75,9 @@ def _render_issue_report_control(
     current_thread: dict,
     messages: list[dict],
 ) -> None:
-    if report_result := st.session_state.pop("issue_report_success", None):
-        st.success("신고 완료. 저장된 파일 경로를 아래에 표시합니다.")
-        st.code(report_result["file_path"], language="text")
-        try:
-            report_text = Path(report_result["file_path"]).read_text(encoding="utf-8")
-        except OSError:
-            report_text = ""
-        if report_text:
-            st.caption("신고 텍스트를 복사해 저장/공유하세요.")
-            components.html(
-                build_clipboard_copy_html(report_text, button_label="클립보드 복사"),
-                height=48,
-            )
-        st.toast(f"신고가 저장되었습니다. (#{report_result['id']})", icon="✅")
+    notice = st.session_state.pop("issue_report_notice", None)
+    if notice and str(notice.get("thread_id")) == str(current_thread.get("id")):
+        st.success(str(notice["message"]))
 
     with st.container(key="issue_report_control"):
         _, report_col = st.columns(
@@ -166,35 +153,112 @@ def _render_issue_report_control(
             height=110,
             key=f"issue_report_description_{current_thread['id']}",
         )
-        include_conversation = st.checkbox(
-            "전체 대화 첨부",
-            value=False,
-            help="기본값은 미첨부입니다. 아래 미리보기를 확인한 뒤 필요한 경우에만 선택하세요.",
-            key=f"issue_report_include_context_{current_thread['id']}",
-        )
+        submitted_description = description.strip() or f"{category} 신고"
+        remote_delivery = issue_report_outbox.remote_delivery_available()
+        include_comment_remote = False
+        include_selected_remote = False
+        if remote_delivery:
+            st.caption(
+                "동의한 최소 정보만 운영자 Supabase 수신함으로 전송됩니다. "
+                "접수 후 전송과 재시도는 백그라운드에서 처리되며 "
+                "전송 결과는 화면에 표시되지 않습니다."
+            )
+            include_comment_remote = st.checkbox(
+                "추가 설명을 원격 신고에 포함",
+                value=False,
+                help=(
+                    "기본값은 미포함입니다. 동의한 경우에만 민감정보를 "
+                    "가린 제한된 설명이 전송됩니다."
+                ),
+                key=f"issue_report_include_remote_comment_{current_thread['id']}",
+            )
+            include_selected_remote = st.checkbox(
+                "선택한 질문과 응답 내용을 원격 신고에 포함",
+                value=False,
+                help=(
+                    "기본값은 미포함입니다. 포함하더라도 민감정보와 로컬 "
+                    "경로를 자동으로 가린 뒤 제한된 길이만 전송합니다."
+                ),
+                key=f"issue_report_include_remote_content_{current_thread['id']}",
+            )
+        else:
+            st.warning(
+                "신고 서버에 연결할 수 없어 현재 제출할 수 없습니다. "
+                "잠시 후 다시 시도해 주세요."
+            )
         report_context = (
             issue_report_store.build_issue_report_submission_context(
                 thread=current_thread,
                 messages=messages,
                 report_target_type=report_target_type,
                 selected_message_id=selected_response_id,
-                include_conversation=include_conversation,
+                include_conversation=False,
             )
         )
+        report_context["remote_consent"] = {
+            "consent_version": 1,
+            "include_comment": remote_delivery and include_comment_remote,
+            "include_selected_question": (
+                remote_delivery and include_selected_remote
+            ),
+            "include_selected_answer": (
+                remote_delivery and include_selected_remote
+            ),
+            "include_previous_turns": False,
+        }
         preview = issue_report_store.build_issue_report_preview(
             context=report_context,
-            include_conversation=include_conversation,
+            include_conversation=False,
         )
+        preview["remote_delivery"] = (
+            "enabled" if remote_delivery else "unavailable"
+        )
+        preview["remote_includes_comment"] = (
+            remote_delivery and include_comment_remote
+        )
+        preview["remote_includes_selected_content"] = (
+            remote_delivery and include_selected_remote
+        )
+        preview["remote_excludes_previous_turns"] = True
+        if remote_delivery:
+            try:
+                remote_preview = issue_report_outbox.build_remote_report(
+                    {
+                        "kind": "user_feedback",
+                        "report_target_type": report_target_type,
+                        "source": "local_chat",
+                        "app_version": report_context.get("app_version"),
+                        "category": category,
+                        "comment": submitted_description,
+                        "context": report_context,
+                        "diagnostics": {},
+                    },
+                    consent=report_context["remote_consent"],
+                )
+                preview["remote_redacted_preview"] = {
+                    "comment": remote_preview["comment"],
+                    "selected_question": remote_preview["observed"][
+                        "selected_question"
+                    ],
+                    "selected_answer": remote_preview["observed"][
+                        "selected_answer"
+                    ],
+                    "removed_fields": remote_preview["privacy"][
+                        "removed_fields"
+                    ],
+                }
+            except issue_report_outbox.IssueReportOutboxError as exc:
+                preview["remote_redacted_preview"] = {
+                    "blocked": True,
+                    "reason": exc.code,
+                }
         with st.expander("제출 내용 미리보기", expanded=True):
             st.json(preview)
-            if include_conversation:
-                st.warning(
-                    "전체 대화 원문과 메시지 메타데이터가 포함됩니다."
-                )
         submitted = st.button(
             "신고 제출",
             key=f"issue_report_submit_{current_thread['id']}",
             width="stretch",
+            disabled=not remote_delivery,
         )
 
         if submitted:
@@ -211,16 +275,23 @@ def _render_issue_report_control(
                 in {"failed", "error"}
                 else "user_feedback"
             )
-            report_result = issue_report_store.create_issue_report(
+            report = issue_report_store.build_issue_report(
                 current_thread["id"],
                 category,
-                description.strip() or f"{category} 신고",
+                submitted_description,
                 report_context,
                 kind=report_kind,
                 report_target_type=report_target_type,
             )
+            issue_report_outbox.queue_report(
+                report,
+                consent=report_context["remote_consent"],
+            )
             st.session_state.show_issue_report_form = False
-            st.session_state.issue_report_success = report_result
+            st.session_state.issue_report_notice = {
+                "thread_id": current_thread["id"],
+                "message": "신고가 접수되었습니다.",
+            }
             st.rerun(scope="app")
 
 
@@ -431,6 +502,7 @@ def _render_message(message: dict, *, index: int) -> None:
 
 
 def render_chat(current_id: str, current_thread: dict) -> None:
+    issue_report_outbox.start_delivery_worker()
     st.header(current_thread["name"])
     chat_history_region = st.container()
     search_engine_status_region = st.container()

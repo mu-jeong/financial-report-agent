@@ -69,7 +69,7 @@ def scope_selection_node(state: State) -> dict:
     search_filters = {
         key: value
         for key, value in filters.items()
-        if key not in {"target_name", "file_names", "report_type"}
+        if key not in {"target_name", "file_names", "report_type", "report_types"}
     }
     search_filters["target_name"] = target_name
     search_filters["report_type"] = "company"

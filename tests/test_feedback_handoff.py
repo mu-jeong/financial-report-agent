@@ -255,6 +255,39 @@ def test_payload_is_exact_allowlist_redacted_and_uses_exact_baseline(tmp_path: P
         build_codex_handoff_payload(candidate, mismatched)
 
 
+def test_validator_accepts_plural_report_type_filters(tmp_path: Path):
+    candidate, run = _candidate_and_run(tmp_path)
+    payload = build_codex_handoff_payload(candidate, run)
+    payload["observed"]["filters"] = {
+        "report_types": ["company", "industry"],
+    }
+    payload["expected"]["filters"] = {
+        "report_types": ["company", "industry", "economy"],
+    }
+
+    validate_codex_handoff_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "invalid_filters",
+    [
+        {"report_types": "company"},
+        {"report_types": ["company", 1]},
+        {"report_type": "company", "report_types": ["company"]},
+    ],
+)
+def test_validator_rejects_invalid_plural_report_type_filters(
+    tmp_path: Path,
+    invalid_filters,
+):
+    candidate, run = _candidate_and_run(tmp_path)
+    payload = build_codex_handoff_payload(candidate, run)
+    payload["observed"]["filters"] = invalid_filters
+
+    with pytest.raises(FeedbackHandoffError, match="invalid"):
+        validate_codex_handoff_payload(payload)
+
+
 def test_validator_rejects_unknown_nested_keys_and_unsafe_commands(tmp_path: Path):
     candidate, run = _candidate_and_run(tmp_path)
     payload = build_codex_handoff_payload(candidate, run)

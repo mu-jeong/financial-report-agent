@@ -2374,6 +2374,7 @@ def _canonical_expected(value: Any) -> dict[str, Any]:
     allowed_filters = {
         "target_name",
         "report_type",
+        "report_types",
         "report_date",
         "report_date_start",
         "report_date_end",

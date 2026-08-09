@@ -781,7 +781,7 @@ def build_issue_report_preview(
     }
 
 
-def create_issue_report(
+def build_issue_report(
     thread_id: str,
     category: str,
     description: str,
@@ -789,11 +789,8 @@ def create_issue_report(
     *,
     kind: str | None = None,
     report_target_type: str | None = None,
-) -> dict[str, str]:
-    """Persist a user-submitted problem report as a readable text file under debug/."""
-    report_dir = Path(DEBUG_REPORT_DIR)
-    report_dir.mkdir(parents=True, exist_ok=True)
-
+) -> dict[str, Any]:
+    """Build a canonical issue report without writing it to local storage."""
     report_id = uuid.uuid4().hex[:12]
     created_at = _utc_now()
     target_type = (
@@ -824,7 +821,31 @@ def create_issue_report(
         "created_at": created_at.isoformat(timespec="seconds"),
         "source": (context or {}).get("submitted_from") or "local_chat",
     }
-    report = canonicalize_report(report)
+    return canonicalize_report(report)
+
+
+def create_issue_report(
+    thread_id: str,
+    category: str,
+    description: str,
+    context: dict[str, Any] | None = None,
+    *,
+    kind: str | None = None,
+    report_target_type: str | None = None,
+) -> dict[str, str]:
+    """Persist a legacy report artifact for offline operator workflows."""
+    report = build_issue_report(
+        thread_id,
+        category,
+        description,
+        context,
+        kind=kind,
+        report_target_type=report_target_type,
+    )
+    report_dir = Path(DEBUG_REPORT_DIR)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_id = str(report["id"])
+    created_at = datetime.fromisoformat(str(report["created_at"]))
     report_path = report_dir / _report_file_name(report_id, created_at)
     json_path = report_path.with_suffix(".json")
     try:

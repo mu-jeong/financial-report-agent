@@ -1,0 +1,7 @@
+project_id = "finance-llm"
+
+[functions.issue-report-ingest]
+verify_jwt = false
+
+[functions.supabase-health-check]
+verify_jwt = false
