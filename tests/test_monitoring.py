@@ -374,6 +374,9 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
         "total_seconds": None,
         "rdb_query_seconds": None,
         "vector_search_seconds": 0.25,
+        "comparison_preflight_seconds": None,
+        "answer_synthesis_seconds": None,
+        "unattributed_seconds": None,
         "vector_stage_seconds": {
             "scope_compile": None,
             "eligibility": None,
@@ -436,6 +439,80 @@ def test_message_trace_detail_splits_response_metadata_into_debug_sections():
     assert "content" not in detail["used_chunks"][0]
     assert detail["answer"]["citation_ranks_used"] == [1]
     assert detail["answer"]["citation_valid"] is True
+
+
+def test_message_trace_exposes_generation_tokens_ttft_provider_and_throughput():
+    message = {
+        "role": "assistant",
+        "content": "답변",
+        "metadata": {
+            "status": "succeeded",
+            "route": "rdb",
+            "latency_seconds": 5.0,
+            "monitoring": {
+                "generation": {
+                    "status": "measured",
+                    "call_count": 1,
+                    "streamed_call_count": 1,
+                    "input_tokens": 1200,
+                    "output_tokens": 300,
+                    "total_tokens": 1500,
+                    "request_ns": 4_000_000_000,
+                    "after_first_token_ns": 3_000_000_000,
+                    "time_to_first_token_ns": 1_000_000_000,
+                    "max_time_to_first_token_ns": 1_000_000_000,
+                    "output_tokens_per_second": 75.0,
+                    "throughput_basis": "client_request_to_complete",
+                    "provider_name": "Provider A",
+                    "provider_names": ["Provider A"],
+                    "gateway_provider": "openrouter",
+                    "model_name": "model-a",
+                    "model_names": ["model-a"],
+                    "router_metadata_status": "measured",
+                    "calls": [
+                        {
+                            "phase": "rdb_answer",
+                            "status": "measured",
+                            "streamed": True,
+                            "input_tokens": 1200,
+                            "output_tokens": 300,
+                            "total_tokens": 1500,
+                            "request_ns": 4_000_000_000,
+                            "time_to_first_token_ns": 1_000_000_000,
+                            "output_tokens_per_second": 75.0,
+                            "provider_name": "Provider A",
+                            "gateway_provider": "openrouter",
+                            "model_name": "model-a",
+                            "router_metadata_status": "measured",
+                        }
+                    ],
+                }
+            },
+        },
+    }
+
+    detail = build_message_trace_detail(message)
+    generation = detail["generation_performance"]
+
+    assert generation["status"] == "measured"
+    assert generation["input_tokens"] == 1200
+    assert generation["output_tokens"] == 300
+    assert generation["time_to_first_token_seconds"] == 1.0
+    assert generation["request_seconds"] == 4.0
+    assert generation["output_tokens_per_second"] == 75.0
+    assert generation["provider_name"] == "Provider A"
+    assert generation["measurement_gaps"] == []
+    assert generation["calls"][0]["phase"] == "rdb_answer"
+    assert detail["timing"]["answer_synthesis_seconds"] == 4.0
+    assert detail["timing"]["unattributed_seconds"] == 1.0
+
+    summary = build_message_trace_summary(detail)
+    assert summary["input_tokens"] == 1200
+    assert summary["output_tokens"] == 300
+    assert summary["time_to_first_token_seconds"] == 1.0
+    assert summary["provider_name"] == "Provider A"
+    assert summary["model_name"] == "model-a"
+    assert summary["output_tokens_per_second"] == 75.0
 
 
 def test_rdb_turn_marks_retrieval_k_not_applicable_without_fake_counts():
@@ -671,6 +748,161 @@ def test_message_trace_summary_flattens_common_debug_fields():
     assert summary["diff_available"] is True
 
 
+def test_message_trace_exposes_send_comparison_coverage_and_branch_timing():
+    message = {
+        "id": 11,
+        "role": "assistant",
+        "content": "삼성전자 요약 [1] SK하이닉스 요약 [2]",
+        "metadata": {
+            "status": "succeeded",
+            "question": "삼성전자와 SK하이닉스 리포트를 요약해줘",
+            "route": "vectordb",
+            "retrieval_plan": {
+                "type": "company_comparison",
+                "execution_mode": "send",
+                "target_names": ["삼성전자", "SK하이닉스"],
+            },
+            "vector_outcome": "complete",
+            "vector_retryable": False,
+            "search_filters": {
+                "report_type": "company",
+                "target_names": ["삼성전자", "SK하이닉스"],
+            },
+            "selected_sources": [
+                {
+                    "rank": 1,
+                    "target_name": "삼성전자",
+                    "file_name": "samsung.pdf",
+                    "report_uid": "report-samsung",
+                    "chunk_uid": "chunk-samsung",
+                },
+                {
+                    "rank": 2,
+                    "target_name": "SK하이닉스",
+                    "file_name": "skhynix.pdf",
+                    "report_uid": "report-skhynix",
+                    "chunk_uid": "chunk-skhynix",
+                },
+            ],
+            "monitoring": {
+                "retrieval": {"source_count": 2},
+                "comparison": {
+                    "status": "complete",
+                    "execution_mode": "send",
+                    "selection_mode": "latest_per_target",
+                    "requested_target_count": 2,
+                    "available_target_count": 2,
+                    "selected_source_count": 2,
+                    "rerank_calls": 1,
+                    "synthesis_calls": 1,
+                    "retrieval_concurrency_limit": 2,
+                    "process_retrieval_concurrency_limit": 5,
+                    "observed_peak_retrieval_concurrency": 2,
+                    "retrieval_wall_ns": 1_600_000_000,
+                    "preflight_ns": 100_000_000,
+                    "synthesis_ns": 2_000_000_000,
+                    "latest_selection": {
+                        "mode": "latest_per_target",
+                        "status": "complete",
+                        "requested_target_count": 2,
+                        "resolved_target_count": 2,
+                        "context_target_count": 2,
+                        "cited_target_count": 2,
+                        "citation_status": "complete",
+                        "missing_preflight_targets": [],
+                        "missing_context_targets": [],
+                        "missing_citation_targets": [],
+                    },
+                    "target_statuses": {
+                        "삼성전자": "success",
+                        "SK하이닉스": "success",
+                    },
+                    "branch_metrics": {
+                        "삼성전자": {
+                            "candidate_count": 3,
+                            "retrieval_ns": 1_500_000_000,
+                            "queue_wait_ns": 10_000_000,
+                        },
+                        "SK하이닉스": {
+                            "candidate_count": 4,
+                            "retrieval_ns": 1_000_000_000,
+                            "queue_wait_ns": 20_000_000,
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+    detail = build_message_trace_detail(message)
+    execution = detail["execution"]
+
+    assert execution["strategy"] == "company_comparison"
+    assert execution["execution_mode"] == "send"
+    assert execution["status"] == "complete"
+    assert execution["requested_target_count"] == 2
+    assert execution["available_target_count"] == 2
+    assert execution["selection_mode"] == "latest_per_target"
+    assert execution["retrieval_concurrency_limit"] == 2
+    assert execution["process_retrieval_concurrency_limit"] == 5
+    assert execution["observed_peak_retrieval_concurrency"] == 2
+    assert execution["latest_selection"]["cited_target_count"] == 2
+    assert execution["synthesis_seconds"] == 2.0
+    assert execution["measurement_gaps"] == []
+    assert execution["branch_timing"]["slowest_retrieval_seconds"] == 1.5
+    assert execution["branch_timing"]["total_retrieval_work_seconds"] == 2.5
+    assert execution["branch_timing"]["max_queue_wait_seconds"] == 0.02
+    assert execution["branches"][0] == {
+        "target": "삼성전자",
+        "status": "success",
+        "candidate_count": 3,
+        "retrieval_seconds": 1.5,
+        "queue_wait_seconds": 0.01,
+        "backend_seconds": None,
+    }
+    assert detail["state_status"]["stages"]["retrieval"] == "completed"
+
+    summary = build_message_trace_summary(detail)
+    assert summary["execution_strategy"] == "company_comparison"
+    assert summary["execution_mode"] == "send"
+    assert summary["execution_status"] == "complete"
+    assert summary["requested_target_count"] == 2
+    assert summary["available_target_count"] == 2
+
+    rows = build_message_monitoring_rows(
+        [{"id": 10, "role": "user", "content": message["metadata"]["question"]}, message]
+    )
+    assert rows[0]["execution_strategy"] == "company_comparison"
+    assert rows[0]["execution_mode"] == "send"
+    assert rows[0]["available_target_count"] == 2
+
+
+def test_message_trace_does_not_infer_send_from_multiple_targets_alone():
+    detail = build_message_trace_detail(
+        {
+            "role": "assistant",
+            "content": "요약 [1] [2]",
+            "metadata": {
+                "status": "succeeded",
+                "route": "vectordb",
+                "search_filters": {
+                    "target_names": ["삼성전자", "SK하이닉스"],
+                },
+                "selected_sources": [
+                    {"rank": 1, "file_name": "a.pdf"},
+                    {"rank": 2, "file_name": "b.pdf"},
+                ],
+                "monitoring": {"retrieval": {"source_count": 2}},
+            },
+        }
+    )
+
+    assert detail["execution"]["strategy"] == "vectordb"
+    assert detail["execution"]["execution_mode"] is None
+    assert detail["execution"]["branches"] == []
+    assert detail["execution"]["requested_target_count"] is None
+
+
 def test_response_diff_reports_filter_source_and_retrieval_changes():
     previous = {
         "content": "이전 답변",
@@ -755,6 +987,31 @@ def test_chat_trace_debug_hints_flag_common_rag_failures():
     assert any("document_coverage_applied=False" in hint for hint in hints)
 
 
+def test_chat_trace_debug_hints_flag_latest_selection_and_citation_gaps():
+    current = {
+        "metadata": {
+            "route": "vectordb",
+            "monitoring": {
+                "comparison": {
+                    "latest_selection": {
+                        "mode": "latest_per_target",
+                        "missing_preflight_targets": ["A"],
+                        "missing_context_targets": ["B"],
+                        "missing_citation_targets": ["C"],
+                        "citation_status": "partial",
+                    }
+                }
+            },
+        }
+    }
+
+    hints = build_chat_trace_debug_hints(current)
+
+    assert any("최신 문서를 확정하지 못한" in hint and "A" in hint for hint in hints)
+    assert any("prompt context" in hint and "B" in hint for hint in hints)
+    assert any("최신 문서를 인용하지 않은" in hint and "C" in hint for hint in hints)
+
+
 def test_chat_trace_issue_context_includes_selected_previous_diff_and_hints():
     messages = [
         {"id": 1, "role": "user", "content": "지난주 리포트 정리"},
@@ -823,7 +1080,15 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
                     "fetch_k": 40,
                     "candidate_count_after_filter": 8,
                     "selected_source_count": 2,
-                }
+                },
+                "generation": {
+                    "status": "measured",
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "time_to_first_token_ns": 250_000_000,
+                    "provider_name": "Provider A",
+                    "output_tokens_per_second": 40.0,
+                },
             },
         },
         latency_seconds=1.23456,
@@ -850,6 +1115,8 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
     assert metadata["monitoring"]["retrieval"]["source_count"] == 2
     assert metadata["monitoring"]["retrieval"]["score_summary"]["rerank_score"]["avg"] == 0.7
     assert metadata["monitoring"]["timing"] == {"total_seconds": 1.235}
+    assert metadata["monitoring"]["generation"]["input_tokens"] == 100
+    assert metadata["monitoring"]["generation"]["provider_name"] == "Provider A"
     assert metadata["monitoring"]["state_snapshot"] == {
         "available_keys": sorted(
             [
@@ -879,6 +1146,52 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
         "selected_source_count": 2,
     }
     assert "generation" not in metadata["monitoring"]["state_snapshot"]
+
+
+def test_compact_graph_monitoring_metadata_keeps_only_explainable_plan_fields():
+    metadata = compact_graph_monitoring_metadata(
+        final_state={
+            "route": "vectordb",
+            "retrieval_plan": {
+                "type": "company_comparison",
+                "execution_mode": "send",
+                "fallback_mode": "sequential_reference",
+                "selection_mode": "latest_per_target",
+                "preflight": "active_report_latest_per_target",
+                "target_names": ["삼성전자", "SK하이닉스"],
+                "candidate_budget_per_target": 4,
+                "union_candidate_limit": 60,
+                "final_budget": 20,
+                "shared_filters": {"report_type": "company"},
+                "internal_only": "do-not-persist",
+            },
+            "vector_outcome": "complete",
+            "vector_retryable": False,
+            "monitoring_metrics": {
+                "comparison": {
+                    "status": "complete",
+                    "execution_mode": "send",
+                }
+            },
+        },
+        latency_seconds=2.0,
+        rerank_info=[],
+    )
+
+    assert metadata["retrieval_plan"] == {
+        "type": "company_comparison",
+        "execution_mode": "send",
+        "fallback_mode": "sequential_reference",
+        "selection_mode": "latest_per_target",
+        "preflight": "active_report_latest_per_target",
+        "candidate_budget_per_target": 4,
+        "final_budget": 20,
+        "union_candidate_limit": 60,
+        "target_names": ["삼성전자", "SK하이닉스"],
+    }
+    assert metadata["vector_outcome"] == "complete"
+    assert metadata["vector_retryable"] is False
+    assert metadata["monitoring"]["comparison"]["execution_mode"] == "send"
 
 
 def test_compact_graph_monitoring_metadata_handles_no_result_none_rerank_info():

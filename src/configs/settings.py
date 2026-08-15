@@ -285,6 +285,19 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
             ),
         ),
         (
+            "VECTOR_RETRIEVAL_CONCURRENCY",
+            ConfigSpec(
+                name="VECTOR_RETRIEVAL_CONCURRENCY",
+                default=5,
+                parser=as_int,
+                description=(
+                    "Process-wide safety ceiling for concurrent retrieval branches; "
+                    "each comparison uses min(target count, this value)."
+                ),
+                section="Search",
+            ),
+        ),
+        (
             "PARENT_CHUNK_SIZE",
             ConfigSpec(
                 name="PARENT_CHUNK_SIZE",

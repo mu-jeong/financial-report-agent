@@ -86,7 +86,17 @@ MONITORING_VIEW_FUNCTIONS = {
     "_write_and_record_candidate_handoff",
     "_render_candidate_lifecycle",
     "_render_issue_report_monitoring",
+    "_chat_execution_label",
+    "_chat_target_coverage_label",
+    "_chat_grounding_label",
+    "_chat_execution_status_label",
+    "_chat_scope_caption",
+    "_chat_performance_timing_rows",
+    "_chat_technical_sections",
+    "_render_chat_answer_performance",
     "_render_global_chat_diagnostics",
+    "_format_chat_token_count",
+    "_format_chat_token_rate",
     "_render_chat_latency_table",
     "_render_global_monitoring_area",
     "render_chat_monitoring_page",
@@ -187,6 +197,7 @@ EXPLICIT_WIDGET_KEYS = {
     "f'save_thread_{thread_id}'",
     "f'thread_{thread_id}'",
     "f'chat_monitoring_selected_response_{current_id}'",
+    "f'chat_monitoring_detail_{current_id}_{selected_message_id}'",
     "f'{key_prefix}_open_pdf_{index}'",
 }
 
@@ -314,6 +325,57 @@ def test_monitoring_view_pure_helpers_preserve_current_outputs():
             "alpha": {"files": 1, "success": 1},
         }
     )[0]["engine"] == "alpha"
+
+
+def test_chat_monitoring_helpers_prioritize_persisted_execution_evidence():
+    helpers = _load_helpers(
+        MONITORING_VIEWS_PATH,
+        "_chat_execution_label",
+        "_chat_target_coverage_label",
+        "_chat_grounding_label",
+        "_chat_execution_status_label",
+        "_chat_scope_caption",
+        "_chat_technical_sections",
+    )
+
+    execution = {
+        "strategy": "company_comparison",
+        "execution_mode": "send",
+        "requested_target_count": 2,
+        "available_target_count": 2,
+        "retrieval_concurrency_limit": 2,
+        "observed_peak_retrieval_concurrency": 2,
+    }
+    assert helpers["_chat_execution_label"](execution) == "Send 병렬 실행 (동시성 2)"
+    assert helpers["_chat_target_coverage_label"](execution) == "2/2 성공"
+    assert helpers["_chat_grounding_label"]("linked") == "연결됨"
+    assert helpers["_chat_execution_status_label"]("partial") == "일부 대상 누락"
+    assert helpers["_chat_execution_label"](
+        {"strategy": "company_comparison"}
+    ) == "복수 기업 비교 · 방식 미계측"
+    assert helpers["_chat_scope_caption"](
+        {
+            "scope": {
+                "search_filters": {
+                    "report_date_start": "2026-08-10",
+                    "report_date_end": "2026-08-15",
+                    "report_type": "company",
+                    "target_names": ["삼성전자", "SK하이닉스"],
+                }
+            }
+        }
+    ) == "검색 범위 · 기간 2026-08-10~2026-08-15 · 유형 기업 · 대상 삼성전자, SK하이닉스"
+    legacy_sections = helpers["_chat_technical_sections"](
+        {
+            "timing": {"total_seconds": 25.188},
+            "used_chunks": None,
+        }
+    )
+    assert legacy_sections["timing"] == {"total_seconds": 25.188}
+    assert legacy_sections["generation_performance"] == {}
+    assert legacy_sections["execution"] == {}
+    assert legacy_sections["retrieval_k"] == {}
+    assert legacy_sections["used_chunks"] == []
 
 
 def test_monitoring_exposes_cleanup_backlog_in_user_language():
@@ -466,15 +528,81 @@ def test_chat_monitoring_exposes_turn_observability_and_global_keeps_accuracy():
     assert '"Vector DB 평균 검색시간"' in chat_source
     assert "답변 정확도" not in chat_source
     assert "_latest_v2_accuracy_run" not in chat_source
-    assert "_render_global_chat_diagnostics(current_id, messages)" in chat_source
-    assert "처리시간 · state · 검색 k · 사용 근거" in chat_source
+    assert "performance_first=True" in chat_source
+    assert "답변별 성능과 근거" in chat_source
+    assert "대화 전체 속도 추이" in chat_source
     assert "_render_global_chat_diagnostics" in source
+    assert "Send 병렬 실행" in source
+    assert "Send 직렬 실행" in source
+    assert "선택 답변 총시간" in source
+    assert "대상별 근거" in source
+    assert "병목 확인" in source
+    assert "모델 생성" in source
+    assert "입력 토큰" in source
+    assert "출력 토큰" in source
+    assert "최초 토큰" in source
+    assert "실제 provider" in source
+    assert "초당 생성 토큰" in source
+    assert "대상별 검색" in source
+    assert "답변에 사용된 문서" in source
+    assert '"technical": "기술 세부정보"' in source
+    assert 'diagnostic_view == "technical"' in source
     assert "detail[\"retrieval_k\"]" in source
+    performance_start = source.index("def _render_chat_answer_performance")
+    performance_end = source.index("\ndef _render_global_chat_diagnostics", performance_start)
+    performance_source = source[performance_start:performance_end]
+    assert "_chat_technical_sections(detail)" in performance_source
+    assert 'technical["generation_performance"]' in performance_source
+    assert 'detail["execution"]' not in performance_source
     assert "detail[\"state_status\"]" in source
     assert "detail[\"used_chunks\"]" in source
     assert "detail[\"used_documents\"]" in source
     assert "_render_chat_latency_table" in chat_source
     assert "_render_answer_metrics" in global_source
+
+
+def test_chat_generation_formatters_keep_missing_values_explicit():
+    helpers = _load_helpers(
+        MONITORING_VIEWS_PATH,
+        "_format_chat_token_count",
+        "_format_chat_token_rate",
+    )
+
+    assert helpers["_format_chat_token_count"](12345) == "12,345"
+    assert helpers["_format_chat_token_count"](None) == "측정 전"
+    assert helpers["_format_chat_token_rate"](42.345) == "42.3 tok/s"
+    assert helpers["_format_chat_token_rate"](None) == "측정 전"
+
+
+def test_chat_execution_label_reports_measured_send_concurrency():
+    execution_label = _load_helpers(
+        MONITORING_VIEWS_PATH,
+        "_chat_execution_label",
+    )["_chat_execution_label"]
+
+    assert execution_label(
+        {
+            "strategy": "company_comparison",
+            "execution_mode": "send",
+            "retrieval_concurrency_limit": 1,
+            "observed_peak_retrieval_concurrency": 1,
+        }
+    ) == "Send 직렬 실행 (동시성 1)"
+    assert execution_label(
+        {
+            "strategy": "company_comparison",
+            "execution_mode": "send",
+            "retrieval_concurrency_limit": 5,
+            "observed_peak_retrieval_concurrency": 3,
+        }
+    ) == "Send 병렬 실행 (동시성 3)"
+    assert execution_label(
+        {
+            "strategy": "company_comparison",
+            "execution_mode": "send",
+            "retrieval_concurrency_limit": 5,
+        }
+    ) == "Send 비교 · 실측 동시성 미계측 (상한 5)"
 
 
 def test_chat_job_and_view_pure_helpers_preserve_current_outputs():

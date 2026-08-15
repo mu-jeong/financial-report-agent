@@ -25,10 +25,17 @@ class State(TypedDict):
     
     # --- 아래 필드들은 라우팅 경로(분기)에 따라 값이 없을 수도 있으므로 Optional 처리 ---
     sql_query: Optional[str]        # RDB에서 사용된 SQL (RDB 경로)
+    sql_params: Optional[tuple]     # RDB 복수 기업 쿼리의 bound parameters
+    rdb_query_shape: Optional[dict] # count/latest/list의 deterministic set query 형태
     rdb_result: Optional[object]       # RDB 조회 결과 (RDB 경로)
     rdb_sources: Optional[list]     # RDB 결과에서 추출한 참고 문서 목록
+    rdb_missing_targets: Optional[list[str]]  # 요청했지만 결과 행이 없던 기업
     rerank_info: Optional[list]     # 재정렬된 문서/검색된 문서 정보 로깅용 (VectorDB 경로)
     monitoring_metrics: Optional[dict]  # Monitoring Mode에서 쓰는 단계별 compact 지표
     generation: Optional[str]       # 최종 답변 (예외 발생 시 등)
     no_vector_results: Optional[bool]
     memory_retry_attempted: Optional[bool]
+    vector_run_id: Optional[str]       # 한 turn 안에서 comparison retry를 묶는 식별자
+    vector_attempt_id: Optional[int]   # VectorDB one-shot retry attempt
+    vector_outcome: Optional[str]      # complete/partial/revision_mismatch 등
+    vector_retryable: Optional[bool]   # comparison 결과의 명시적 retry 계약

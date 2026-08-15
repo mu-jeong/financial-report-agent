@@ -36,6 +36,7 @@ def build_chat_model(temperature: float = 0.2, **kwargs: Any):
         openrouter_provider = {"data_collection": OPENROUTER_DATA_COLLECTION}
     kwargs.setdefault("timeout", DEFAULT_CHAT_REQUEST_TIMEOUT_MS)
     kwargs.setdefault("max_retries", DEFAULT_CHAT_MAX_RETRIES)
+    kwargs.setdefault("stream_usage", True)
     if kwargs["max_retries"] == 0 and "retries" not in kwargs:
         model_kwargs = dict(kwargs.get("model_kwargs") or {})
         model_kwargs.setdefault("retries", None)

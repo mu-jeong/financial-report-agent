@@ -131,15 +131,17 @@ RERANK_MODEL=cohere/rerank-v3.5
 
 ### Chat Monitoring trace viewer
 
-개별 chat monitoring은 마지막 응답 하나만 보여주지 않고, assistant 응답 row에서 디버깅할 턴을 선택하는 trace viewer를 제공합니다. Row에는 직전 user 질문 preview, assistant 답변 preview, route, latency, source 수, 검색 필터, `scope_source`, `scope_decision_reason`, no-result/error 상태, 선택 source 파일명이 포함됩니다.
+개별 chat monitoring은 assistant 응답 row에서 확인할 턴을 선택하는 trace viewer를 제공합니다. 개별 Chat 화면의 row는 상태, 실제 검색 실행 방식, 총시간, 요청 대상별 근거, 인용 연결, 질문을 우선 표시합니다. 전역 Monitoring의 응답 원인 확인 화면은 기존 route, k, state 중심 row를 유지합니다.
 
-선택된 응답은 사용 빈도에 따라 세 개의 tab으로 나뉘어 표시됩니다.
+개별 Chat에서 선택된 응답은 다음 정보 우선순위로 표시됩니다.
 
-1. Trace summary: 원질문, rewrite 결과, follow-up 여부, route, scope source/reason, search filter, source 수, prior/search scope file count, citation 유효성 같은 핵심 진단값을 한 번에 보여줍니다. Debug hint와 직전 성공 응답 대비 diff도 이 tab에서 함께 확인합니다.
-2. Scope / routing: `Query rewrite / follow-up`, `Scope / filters`, `Routing`의 상세 JSON을 한 흐름으로 묶어 보여줍니다. 날짜/종목/리포트 유형/file scope가 어떻게 정해졌고 route hint가 어떻게 만들어졌는지 확인하는 개발자용 상세 화면입니다.
-3. Advanced diagnostics: 평소에는 접어둔 `State transitions`, `Retrieval / rerank`, `Answer / citations` 원자료를 expander로 제공합니다. query rewrite 전 `prior_search_scope`와 rewrite/search scope/routing/retrieval 이후 state 변화를 먼저 보고, 후보 수, coverage 적용 여부, score summary, citation 번호/유효성 같은 raw metadata를 필요할 때만 펼쳐 봅니다. Source 표는 다른 화면에서 중복 확인 가능하므로 Advanced diagnostics에서는 노출하지 않습니다.
+1. Answer verdict: 총시간, 검색 실행 방식, 대상별 근거 확보, 인용 연결을 카드로 보여줍니다.
+2. Performance evidence: 실제 계측된 backend 또는 비교 branch 시간만 표로 보여줍니다. 병렬 branch의 가장 느린 검색과 작업시간 합은 서로 다른 값으로 유지합니다.
+3. Retrieval coverage: 복수 기업 비교라면 대상별 상태·후보 수·검색시간·대기시간과 전역 rerank/합성 횟수를 보여줍니다.
+4. Answer evidence: 최종 prompt에 사용된 문서를 대상·발간일·증권사·인용 chunk와 함께 보여줍니다.
+5. Technical details: `기본만 / 이전 응답 비교 / 기술 세부정보` selector에서 명시적으로 선택했을 때만 query rewrite, scope/routing, 검색 k, retrieval/answer/grounding 원자료, prompt chunk, state transitions를 렌더링합니다. 대화 전체 속도 추이도 기본 화면에서 접습니다.
 
-또한 선택 응답과 직전 성공 assistant 응답의 filter/source/retrieval 차이를 비교하고, 날짜 필터 손실, prior scope 미사용, no-result, route/content-intent 불일치, document coverage 미적용 같은 흔한 RAG 실패 패턴은 rule-based debug hint로 노출합니다. 선택한 trace, 직전 응답, diff, debug hint는 `Create issue report with selected trace` 버튼으로 issue report에 바로 저장할 수 있습니다.
+비교 실행 metadata에는 compact retrieval plan과 실제 `execution_mode`, 대상별 상태·후보 수·retrieval/queue 시간, 전역 rerank/합성 횟수를 저장합니다. 운영 그래프의 복수 기업 비교는 항상 LangGraph `Send`를 사용하며, 순차 경로는 동등성 검증용 내부 회귀 테스트로만 유지합니다. UI는 저장된 실행 mode와 실측 동시성을 함께 표시하고, 과거 응답은 실행 방식을 추정하지 않습니다. 또한 날짜 필터 손실, prior scope 미사용, no-result, route/content-intent 불일치, document coverage 미적용 같은 흔한 RAG 실패 패턴은 rule-based debug hint로 노출합니다.
 
 ## 10. 참고 문서 네비게이션과 PDF 위치 이동 한계
 

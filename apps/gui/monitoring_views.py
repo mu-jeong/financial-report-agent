@@ -2009,7 +2009,417 @@ def _render_issue_report_monitoring() -> None:
         st.dataframe(latest_candidate_run.get("results") or [], width="stretch", hide_index=True)
 
 
-def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> None:
+def _chat_execution_label(execution: dict, route: str | None = None) -> str:
+    strategy = execution.get("strategy") or execution.get("execution_strategy")
+    mode = execution.get("execution_mode")
+    if strategy == "company_comparison":
+        if mode == "send":
+            observed = execution.get("observed_peak_retrieval_concurrency")
+            effective = execution.get("retrieval_concurrency_limit")
+            if observed == 1 or (observed is None and effective == 1):
+                return "Send 직렬 실행 (동시성 1)"
+            if isinstance(observed, int) and observed > 1:
+                return f"Send 병렬 실행 (동시성 {observed})"
+            if isinstance(effective, int) and effective > 1:
+                return f"Send 비교 · 실측 동시성 미계측 (상한 {effective})"
+            return "Send 비교 · 실측 동시성 미계측"
+        if mode == "sequential_reference":
+            return "순차 비교"
+        return "복수 기업 비교 · 방식 미계측"
+    if strategy == "vectordb" or route == "vectordb":
+        return "Vector DB 검색"
+    if strategy == "rdb" or route == "rdb":
+        return "RDB 조회"
+    return "측정 전"
+
+
+def _chat_target_coverage_label(execution: dict, source_count: int | None = None) -> str:
+    requested = execution.get("requested_target_count")
+    available = execution.get("available_target_count")
+    if isinstance(requested, int) and isinstance(available, int):
+        return f"{available}/{requested} 성공"
+    if isinstance(source_count, int):
+        return f"문서 {source_count}개"
+    return "측정 전"
+
+
+def _chat_grounding_label(status: str | None) -> str:
+    return {
+        "linked": "연결됨",
+        "partial": "부분 연결",
+        "unavailable": "근거 없음",
+        "not_applicable": "해당 없음",
+        "not_evaluated": "평가 안 함",
+        "not_measured": "측정 전",
+    }.get(status, "측정 전")
+
+
+def _chat_execution_status_label(status: str | None) -> str:
+    return {
+        "complete": "전체 대상 성공",
+        "partial": "일부 대상 누락",
+        "insufficient": "비교 근거 부족",
+        "all_failed": "전체 검색 실패",
+        "revision_mismatch": "revision 불일치",
+    }.get(status, "상태 미계측")
+
+
+def _chat_scope_caption(detail: dict) -> str:
+    filters = (detail.get("scope") or {}).get("search_filters") or {}
+    parts: list[str] = []
+    start = filters.get("report_date_start")
+    end = filters.get("report_date_end")
+    if start or end:
+        parts.append(f"기간 {start or '-'}~{end or '-'}")
+    report_type = {
+        "company": "기업",
+        "industry": "산업",
+        "economy": "경제",
+    }.get(filters.get("report_type"), filters.get("report_type"))
+    if report_type:
+        parts.append(f"유형 {report_type}")
+    targets = filters.get("target_names") or []
+    if not targets and filters.get("target_name"):
+        targets = [filters["target_name"]]
+    if isinstance(targets, list) and targets:
+        parts.append(f"대상 {', '.join(str(target) for target in targets)}")
+    return "검색 범위 · " + " · ".join(parts) if parts else "검색 범위가 기록되지 않았습니다."
+
+
+def _chat_performance_timing_rows(detail: dict) -> list[dict]:
+    timing = detail.get("timing") or {}
+    branch_timing = (detail.get("execution") or {}).get("branch_timing") or {}
+    specs = (
+        ("전체 응답", timing.get("total_seconds"), "질문 제출부터 답변 저장까지"),
+        (
+            "비교 사전선택",
+            timing.get("comparison_preflight_seconds"),
+            "revision 고정·최신 문서 확정",
+        ),
+        (
+            "Vector DB 검색",
+            timing.get("vector_search_seconds"),
+            "단일 검색 또는 비교 branch의 실제 경과시간",
+        ),
+        (
+            "답변 합성",
+            timing.get("answer_synthesis_seconds"),
+            "최종 context를 사용한 LLM 호출",
+        ),
+        (
+            "미분류 시간",
+            timing.get("unattributed_seconds"),
+            "전체시간에서 계측 구간을 제외한 값",
+        ),
+        ("RDB 조회", timing.get("rdb_query_seconds"), "SQL 검증·실행·결과 반환"),
+        (
+            "가장 느린 대상 검색",
+            branch_timing.get("slowest_retrieval_seconds"),
+            "복수 기업 branch 중 최댓값",
+        ),
+        (
+            "대상 검색 작업 합",
+            branch_timing.get("total_retrieval_work_seconds"),
+            "병렬 branch 작업시간 합계",
+        ),
+        (
+            "최대 검색 대기",
+            branch_timing.get("max_queue_wait_seconds"),
+            "동시성 제한 대기 최댓값",
+        ),
+    )
+    return [
+        {"구간": label, "시간": _format_chat_duration(value), "측정 경계": boundary}
+        for label, value, boundary in specs
+        if isinstance(value, (int, float))
+    ]
+
+
+def _chat_technical_sections(detail: dict) -> dict:
+    """Normalize partial or legacy trace detail before rendering raw sections."""
+
+    dict_sections = (
+        "timing",
+        "generation_performance",
+        "execution",
+        "retrieval_k",
+        "query_rewrite",
+        "scope",
+        "routing",
+        "retrieval",
+        "answer",
+        "grounding",
+        "state_status",
+        "state_transitions",
+    )
+    sections = {
+        key: detail.get(key) if isinstance(detail.get(key), dict) else {}
+        for key in dict_sections
+    }
+    sections["used_chunks"] = (
+        detail.get("used_chunks")
+        if isinstance(detail.get("used_chunks"), list)
+        else []
+    )
+    return sections
+
+
+def _render_chat_answer_performance(
+    detail: dict,
+    *,
+    trace_summary: dict,
+    diff: dict,
+    hints: list[str],
+    current_id: str,
+    selected_message_id: object,
+) -> None:
+    execution = detail.get("execution") or {}
+    timing = detail.get("timing") or {}
+    grounding = detail.get("grounding") or {}
+    answer = detail.get("answer") or {}
+
+    st.markdown("#### 선택 답변 상태")
+    columns = st.columns(4)
+    metric_specs = (
+        (
+            "선택 답변 총시간",
+            _format_chat_duration(timing.get("total_seconds")),
+            "질문 제출~답변 저장",
+        ),
+        (
+            "검색 실행",
+            _chat_execution_label(execution, (detail.get("routing") or {}).get("route")),
+            _chat_execution_status_label(execution.get("status")),
+        ),
+        (
+            "대상별 근거",
+            _chat_target_coverage_label(execution, answer.get("source_count")),
+            f"사용 문서 {len(detail.get('used_documents') or detail.get('rdb_evidence') or [])}개",
+        ),
+        (
+            "인용 연결",
+            _chat_grounding_label(grounding.get("status")),
+            "의미 정확도 평가는 아님",
+        ),
+    )
+    for column, (label, value, caption) in zip(columns, metric_specs, strict=True):
+        with column:
+            st.metric(label, value)
+            st.caption(caption)
+    st.caption(_chat_scope_caption(detail))
+    latest_selection = execution.get("latest_selection") or {}
+    if latest_selection.get("mode") == "latest_per_target":
+        requested = latest_selection.get("requested_target_count")
+        cited = latest_selection.get("cited_target_count")
+        cited_label = cited if cited is not None else "측정 전"
+        st.caption(
+            "최신 문서 · "
+            f"확정 {latest_selection.get('resolved_target_count', 0)}/{requested} · "
+            f"prompt 반영 {latest_selection.get('context_target_count', 0)}/{requested} · "
+            f"답변 인용 {cited_label}/{requested}"
+        )
+
+    comparison_status = execution.get("status")
+    if hints:
+        for hint in hints:
+            st.warning(hint)
+    elif comparison_status in {"partial", "insufficient", "all_failed", "revision_mismatch"}:
+        st.warning(f"비교 검색 상태를 확인하세요: {_chat_execution_status_label(comparison_status)}")
+    elif grounding.get("status") in {"partial", "unavailable"}:
+        st.warning(f"답변 근거 연결 상태를 확인하세요: {_chat_grounding_label(grounding.get('status'))}")
+    else:
+        st.success("검색 범위와 근거 연결에서 자동 감지된 흔한 문제는 없습니다.")
+
+    for gap in execution.get("measurement_gaps") or []:
+        if gap == "execution_mode_not_measured":
+            st.info("이 응답에는 비교 실행 방식이 저장되지 않아 Send 적용 여부를 단정할 수 없습니다.")
+        elif gap == "comparison_branch_timing_not_measured":
+            st.info("이 응답에는 대상별 검색 시간이 없어 총시간의 병목 구간을 판정할 수 없습니다.")
+
+    timing_rows = _chat_performance_timing_rows(detail)
+    st.markdown("#### 병목 확인")
+    if timing_rows:
+        st.dataframe(timing_rows, width="stretch", hide_index=True)
+    else:
+        st.caption("이 응답에는 사용할 수 있는 시간 계측값이 없습니다.")
+    st.caption(
+        "대상 검색 작업 합은 병렬 branch의 작업량 합계이므로 전체 응답시간과 직접 합산하지 않습니다. "
+        "query rewrite·rerank 시간이 따로 기록되지 않으면 해당 구간은 병목으로 단정하지 않습니다."
+    )
+
+    generation = detail.get("generation_performance") or {}
+    st.markdown("#### 모델 생성")
+    generation_columns = st.columns(5)
+    generation_specs = (
+        (
+            "입력 토큰",
+            _format_chat_token_count(generation.get("input_tokens")),
+            "모델에 전달된 prompt",
+        ),
+        (
+            "출력 토큰",
+            _format_chat_token_count(generation.get("output_tokens")),
+            "모델이 생성한 completion",
+        ),
+        (
+            "최초 토큰",
+            _format_chat_duration(generation.get("time_to_first_token_seconds")),
+            "요청 시작~첫 출력 chunk",
+        ),
+        (
+            "실제 provider",
+            generation.get("provider_name") or "측정 전",
+            f"gateway {generation.get('gateway_provider') or '미확인'}",
+        ),
+        (
+            "초당 생성 토큰",
+            _format_chat_token_rate(generation.get("output_tokens_per_second")),
+            "요청 시작~완료 기준",
+        ),
+    )
+    for column, (label, value, caption) in zip(
+        generation_columns,
+        generation_specs,
+        strict=True,
+    ):
+        with column:
+            st.metric(label, value)
+            st.caption(caption)
+    st.caption(
+        f"모델 {generation.get('model_name') or '미확인'} · "
+        f"생성 호출 {generation.get('call_count') if generation.get('call_count') is not None else '측정 전'}회 · "
+        f"스트리밍 계측 {generation.get('streamed_call_count') if generation.get('streamed_call_count') is not None else '측정 전'}회"
+    )
+    if generation.get("status") == "not_measured":
+        st.info("이전 응답이거나 생성 계측을 지원하지 않는 경로여서 모델 생성 지표가 없습니다.")
+    elif generation.get("measurement_gaps"):
+        st.caption(
+            "미계측 항목: "
+            + ", ".join(str(item) for item in generation["measurement_gaps"])
+        )
+
+    branches = execution.get("branches") or []
+    if branches:
+        status_labels = {
+            "success": "성공",
+            "success_degraded": "성공(저하)",
+            "no_result": "결과 없음",
+            "failed": "실패",
+            "revision_mismatch": "revision 불일치",
+            "not_measured": "측정 전",
+        }
+        st.markdown("#### 대상별 검색")
+        st.dataframe(
+            [
+                {
+                    "대상": branch.get("target"),
+                    "상태": status_labels.get(branch.get("status"), branch.get("status")),
+                    "후보": branch.get("candidate_count"),
+                    "검색시간": _format_chat_duration(branch.get("retrieval_seconds")),
+                    "대기시간": _format_chat_duration(branch.get("queue_wait_seconds")),
+                }
+                for branch in branches
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption(
+            f"전역 rerank {execution.get('rerank_calls') if execution.get('rerank_calls') is not None else '측정 전'}회 · "
+            f"답변 합성 {execution.get('synthesis_calls') if execution.get('synthesis_calls') is not None else '측정 전'}회 · "
+            f"요청별 동시성 상한 {execution.get('retrieval_concurrency_limit') if execution.get('retrieval_concurrency_limit') is not None else '측정 전'} · "
+            f"실측 최대 {execution.get('observed_peak_retrieval_concurrency') if execution.get('observed_peak_retrieval_concurrency') is not None else '측정 전'}"
+        )
+
+    document_rows = detail.get("used_documents") or []
+    rdb_evidence_rows = detail.get("rdb_evidence") or []
+    st.markdown("#### 답변에 사용된 문서")
+    if document_rows:
+        st.dataframe(
+            [
+                {
+                    "대상": row.get("target_name"),
+                    "발간일": row.get("report_date"),
+                    "제목": row.get("title"),
+                    "증권사": row.get("broker"),
+                    "파일": row.get("file_name"),
+                    "사용 chunk": row.get("chunk_count"),
+                    "인용 chunk": row.get("cited_chunk_count"),
+                }
+                for row in document_rows
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+    elif rdb_evidence_rows:
+        st.dataframe(
+            [
+                {
+                    "대상": row.get("target_name"),
+                    "발간일": row.get("report_date"),
+                    "제목": row.get("title"),
+                    "증권사": row.get("broker"),
+                    "파일": row.get("file_name"),
+                }
+                for row in rdb_evidence_rows
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.caption("이 답변에 연결된 문서 근거가 없습니다.")
+
+    diagnostic_view = st.segmented_control(
+        "추가 진단",
+        options=["overview", "diff", "technical"],
+        default="overview",
+        format_func={
+            "overview": "기본만",
+            "diff": "이전 응답 비교",
+            "technical": "기술 세부정보",
+        }.__getitem__,
+        key=f"chat_monitoring_detail_{current_id}_{selected_message_id}",
+        width="stretch",
+    )
+    if diagnostic_view == "diff":
+        if diff:
+            st.json(diff)
+        else:
+            st.caption("비교할 이전 성공 응답이 없습니다.")
+    elif diagnostic_view == "technical":
+        technical = _chat_technical_sections(detail)
+        st.markdown("**요약·시간·실행 계획**")
+        st.json(trace_summary)
+        st.json(technical["timing"])
+        st.json(technical["generation_performance"])
+        st.json(technical["execution"])
+        st.markdown("**검색 k·범위·라우팅**")
+        st.json(technical["retrieval_k"])
+        st.json(technical["query_rewrite"])
+        st.json(technical["scope"])
+        st.json(technical["routing"])
+        st.markdown("**검색·답변·근거 연결**")
+        st.json(technical["retrieval"])
+        st.json(technical["answer"])
+        st.json(technical["grounding"])
+        if technical["used_chunks"]:
+            st.markdown("**prompt에 사용한 chunk**")
+            st.dataframe(
+                technical["used_chunks"],
+                width="stretch",
+                hide_index=True,
+            )
+        st.markdown("**state 처리 흐름**")
+        st.json(technical["state_status"])
+        st.json(technical["state_transitions"])
+        st.caption("청크 본문은 저장하지 않고 안정적 ID·순위·점수만 표시합니다.")
+
+
+def _render_global_chat_diagnostics(
+    current_id: str,
+    messages: list[dict],
+    *,
+    performance_first: bool = False,
+) -> None:
     rows = monitoring.build_message_monitoring_rows(messages)
     if rows:
         state_labels = {
@@ -2026,8 +2436,28 @@ def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> No
             "not_evaluated": "평가하지 않음",
             "not_measured": "측정 전",
         }
-        st.dataframe(
-            [
+        if performance_first:
+            table_rows = [
+                {
+                    "발생 시각": row.get("created_at"),
+                    "상태": state_labels.get(
+                        row.get("state_status"), row.get("state_status") or "측정 전"
+                    ),
+                    "검색 실행": _chat_execution_label(row, row.get("route")),
+                    "총시간": _format_chat_duration(row.get("latency_seconds")),
+                    "대상별 근거": _chat_target_coverage_label(
+                        row, row.get("source_count")
+                    ),
+                    "인용 연결": grounding_labels.get(
+                        row.get("grounding_status"),
+                        row.get("grounding_status") or "측정 전",
+                    ),
+                    "질문": row.get("user_question_preview"),
+                }
+                for row in rows
+            ]
+        else:
+            table_rows = [
                 {
                     "발생 시각": row.get("created_at"),
                     "상태": row.get("status"),
@@ -2054,10 +2484,8 @@ def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> No
                     "질문": row.get("user_question_preview"),
                 }
                 for row in rows
-            ],
-            width="stretch",
-            hide_index=True,
-        )
+            ]
+        st.dataframe(table_rows, width="stretch", hide_index=True)
     else:
         st.caption("확인할 assistant 응답이 없습니다.")
         return
@@ -2110,6 +2538,16 @@ def _render_global_chat_diagnostics(current_id: str, messages: list[dict]) -> No
         diff=diff,
         hints=hints,
     )
+    if performance_first:
+        _render_chat_answer_performance(
+            detail,
+            trace_summary=trace_summary,
+            diff=diff,
+            hints=hints,
+            current_id=current_id,
+            selected_message_id=selected_message_id,
+        )
+        return
     st.markdown("#### 자동 확인 결과")
     if hints:
         for hint in hints:
@@ -2180,6 +2618,16 @@ def _format_chat_duration(seconds: float | None) -> str:
     return f"{seconds:.2f}초"
 
 
+def _format_chat_token_count(value: int | None) -> str:
+    return f"{value:,}" if isinstance(value, int) else "측정 전"
+
+
+def _format_chat_token_rate(value: float | None) -> str:
+    if not isinstance(value, (int, float)):
+        return "측정 전"
+    return f"{float(value):.1f} tok/s"
+
+
 def _render_chat_latency_table(messages: list[dict]) -> None:
     rows = monitoring.build_chat_latency_rows(messages)
     if not rows:
@@ -2206,49 +2654,50 @@ def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
     """Render current-thread Native V2 timing and turn evidence."""
     st.header("답변 모니터링")
     st.caption(
-        f"현재 대화: {current_thread['name']} · 속도 집계는 성공한 Native V2 응답 기준"
+        f"현재 대화: {current_thread['name']} · 선택한 답변의 속도·검색 실행·근거를 우선 표시합니다."
     )
     messages = conversation_store.list_messages(current_id)
-    summary = monitoring.summarize_chat_latency_metrics(messages)
-    columns = st.columns(4)
-    metric_specs = (
-        (
-            "최근 답변 총시간",
-            summary.get("latest_response_seconds"),
-            "가장 최근 성공 응답",
-        ),
-        (
-            "현재 대화 평균",
-            summary.get("avg_response_seconds"),
-            f"표본 {int(summary.get('response_sample_count') or 0)}건",
-        ),
-        (
-            "RDB 평균 조회시간",
-            summary.get("avg_rdb_seconds"),
-            f"표본 {int(summary.get('rdb_sample_count') or 0)}건",
-        ),
-        (
-            "Vector DB 평균 검색시간",
-            summary.get("avg_vector_seconds"),
-            f"표본 {int(summary.get('vector_sample_count') or 0)}건",
-        ),
-    )
-    for column, (label, value, caption) in zip(columns, metric_specs, strict=True):
-        with column:
-            st.metric(label, _format_chat_duration(value))
-            st.caption(caption)
-
-    st.markdown("#### 응답별 시간")
-    _render_chat_latency_table(messages)
-
-    st.markdown("#### 처리시간 · state · 검색 k · 사용 근거")
+    st.markdown("#### 답변별 성능과 근거")
     st.caption(
-        "응답 turn을 선택하면 처리속도, 답변에 사용된 compact state, "
-        "검색 단계별 k와 Vector DB prompt chunk·문서 또는 RDB 참고 문서를 "
-        "확인할 수 있습니다. "
-        "이 화면의 근거 연결 상태는 의미 정확도 점수가 아닙니다."
+        "응답을 선택하면 총시간, 실제 검색 실행 방식, 대상별 검색 성공, "
+        "답변에 연결된 문서를 바로 확인할 수 있습니다."
     )
-    _render_global_chat_diagnostics(current_id, messages)
+    _render_global_chat_diagnostics(
+        current_id,
+        messages,
+        performance_first=True,
+    )
+
+    with st.expander("대화 전체 속도 추이", expanded=False):
+        summary = monitoring.summarize_chat_latency_metrics(messages)
+        columns = st.columns(4)
+        metric_specs = (
+            (
+                "최근 답변 총시간",
+                summary.get("latest_response_seconds"),
+                "가장 최근 성공 응답",
+            ),
+            (
+                "현재 대화 평균",
+                summary.get("avg_response_seconds"),
+                f"표본 {int(summary.get('response_sample_count') or 0)}건",
+            ),
+            (
+                "RDB 평균 조회시간",
+                summary.get("avg_rdb_seconds"),
+                f"표본 {int(summary.get('rdb_sample_count') or 0)}건",
+            ),
+            (
+                "Vector DB 평균 검색시간",
+                summary.get("avg_vector_seconds"),
+                f"표본 {int(summary.get('vector_sample_count') or 0)}건",
+            ),
+        )
+        for column, (label, value, caption) in zip(columns, metric_specs, strict=True):
+            with column:
+                st.metric(label, _format_chat_duration(value))
+                st.caption(caption)
+        _render_chat_latency_table(messages)
 
 
 def _render_global_monitoring_area(

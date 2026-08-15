@@ -1,4 +1,5 @@
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.types import Overwrite
 
 import src.graphs.main_graph as main_graph
 
@@ -42,7 +43,55 @@ def test_final_response_node_returns_only_new_message_delta(monkeypatch):
 
     assert result["generation"] == "도구 결과를 반영한 최종 답변"
     assert result["messages"] == [AIMessage(content="도구 결과를 반영한 최종 답변")]
+    assert result["monitoring_metrics"]["generation"]["call_count"] == 1
+    assert result["monitoring_metrics"]["generation"]["calls"][0]["phase"] == (
+        "tool_followup_answer"
+    )
     assert "chat_history" not in result
+
+
+def test_final_response_node_merges_tool_followup_with_initial_generation(monkeypatch):
+    monkeypatch.setattr(
+        "src.llms.factory.build_chat_model",
+        lambda temperature=0.2, **kwargs: FakeChatModel(),
+    )
+    initial_call = {
+        "streamed": False,
+        "request_ns": 100,
+        "after_first_token_ns": None,
+        "time_to_first_token_ns": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "cache_read_tokens": None,
+        "reasoning_tokens": None,
+        "provider_name": None,
+        "gateway_provider": None,
+        "model_name": None,
+        "router_metadata_status": "unsupported",
+        "phase": "vectordb_answer",
+    }
+    result = main_graph.final_response_node(
+        {
+            "question": "주가까지 반영해줘",
+            "messages": [
+                HumanMessage(content="검색 문맥"),
+                ToolMessage(content="최근 주가", tool_call_id="call-1"),
+            ],
+            "monitoring_metrics": {
+                "retrieval": {"source_count": 1},
+                "generation": {"calls": [initial_call]},
+            },
+        }
+    )
+
+    assert result["monitoring_metrics"]["retrieval"] == {"source_count": 1}
+    generation = result["monitoring_metrics"]["generation"]
+    assert generation["call_count"] == 2
+    assert [call["phase"] for call in generation["calls"]] == [
+        "vectordb_answer",
+        "tool_followup_answer",
+    ]
 
 
 def test_final_response_node_uses_existing_generation_without_messages():
@@ -66,12 +115,29 @@ def test_vectordb_no_result_retries_once_without_memory():
     assert not main_graph.should_retry_vectordb_without_memory(
         {"no_vector_results": True, "memory_retry_attempted": True}
     )
+    assert main_graph.should_retry_vectordb_without_memory(
+        {
+            "no_vector_results": True,
+            "memory_retry_attempted": False,
+            "vector_retryable": True,
+        }
+    )
+    assert not main_graph.should_retry_vectordb_without_memory(
+        {
+            "no_vector_results": True,
+            "memory_retry_attempted": False,
+            "vector_retryable": False,
+        }
+    )
 
 
 def test_build_graph_uses_memory_checkpointer_for_thread_state():
     app = main_graph.build_graph()
 
     assert app.checkpointer is not None
+    assert "vector_dispatcher" in app.get_graph().nodes
+    assert "company_comparison" in app.get_graph().nodes
+    assert "company_comparison_sequential" not in app.get_graph().nodes
 
 
 def test_final_response_node_commits_active_scope_for_next_turn():
@@ -129,6 +195,8 @@ def test_clear_short_term_memory_retry_keeps_metadata_filters():
                 "report_date_end": "2026-06-21",
             },
             "generation": "지정된 조건에 맞는 임베딩 완료 리포트를 찾지 못했습니다.",
+            "messages": [HumanMessage(content="stale")],
+            "vector_attempt_id": 0,
         }
     )
 
@@ -138,3 +206,105 @@ def test_clear_short_term_memory_retry_keeps_metadata_filters():
     assert result["generation"] is None
     assert result["no_vector_results"] is False
     assert result["memory_retry_attempted"] is True
+    assert result["vector_attempt_id"] == 1
+    assert result["messages"] == Overwrite([])
+
+
+def test_turn_prepare_resets_only_volatile_turn_state(monkeypatch):
+    monkeypatch.setattr(main_graph, "uuid4", lambda: "run-2")
+
+    result = main_graph.turn_prepare_node(
+        {
+            "question": "새 질문",
+            "active_scope": {"search_filters": {"target_name": "A"}},
+            "generation": "이전 답변",
+            "messages": [HumanMessage(content="이전 도구 문맥")],
+            "retrieval_plan": {"type": "old"},
+            "industry_lookup_context": {"company_names": ["old"]},
+            "rdb_sources": [{"file_name": "old.pdf"}],
+            "rdb_query_shape": {"type": "count_by_target"},
+            "rdb_missing_targets": ["old"],
+        }
+    )
+
+    assert result["messages"] == Overwrite([])
+    assert result["generation"] is None
+    assert result["retrieval_plan"] is None
+    assert result["industry_lookup_context"] is None
+    assert result["rdb_sources"] is None
+    assert result["rdb_query_shape"] is None
+    assert result["rdb_missing_targets"] is None
+    assert result["vector_run_id"] == "run-2"
+    assert result["vector_attempt_id"] == 0
+    assert "active_scope" not in result
+
+
+def test_vector_dispatcher_always_selects_send_and_scope_reduction():
+    base = {
+        "search_filters": {"target_names": ["A", "B"]},
+        "retrieval_plan": {
+            "type": "company_comparison",
+            "target_names": ["A", "B"],
+            "execution_mode": "send",
+        },
+    }
+    assert main_graph.select_vector_execution(base) == "company_comparison"
+
+    legacy_reference = {
+        **base,
+        "retrieval_plan": {
+            **base["retrieval_plan"],
+            "execution_mode": "sequential_reference",
+        },
+    }
+    assert main_graph.select_vector_execution(legacy_reference) == "company_comparison"
+
+    too_many = {
+        "retrieval_plan": {
+            "type": "too_many_targets",
+            "target_names": list("ABCDEF"),
+            "max_targets": 5,
+        }
+    }
+    assert main_graph.select_vector_execution(too_many) == "too_many_targets"
+    result = main_graph.too_many_targets_node(too_many)
+    assert result["vector_outcome"] == "too_many_targets"
+    assert result["vector_retryable"] is False
+    assert "최대 5개" in result["generation"]
+
+
+def test_retry_clears_pinned_revision_but_preserves_comparison_plan():
+    result = main_graph.clear_short_term_memory_retry_node(
+        {
+            "question": "A와 B 비교",
+            "vector_attempt_id": 4,
+            "retrieval_plan": {
+                "type": "company_comparison",
+                "target_names": ["A", "B"],
+                "comparison_id": "run-1",
+                "attempt_id": "4",
+                "expected_revision": {"snapshot_id": "old"},
+                "execution_mode": "send",
+            },
+        }
+    )
+
+    assert result["vector_attempt_id"] == 5
+    assert result["retrieval_plan"] == {
+        "type": "company_comparison",
+        "target_names": ["A", "B"],
+        "comparison_id": "run-1",
+        "execution_mode": "send",
+    }
+
+
+def test_final_response_always_names_missing_rdb_targets():
+    result = main_graph.final_response_node(
+        {
+            "question": "A와 B 최신 리포트",
+            "generation": "A 리포트만 조회됐습니다.",
+            "rdb_missing_targets": ["B"],
+        }
+    )
+
+    assert result["generation"].endswith("조회 결과가 없는 기업: B")

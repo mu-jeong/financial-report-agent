@@ -190,6 +190,68 @@ def test_infer_search_filters_does_not_match_target_inside_broker_name():
     assert filters == {"broker": "한화투자증권"}
 
 
+def test_infer_search_filters_preserves_explicit_target_order_and_deduplicates():
+    filters = infer_search_filters(
+        "삼성전자와 SK하이닉스, 삼성전자를 비교해줘",
+        {
+            "target_name": ["SK하이닉스", "삼성전자", "삼성"],
+            "broker": [],
+            "target_report_types": {
+                "SK하이닉스": ("company",),
+                "삼성전자": ("company",),
+                "삼성": ("company",),
+            },
+        },
+    )
+
+    assert filters == {
+        "target_names": ["삼성전자", "SK하이닉스"],
+        "report_type": "company",
+    }
+
+
+def test_infer_search_filters_resolves_only_unique_safe_suffix_aliases():
+    unique = infer_search_filters(
+        "하이닉스와 삼성 전자를 비교해줘",
+        {
+            "target_name": ["SK하이닉스", "삼성전자"],
+            "broker": [],
+            "target_report_types": {
+                "SK하이닉스": ("company",),
+                "삼성전자": ("company",),
+            },
+        },
+    )
+    ambiguous = infer_search_filters(
+        "하이닉스를 요약해줘",
+        {
+            "target_name": ["SK하이닉스", "AB하이닉스"],
+            "broker": [],
+            "target_report_types": {
+                "SK하이닉스": ("company",),
+                "AB하이닉스": ("company",),
+            },
+        },
+    )
+
+    assert unique["target_names"] == ["SK하이닉스", "삼성전자"]
+    assert "target_name" not in ambiguous
+    assert "target_names" not in ambiguous
+
+
+def test_metadata_matches_accepts_any_target_in_ordered_target_scope():
+    filters = {"target_names": ["삼성전자", "SK하이닉스"], "report_type": "company"}
+
+    assert metadata_matches(
+        {"target_name": "SK하이닉스", "report_type": "company"},
+        filters,
+    )
+    assert not metadata_matches(
+        {"target_name": "LG전자", "report_type": "company"},
+        filters,
+    )
+
+
 def test_infer_search_filters_detects_report_type_keywords():
     filters = infer_search_filters(
         "경제 리포트에서 금리 전망 알려줘",
@@ -1516,4 +1578,149 @@ def test_search_scope_does_not_mark_short_period_target_summary_for_temporal_pla
         }
     )
 
+    assert "retrieval_plan" not in result
+
+
+def test_search_scope_builds_ordered_company_comparison_and_clears_stale_scope(monkeypatch):
+    candidates = {
+        "target_name": ("SK하이닉스", "삼성전자"),
+        "broker": (),
+        "report_month": (),
+        "target_report_types": {
+            "SK하이닉스": ("company",),
+            "삼성전자": ("company",),
+        },
+    }
+    monkeypatch.setattr(metadata_filters_module, "get_metadata_candidates", lambda: candidates)
+    monkeypatch.setattr(search_scope, "get_metadata_candidates", lambda: candidates)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "삼성전자와 SK하이닉스 리포트 내용을 비교 요약해줘",
+            "rewritten_query": "삼성전자와 SK하이닉스 리포트 내용을 비교 요약해줘",
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-08-01",
+                    "report_date_end": "2026-08-12",
+                    "target_name": "이전회사",
+                    "report_type": "company",
+                    "broker": "공통증권",
+                },
+                "file_names": ["stale.pdf"],
+            },
+        }
+    )
+
+    assert result["search_filters"] == {
+        "report_date_start": "2026-08-01",
+        "report_date_end": "2026-08-12",
+        "report_type": "company",
+        "broker": "공통증권",
+        "target_names": ["삼성전자", "SK하이닉스"],
+    }
+    assert result["retrieval_plan"] == {
+        "type": "company_comparison",
+        "targets": ["삼성전자", "SK하이닉스"],
+        "target_names": ["삼성전자", "SK하이닉스"],
+        "shared_filters": {
+            "report_date_start": "2026-08-01",
+            "report_date_end": "2026-08-12",
+            "report_type": "company",
+            "broker": "공통증권",
+        },
+        "union_candidate_limit": 60,
+        "final_budget": search_scope.SEARCH_TOP_K,
+    }
+
+
+def test_company_comparison_latest_intent_builds_deterministic_preflight_plan():
+    plan = search_scope.build_retrieval_plan(
+        "latest reports for A and B",
+        {"report_type": "company", "target_names": ["A", "B"]},
+        has_vector_intent=True,
+    )
+
+    assert plan["selection_mode"] == "latest_per_target"
+    assert plan["preflight"] == "active_report_latest_per_target"
+    assert plan["candidate_budget_per_target"] == 4
+    assert plan["union_candidate_limit"] == 8
+    assert plan["final_budget"] == 8
+
+    document_plan = search_scope.build_retrieval_plan(
+        "A와 B의 최신 문서를 각각 요약해줘",
+        {"report_type": "company", "target_names": ["A", "B"]},
+        has_vector_intent=True,
+    )
+    assert document_plan["selection_mode"] == "latest_per_target"
+
+
+def test_search_scope_reuses_prior_ordered_targets_for_followup(monkeypatch):
+    monkeypatch.setattr(search_scope, "infer_search_filters", lambda query: {})
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "둘의 리스크를 자세히 요약해줘",
+            "rewritten_query": "둘의 리스크를 자세히 요약해줘",
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "target_names": ["삼성전자", "SK하이닉스"],
+                    "report_type": "company",
+                },
+            },
+        }
+    )
+
+    assert result["search_filters"]["target_names"] == ["삼성전자", "SK하이닉스"]
+    assert result["retrieval_plan"]["type"] == "company_comparison"
+
+
+def test_search_scope_marks_six_explicit_targets_without_truncation(monkeypatch):
+    targets = ["회사A", "회사B", "회사C", "회사D", "회사E", "회사F"]
+    candidates = {
+        "target_name": tuple(targets),
+        "broker": (),
+        "report_month": (),
+        "target_report_types": {target: ("company",) for target in targets},
+    }
+    monkeypatch.setattr(metadata_filters_module, "get_metadata_candidates", lambda: candidates)
+    monkeypatch.setattr(search_scope, "get_metadata_candidates", lambda: candidates)
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_node(
+        {
+            "question": "회사A 회사B 회사C 회사D 회사E 회사F 내용을 비교 요약해줘",
+            "rewritten_query": "회사A 회사B 회사C 회사D 회사E 회사F 내용을 비교 요약해줘",
+        }
+    )
+
+    assert result["search_filters"]["target_names"] == targets
+    assert result["retrieval_plan"] == {
+        "type": "too_many_targets",
+        "targets": targets,
+        "target_names": targets,
+        "max_targets": 5,
+    }
+
+
+def test_industry_company_universe_does_not_become_explicit_comparison(monkeypatch):
+    monkeypatch.setattr(search_scope, "infer_search_filters", lambda query: {})
+    monkeypatch.setattr(search_scope, "resolve_temporal_context", lambda query: None)
+
+    result = search_scope.search_scope_merge_node(
+        {
+            "question": "반도체 업종 관련 기업 리포트 내용을 요약해줘",
+            "rewritten_query": "반도체 업종 관련 기업 리포트 내용을 요약해줘",
+            "industry_lookup_context": {
+                "term": "반도체",
+                "company_names": ["삼성전자", "SK하이닉스"],
+            },
+        }
+    )
+
+    assert result["scope_decision"]["reason"] == "industry_company_universe"
+    assert "target_names" not in result["search_filters"]
     assert "retrieval_plan" not in result

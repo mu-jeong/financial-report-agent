@@ -103,10 +103,22 @@ RERANK_PROVIDER=openrouter
 RERANK_MODEL=cohere/rerank-v3.5
 SEARCH_TOP_K=20
 RECENCY_WEIGHT=0.15
+VECTOR_RETRIEVAL_CONCURRENCY=5
 PDF_EXTRACTION_ENGINE=pymupdf
 PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader
 UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 ```
+
+복수 기업 VectorDB 비교는 기본적으로 LangGraph `Send` fan-out을 사용합니다.
+실제 동시성은 `min(질문의 기업 수, VECTOR_RETRIEVAL_CONCURRENCY)`로 정해지며,
+기본값 5에서는 최대 5개 기업을 동시에 검색합니다. 순차 실행은 운영 설정이 아니라
+Send 결과와의 동등성을 검증하는 내부 회귀 테스트에서만 사용합니다.
+
+현재 `langgraph==1.0.9`에서는 로컬 프로세스 내부 `MemorySaver`만 사용합니다.
+checkpoint 입력과 실행 프로세스는 신뢰된 로컬 경계여야 하며, 영속 또는 외부 입력을
+역직렬화하는 checkpointer를 도입해서는 안 됩니다. 그런 저장소를 도입하기 전에는
+반드시 `langgraph>=1.0.10`으로 올리고 전체 graph/checkpoint 회귀 테스트를 다시
+통과시켜야 합니다.
 
 배포 템플릿은 일반 문서와 미임베딩 문서를 먼저 `pymupdf`로 추출하고, PyMuPDF가 실패한 문서만 `opendataloader`로 한 번 재시도합니다. fallback 실행에는 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 이 새 키가 없는 기존 `.env`와 빈 값은 fallback을 비활성화하므로, 사용하려면 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하세요.
 
@@ -282,7 +294,7 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 현재 대화의 최근·평균 응답시간과 RDB·Vector DB 평균 조회시간을 보여주며, 각 turn에서 compact state와 설정/요청/fetch/context k를 확인할 수 있습니다. Vector DB는 prompt에 사용한 chunk·문서 ID와 순위를, RDB는 참고 문서를 별도 근거로 표시합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여줍니다. 상세 화면은 상단의 `운영 모니터링`과 `성능 개선 실험`으로 나뉩니다. 운영 모니터링에는 현재 문제·전역 응답 trace·검색 자료 상태를, 성능 개선 실험에는 정확도 평가·parsing 비교·issue report와 회귀 후보를 둡니다. 회귀 후보의 최소 기대 조건은 운영자가 JSON을 작성하는 대신 LLM 제안을 자연어로 검토·수정해 저장하며, 제안만으로 자동 승인되지는 않습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 선택한 turn의 총시간, 실제 검색 실행 방식, 요청 대상별 근거 확보, 인용 연결을 먼저 보여줍니다. 복수 기업 비교는 저장된 실측 동시성에 따라 `Send 병렬 실행 (동시성 N)` 또는 `Send 직렬 실행 (동시성 1)`로 표시하고 대상별 후보·검색·대기시간을 함께 보여줍니다. 사용 문서는 기본 화면에서 확인하고, 현재 대화 평균·RDB/Vector DB 평균은 접힌 속도 추이에서, 검색 k·compact state·prompt chunk는 `기술 세부정보`를 선택했을 때 확인합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여줍니다. 상세 화면은 상단의 `운영 모니터링`과 `성능 개선 실험`으로 나뉩니다. 운영 모니터링에는 현재 문제·전역 응답 trace·검색 자료 상태를, 성능 개선 실험에는 정확도 평가·parsing 비교·issue report와 회귀 후보를 둡니다. 회귀 후보의 최소 기대 조건은 운영자가 JSON을 작성하는 대신 LLM 제안을 자연어로 검토·수정해 저장하며, 제안만으로 자동 승인되지는 않습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
 
 ### 테스트 방법
 
@@ -319,4 +331,5 @@ python -m pytest -q
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
 - [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.
 - [x] Native V2를 V1 SQLite·FAISS·pickle 경로에서 분리하고 기본 설치의 `langchain-community` 의존성을 제거한 뒤, 일회성 마이그레이션 완료 시 남은 V1 artifacts를 삭제합니다.
-- [ ] 복수 기업 질문을 retrieval-only LangGraph `Send` fan-out과 단일 fan-in·rerank·답변·전역 citation으로 처리합니다.
+- [x] 복수 기업 질문을 retrieval-only LangGraph `Send` fan-out과 단일 fan-in·rerank·답변·전역 citation으로 처리합니다.
+- [ ] 질문별 실행 경로를 효율적으로 구성하기 위한 `Plan Compiler` 도입을 검토합니다.

@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from src.configs.config import SEARCH_TOP_K
 from src.core.company_industry import resolve_report_file_scope_for_companies
 from src.core.followup_scope import resolve_section_followup_scope
 from src.core.metadata_filters import get_metadata_candidates, infer_search_filters, resolve_temporal_context
@@ -37,6 +38,9 @@ TEMPORAL_REPORT_SET_KEYWORDS = (
 )
 LONG_PERIOD_SUMMARY_KEYWORDS = ("정리", "요약")
 LONG_PERIOD_MIN_DAYS = 60
+LATEST_REPORT_KEYWORDS = ("가장 최근", "최신", "최근", "마지막", "latest")
+REPORT_REFERENCE_KEYWORDS = ("리포트", "보고서", "문서", "자료", "report")
+LATEST_REPORT_CHUNKS_PER_TARGET = 4
 
 
 def _normalize_text(value: str) -> str:
@@ -54,6 +58,16 @@ def _is_top_target_request(text: str) -> bool:
 def _is_full_period_request(text: str) -> bool:
     normalized = _normalize_text(text)
     return any(_normalize_text(keyword) in normalized for keyword in FULL_PERIOD_KEYWORDS)
+
+
+def _is_latest_report_request(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(
+        _normalize_text(keyword) in normalized for keyword in LATEST_REPORT_KEYWORDS
+    ) and any(
+        _normalize_text(keyword) in normalized
+        for keyword in REPORT_REFERENCE_KEYWORDS
+    )
 
 
 def _has_valid_date_range(filters: dict | None) -> bool:
@@ -74,10 +88,49 @@ def _date_span_days(filters: dict | None) -> int:
 
 
 def build_retrieval_plan(question: str, filters: dict | None, *, has_vector_intent: bool) -> dict | None:
-    """Choose a VectorDB-internal retrieval strategy for broad temporal summaries."""
-    if not has_vector_intent or not _has_valid_date_range(filters):
+    """Choose a VectorDB-internal retrieval strategy for the resolved scope."""
+    if not has_vector_intent:
         return None
     filters = filters or {}
+    targets = list(dict.fromkeys(filters.get("target_names") or []))
+    if len(targets) >= 6:
+        return {
+            "type": "too_many_targets",
+            "targets": targets,
+            "target_names": targets,
+            "max_targets": 5,
+        }
+    if 2 <= len(targets) <= 5:
+        shared_filters = {
+            key: value
+            for key, value in filters.items()
+            if key not in {"target_name", "target_names", "file_names"}
+        }
+        plan = {
+            "type": "company_comparison",
+            "targets": targets,
+            "target_names": targets,
+            "shared_filters": shared_filters,
+            "union_candidate_limit": 60,
+            "final_budget": SEARCH_TOP_K,
+        }
+        if _is_latest_report_request(question):
+            latest_budget = min(
+                SEARCH_TOP_K,
+                len(targets) * LATEST_REPORT_CHUNKS_PER_TARGET,
+            )
+            plan.update(
+                {
+                    "selection_mode": "latest_per_target",
+                    "preflight": "active_report_latest_per_target",
+                    "candidate_budget_per_target": LATEST_REPORT_CHUNKS_PER_TARGET,
+                    "union_candidate_limit": latest_budget,
+                    "final_budget": latest_budget,
+                }
+            )
+        return plan
+    if not _has_valid_date_range(filters):
+        return None
     if not filters.get("target_name"):
         return None
     normalized = _normalize_text(question)
@@ -188,6 +241,7 @@ def _drop_incompatible_target_filter(filters: dict) -> dict:
     documents where no such exact company target exists.
     """
     cleaned = dict(filters or {})
+    target_names = list(cleaned.get("target_names") or [])
     target_name = cleaned.get("target_name")
     report_type = cleaned.get("report_type")
     report_types = cleaned.get("report_types")
@@ -196,10 +250,26 @@ def _drop_incompatible_target_filter(filters: dict) -> dict:
         if report_type
         else {str(value) for value in (report_types or [])}
     )
-    if not target_name or not requested_report_types:
+    if not (target_name or target_names) or not requested_report_types:
         return cleaned
     target_report_types = get_metadata_candidates().get("target_report_types")
     if not isinstance(target_report_types, dict):
+        return cleaned
+    if target_names:
+        compatible_targets = [
+            value
+            for value in target_names
+            if not (
+                (known_types := tuple(target_report_types.get(value, ())))
+                and requested_report_types.isdisjoint(known_types)
+            )
+        ]
+        cleaned.pop("target_names", None)
+        cleaned.pop("target_name", None)
+        if len(compatible_targets) == 1:
+            cleaned["target_name"] = compatible_targets[0]
+        elif compatible_targets:
+            cleaned["target_names"] = compatible_targets
         return cleaned
     known_report_types = tuple(target_report_types.get(target_name, ()))
     if known_report_types and requested_report_types.isdisjoint(known_report_types):
@@ -216,18 +286,25 @@ def _merge_prior_filters_with_current(prior_filters: dict, current_filters: dict
     """
     merged = dict(prior_filters or {})
     current = dict(current_filters or {})
+    current_targets = list(current.get("target_names") or [])
     prior_target = merged.get("target_name")
     current_target = current.get("target_name")
-    if current_target and prior_target and current_target != prior_target:
+    if current_targets:
+        merged.pop("target_name", None)
+        merged.pop("target_names", None)
+        merged.pop("file_names", None)
+    elif current_target and prior_target and current_target != prior_target:
         if "broker" not in current:
             merged.pop("broker", None)
         merged.pop("file_names", None)
+    if current_target:
+        merged.pop("target_names", None)
     if "report_types" in current:
         merged.pop("report_type", None)
     elif "report_type" in current:
         merged.pop("report_types", None)
     merged.update(current)
-    if "target_name" in current:
+    if {"target_name", "target_names"} & current.keys():
         merged.pop("file_names", None)
     return merged
 
@@ -374,6 +451,7 @@ def search_scope_merge_node(state: State) -> dict:
 
     search_filters = dict(result.get("search_filters") or {})
     search_filters.pop("target_name", None)
+    search_filters.pop("target_names", None)
     search_filters.pop("report_types", None)
     search_filters["report_type"] = "company"
     scope_decision = {
@@ -390,6 +468,7 @@ def search_scope_merge_node(state: State) -> dict:
     result["scope_decision"] = scope_decision
     result["scope_source"] = "industry_company_lookup"
     result.setdefault("routing_context", {})["route_hint"] = None
+    result.pop("retrieval_plan", None)
     return result
 
 

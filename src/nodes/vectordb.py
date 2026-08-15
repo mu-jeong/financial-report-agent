@@ -4,7 +4,7 @@ from datetime import datetime
 
 import numpy as np
 from langchain_core.documents import Document
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.prompts import PromptTemplate
 from src.configs.config import (
     DATA_ROOT,
@@ -21,6 +21,10 @@ from src.graphs.state import State
 from src.nodes.stock_price import stock_price_tools
 from src.llms.embeddings import build_embeddings_model
 from src.llms.factory import build_chat_model
+from src.llms.generation_observability import (
+    invoke_chat_with_observability,
+    merge_generation_metrics,
+)
 from src.retrieval.bootstrap import RetrievalBootstrapError
 from src.retrieval.dispatch import (
     RetrievalDispatchStateError,
@@ -46,6 +50,60 @@ def build_embeddings_fn():
 
 def _requested_candidate_count() -> int:
     return SEARCH_TOP_K * max(SEARCH_CANDIDATE_MULTIPLIER, 1)
+
+
+def _serialize_revision(revision) -> dict:
+    """Return the complete primitive identity for one retrieval read view."""
+    return {
+        "publication_generation": int(
+            getattr(revision, "publication_generation", 0) or 0
+        ),
+        "snapshot_id": getattr(
+            revision,
+            "snapshot_id",
+            getattr(revision, "active_snapshot_id", None),
+        ),
+        "delta_generation": int(getattr(revision, "delta_generation", 0) or 0),
+        "profile_id": getattr(revision, "profile_id", None),
+    }
+
+
+def get_active_retrieval_revision() -> dict:
+    """Pin and report the active Native V2 revision without materializing indexes."""
+    try:
+        dispatch = resolve_retrieval_dispatch(DATA_ROOT)
+    except RetrievalBootstrapError:
+        raise
+    except (
+        OSError,
+        sqlite3.Error,
+        RepositoryError,
+        RetrievalDispatchStateError,
+        ValueError,
+    ) as exc:
+        raise RetrievalDispatchError("retrieval revision inspection failed") from exc
+
+    if dispatch.native is not None:
+        try:
+            with dispatch.native.repository.request(
+                materialize_indexes=False,
+            ) as session:
+                return _serialize_revision(session.revision)
+        except (RepositoryError, OSError, sqlite3.Error, ValueError) as exc:
+            raise RetrievalDispatchError("retrieval revision lease failed") from exc
+
+    selection = dispatch.selection
+    if dispatch.mode == "native" and selection is not None and selection.is_empty:
+        return {
+            "publication_generation": selection.publication_generation,
+            "snapshot_id": selection.active_snapshot_id,
+            "delta_generation": 0,
+            "profile_id": None,
+        }
+    mode = getattr(dispatch, "mode", None) or getattr(selection, "mode", None)
+    raise RetrievalDispatchError(
+        f"unsupported retrieval runtime mode: {mode or 'unknown'}; Native V2 is required"
+    )
 
 
 def _build_passages(docs_with_scores: list[tuple]) -> list[dict]:
@@ -160,6 +218,111 @@ def fetch_report_universe_for_filters(filters: dict | None) -> list[dict]:
     query, params = _report_universe_query(filters)
     with get_connection() as conn:
         return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
+def _latest_reports_query(
+    target_names: list[str] | tuple[str, ...],
+    filters: dict | None,
+) -> tuple[str, list[object]]:
+    """Build one deterministic latest-report query for every requested target."""
+    targets = list(
+        dict.fromkeys(
+            str(target).strip() for target in target_names if str(target).strip()
+        )
+    )
+    if not targets:
+        return "SELECT NULL WHERE 0", []
+
+    filters = filters or {}
+    placeholders = ", ".join("?" for _ in targets)
+    clauses = [f"target_name IN ({placeholders})"]
+    params: list[object] = list(targets)
+
+    report_types = filters.get("report_types")
+    if report_types is not None:
+        normalized_types = [str(report_type) for report_type in report_types]
+        if normalized_types:
+            type_placeholders = ", ".join("?" for _ in normalized_types)
+            clauses.append(f"report_type IN ({type_placeholders})")
+            params.extend(normalized_types)
+        else:
+            clauses.append("1 = 0")
+    elif filters.get("report_type"):
+        clauses.append("report_type = ?")
+        params.append(str(filters["report_type"]))
+
+    brokers = filters.get("brokers")
+    if brokers is not None:
+        normalized_brokers = [str(broker) for broker in brokers]
+        if normalized_brokers:
+            broker_placeholders = ", ".join("?" for _ in normalized_brokers)
+            clauses.append(f"broker IN ({broker_placeholders})")
+            params.extend(normalized_brokers)
+        else:
+            clauses.append("1 = 0")
+    elif filters.get("broker"):
+        clauses.append("broker = ?")
+        params.append(str(filters["broker"]))
+
+    for key, operator in (
+        ("report_date", "="),
+        ("report_date_start", ">="),
+        ("report_date_end", "<="),
+    ):
+        if filters.get(key):
+            clauses.append(f"report_date {operator} ?")
+            params.append(str(filters[key]))
+
+    where_sql = " AND ".join(clauses)
+    return (
+        "WITH ranked AS ("
+        "SELECT report_uid, report_id, report_type, report_date, target_name, "
+        "broker, title, canonical_relative_path, "
+        "ROW_NUMBER() OVER (PARTITION BY target_name "
+        "ORDER BY report_date DESC, report_id DESC, canonical_relative_path ASC) "
+        "AS target_rank "
+        f"FROM main.active_reports WHERE {where_sql}"
+        ") "
+        "SELECT report_uid, report_type, report_date, target_name, broker, title, "
+        "v2_basename(canonical_relative_path) AS file_name, canonical_relative_path "
+        "FROM ranked WHERE target_rank = 1",
+        params,
+    )
+
+
+def fetch_latest_reports_by_target(
+    target_names: list[str] | tuple[str, ...],
+    filters: dict | None = None,
+) -> dict[str, dict[str, object]]:
+    """Resolve the newest active embedded report once per target.
+
+    Vector similarity cannot enforce a metadata maximum. This preflight pins
+    exact report files before comparison branches run; the existing revision
+    check still rejects a publication change that races this read.
+    """
+    targets = list(
+        dict.fromkeys(
+            str(target).strip() for target in target_names if str(target).strip()
+        )
+    )
+    if not targets:
+        return {}
+
+    query, params = _latest_reports_query(targets, filters)
+    connection = None
+    try:
+        connection = get_connection(materialize_reports=False)
+        rows = connection.execute(query, params).fetchall()
+    except RetrievalBootstrapError:
+        raise
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+        raise RetrievalDispatchError("latest-report preflight failed") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    by_target = {str(row["target_name"]): dict(row) for row in rows}
+    return {target: by_target[target] for target in targets if target in by_target}
 
 
 def _month_bucket(report_date: object) -> str:
@@ -571,8 +734,10 @@ def _retrieve_docs_with_scores(
             and selection is not None
             and selection.is_empty
         ):
+            revision = _serialize_revision(selection)
             return [], {
                 "runtime_mode": dispatch.mode,
+                "search_top_k": SEARCH_TOP_K,
                 "requested_k": requested_k,
                 "fetch_k": 0,
                 "native_candidate_count": 0,
@@ -586,6 +751,9 @@ def _retrieve_docs_with_scores(
                 "native_hydration_cache_misses": 0,
                 "snapshot_id": selection.active_snapshot_id,
                 "publication_generation": selection.publication_generation,
+                "delta_generation": 0,
+                "profile_id": None,
+                "revision": revision,
             }
         mode = getattr(dispatch, "mode", None) or getattr(selection, "mode", None)
         raise RetrievalDispatchError(
@@ -608,8 +776,10 @@ def _retrieve_docs_with_scores(
     docs_with_scores = [
         (_native_document(chunk), float(chunk.score)) for chunk in response.results
     ]
+    revision = _serialize_revision(response.revision)
     metrics = {
         "runtime_mode": dispatch.mode,
+        "search_top_k": SEARCH_TOP_K,
         "requested_k": requested_k,
         "fetch_k": response.faiss_fetch_k,
         "native_candidate_count": response.candidate_count,
@@ -623,6 +793,9 @@ def _retrieve_docs_with_scores(
         "native_hydration_cache_misses": response.hydration_cache_misses,
         "snapshot_id": response.revision.snapshot_id,
         "publication_generation": response.revision.publication_generation,
+        "delta_generation": revision["delta_generation"],
+        "profile_id": revision["profile_id"],
+        "revision": revision,
     }
     timings = getattr(response, "timings", None)
     if timings is not None:
@@ -825,7 +998,15 @@ def vectordb_node(state: State) -> dict:
             f"{prompt.format(context=context_text, question=query)}"
         )
     )
-    ai_msg: AIMessage = llm.invoke([tool_context_message])
+    ai_msg, generation_call = invoke_chat_with_observability(
+        llm,
+        [tool_context_message],
+    )
+    generation_metrics = merge_generation_metrics(
+        None,
+        generation_call,
+        phase="vectordb_answer",
+    )
 
     if ai_msg.tool_calls:
         return {
@@ -833,7 +1014,10 @@ def vectordb_node(state: State) -> dict:
             "search_filters": search_filters,
             "no_vector_results": False,
             "messages": [tool_context_message, ai_msg],
-            "monitoring_metrics": {"retrieval": retrieval_metrics},
+            "monitoring_metrics": {
+                "retrieval": retrieval_metrics,
+                "generation": generation_metrics,
+            },
         }
 
     answer = ai_msg.content
@@ -850,5 +1034,8 @@ def vectordb_node(state: State) -> dict:
         "search_filters": search_filters,
         "no_vector_results": False,
         "messages": [tool_context_message, ai_msg],
-        "monitoring_metrics": {"retrieval": retrieval_metrics},
+        "monitoring_metrics": {
+            "retrieval": retrieval_metrics,
+            "generation": generation_metrics,
+        },
     }

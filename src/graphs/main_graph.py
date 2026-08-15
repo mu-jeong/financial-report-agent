@@ -1,7 +1,11 @@
+from uuid import uuid4
+
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Overwrite
 
+from src.core.followup_scope import build_answer_scope_index
 from src.graphs.state import State
 from src.nodes.industry_lookup import industry_lookup_node
 from src.nodes.query_rewrite import query_rewrite_node
@@ -16,7 +20,7 @@ from src.nodes.search_scope import (
 )
 from src.nodes.stock_price import stock_price_tool_node
 from src.nodes.vectordb import vectordb_node
-from src.core.followup_scope import build_answer_scope_index
+from src.nodes.vectordb_comparison import company_comparison_graph
 
 
 def build_active_scope_from_state(state: State) -> dict | None:
@@ -49,9 +53,42 @@ def build_active_scope_from_state(state: State) -> dict | None:
     return active_scope
 
 
+def turn_prepare_node(_state: State) -> dict:
+    """Start a fresh turn without leaking volatile checkpointed output."""
+    return {
+        "messages": Overwrite([]),
+        "generation": None,
+        "rerank_info": None,
+        "monitoring_metrics": None,
+        "no_vector_results": False,
+        "memory_retry_attempted": False,
+        "retrieval_plan": None,
+        "scope_selection_request": None,
+        "scope_decision": None,
+        "scope_prepare": None,
+        "industry_lookup_context": None,
+        "selection_context": None,
+        "routing_context": None,
+        "sql_query": None,
+        "sql_params": None,
+        "rdb_query_shape": None,
+        "rdb_result": None,
+        "rdb_sources": None,
+        "rdb_missing_targets": None,
+        "vector_run_id": str(uuid4()),
+        "vector_attempt_id": 0,
+        "vector_outcome": None,
+        "vector_retryable": None,
+    }
+
+
 def should_retry_vectordb_without_memory(state: State) -> bool:
     """Retry VectorDB search once when history-influenced retrieval found nothing."""
-    return bool(state.get("no_vector_results")) and not bool(state.get("memory_retry_attempted"))
+    retryable = state.get("vector_retryable")
+    no_result = bool(retryable) if retryable is not None else bool(
+        state.get("no_vector_results")
+    )
+    return no_result and not bool(state.get("memory_retry_attempted"))
 
 
 def clear_short_term_memory_retry_node(state: State) -> dict:
@@ -63,24 +100,95 @@ def clear_short_term_memory_retry_node(state: State) -> dict:
     those filters can turn a scoped query like "이번 주" into an all-period
     VectorDB search and mix unrelated reports into the answer.
     """
-    return {
+    result = {
         "rewritten_query": state["question"],
         "generation": None,
         "rerank_info": None,
+        "messages": Overwrite([]),
+        "monitoring_metrics": None,
         "no_vector_results": False,
         "memory_retry_attempted": True,
+        "vector_attempt_id": int(state.get("vector_attempt_id") or 0) + 1,
+        "vector_outcome": None,
+        "vector_retryable": None,
+    }
+    if retrieval_plan := state.get("retrieval_plan"):
+        retry_plan = dict(retrieval_plan)
+        retry_plan.pop("expected_revision", None)
+        retry_plan.pop("attempt_id", None)
+        result["retrieval_plan"] = retry_plan
+    return result
+
+
+def vector_dispatcher_node(_state: State) -> dict:
+    """Stable retry anchor for choosing one VectorDB execution strategy."""
+    return {}
+
+
+def select_vector_execution(state: State) -> str:
+    """Choose single retrieval or the standard dynamic Send comparison."""
+    plan = state.get("retrieval_plan") or {}
+    plan_type = plan.get("type")
+    targets = plan.get("target_names") or plan.get("targets") or []
+    if plan_type == "too_many_targets" or len(targets) > 5:
+        return "too_many_targets"
+    if plan_type != "company_comparison" or not 2 <= len(targets) <= 5:
+        return "vectordb_node"
+    return "company_comparison"
+
+
+def too_many_targets_node(state: State) -> dict:
+    """Ask for scope reduction instead of silently truncating target names."""
+    plan = state.get("retrieval_plan") or {}
+    targets = list(plan.get("target_names") or plan.get("targets") or [])
+    max_targets = int(plan.get("max_targets") or 5)
+    preview = ", ".join(str(target) for target in targets)
+    return {
+        "generation": (
+            f"한 번에 비교할 수 있는 기업은 최대 {max_targets}개입니다. "
+            f"대상을 {max_targets}개 이하로 줄여 다시 질문해 주세요."
+            + (f"\n요청 대상: {preview}" if preview else "")
+        ),
+        "messages": [],
+        "rerank_info": [],
+        "no_vector_results": False,
+        "vector_outcome": "too_many_targets",
+        "vector_retryable": False,
+        "monitoring_metrics": {
+            "comparison": {
+                "status": "too_many_targets",
+                "target_count": len(targets),
+                "max_targets": max_targets,
+            }
+        },
     }
 
 
 def final_response_node(state: State) -> dict:
     """Generate a final answer only when tool output needs to be folded back in."""
     from src.llms.factory import build_chat_model
+    from src.llms.generation_observability import (
+        invoke_chat_with_observability,
+        merge_generation_metrics,
+    )
     from src.utils.citations import remove_unavailable_citations
+
+    def append_missing_target_notice(value: object) -> str:
+        text = str(value)
+        missing_targets = state.get("rdb_missing_targets") or []
+        if missing_targets and "조회 결과가 없는 기업:" not in text:
+            text += "\n\n조회 결과가 없는 기업: " + ", ".join(
+                str(target) for target in missing_targets
+            )
+        return text
 
     answer = state.get("generation")
     if answer:
         source_count = len(state.get("rerank_info") or [])
-        answer = remove_unavailable_citations(str(answer), source_count=source_count)
+        answer = remove_unavailable_citations(
+            append_missing_target_notice(answer),
+            source_count=source_count,
+        )
         result = {
             "generation": answer,
         }
@@ -90,11 +198,18 @@ def final_response_node(state: State) -> dict:
 
     messages = state.get("messages", [])
     message_delta = []
+    monitoring_metrics = None
     if not messages:
         answer = "최종 응답을 생성하지 못했습니다."
     else:
         llm = build_chat_model(temperature=0.2)
-        response = llm.invoke(messages)
+        response, generation_call = invoke_chat_with_observability(llm, messages)
+        monitoring_metrics = dict(state.get("monitoring_metrics") or {})
+        monitoring_metrics["generation"] = merge_generation_metrics(
+            monitoring_metrics.get("generation"),
+            generation_call,
+            phase="tool_followup_answer",
+        )
         answer = response.content
         if isinstance(answer, list):
             answer = "".join(
@@ -102,7 +217,10 @@ def final_response_node(state: State) -> dict:
                 for part in answer
             )
         source_count = len(state.get("rerank_info") or [])
-        answer = remove_unavailable_citations(str(answer), source_count=source_count)
+        answer = remove_unavailable_citations(
+            append_missing_target_notice(answer),
+            source_count=source_count,
+        )
         if not isinstance(messages[-1], AIMessage):
             message_delta = [response]
 
@@ -111,6 +229,8 @@ def final_response_node(state: State) -> dict:
     }
     if message_delta:
         result["messages"] = message_delta
+    if monitoring_metrics is not None:
+        result["monitoring_metrics"] = monitoring_metrics
     if active_scope := build_active_scope_from_state(state):
         result["active_scope"] = active_scope
     return result
@@ -119,6 +239,7 @@ def final_response_node(state: State) -> dict:
 def build_graph():
     workflow = StateGraph(State)
 
+    workflow.add_node("turn_prepare", turn_prepare_node)
     workflow.add_node("query_rewrite", query_rewrite_node)
     workflow.add_node("search_scope_prepare", search_scope_prepare_node)
     workflow.add_node("industry_lookup", industry_lookup_node)
@@ -129,13 +250,17 @@ def build_graph():
     workflow.add_node("vectordb_scope_preflight", vectordb_scope_preflight_node)
     workflow.add_node("rdb_sql_gen_node", rdb_sql_gen_node)
     workflow.add_node("rdb_execute_node", rdb_execute_node)
+    workflow.add_node("vector_dispatcher", vector_dispatcher_node)
     workflow.add_node("vectordb_node", vectordb_node)
+    workflow.add_node("company_comparison", company_comparison_graph)
+    workflow.add_node("too_many_targets", too_many_targets_node)
     workflow.add_node("clear_short_term_memory_retry", clear_short_term_memory_retry_node)
     workflow.add_node("stock_price_tools", stock_price_tool_node)
     workflow.add_node("final_response_node", final_response_node)
 
-    workflow.add_edge(START, "query_rewrite")
-    workflow.add_edge(START, "search_scope_prepare")
+    workflow.add_edge(START, "turn_prepare")
+    workflow.add_edge("turn_prepare", "query_rewrite")
+    workflow.add_edge("turn_prepare", "search_scope_prepare")
     workflow.add_edge("search_scope_prepare", "industry_lookup")
     workflow.add_edge(["query_rewrite", "industry_lookup"], "search_scope_merge")
 
@@ -169,8 +294,18 @@ def build_graph():
     )
 
     workflow.add_edge("rdb_scope_preflight", "rdb_sql_gen_node")
-    workflow.add_edge("vectordb_scope_preflight", "vectordb_node")
+    workflow.add_edge("vectordb_scope_preflight", "vector_dispatcher")
     workflow.add_edge("rdb_sql_gen_node", "rdb_execute_node")
+
+    workflow.add_conditional_edges(
+        "vector_dispatcher",
+        select_vector_execution,
+        {
+            "vectordb_node": "vectordb_node",
+            "company_comparison": "company_comparison",
+            "too_many_targets": "too_many_targets",
+        },
+    )
 
     def after_generation(state: State) -> str:
         messages = state.get("messages", [])
@@ -192,17 +327,23 @@ def build_graph():
             return "clear_short_term_memory_retry"
         return after_generation(state)
 
-    workflow.add_conditional_edges(
+    vector_result_routes = {
+        "clear_short_term_memory_retry": "clear_short_term_memory_retry",
+        "stock_price_tools": "stock_price_tools",
+        "final_response_node": "final_response_node",
+    }
+    for node_name in (
         "vectordb_node",
-        after_vectordb,
-        {
-            "clear_short_term_memory_retry": "clear_short_term_memory_retry",
-            "stock_price_tools": "stock_price_tools",
-            "final_response_node": "final_response_node",
-        },
-    )
+        "company_comparison",
+        "too_many_targets",
+    ):
+        workflow.add_conditional_edges(
+            node_name,
+            after_vectordb,
+            vector_result_routes,
+        )
 
-    workflow.add_edge("clear_short_term_memory_retry", "vectordb_node")
+    workflow.add_edge("clear_short_term_memory_retry", "vector_dispatcher")
     workflow.add_edge("stock_price_tools", "final_response_node")
     workflow.add_edge("final_response_node", END)
 

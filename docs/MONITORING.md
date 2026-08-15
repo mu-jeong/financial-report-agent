@@ -46,7 +46,7 @@ Sidebar
 └─ Monitoring
 ```
 
-- `Chat > 답변 모니터링`은 현재 대화의 시간 지표와 turn 근거를 다룬다. 최근 성공 응답의 전체시간, 현재 대화 평균, RDB 평균 조회시간, Vector DB 평균 검색시간을 표시하고, 응답별로 compact state, 검색 k 단계값, prompt에 사용한 chunk·문서를 내려가서 확인한다.
+- `Chat > 답변 모니터링`은 선택한 응답의 `총시간`, 실제 검색 실행 방식, 요청 대상별 근거 확보, 인용 연결 상태를 먼저 보여준다. 대상별 검색시간과 사용 문서를 그 아래에 두고, 현재 대화 평균·backend 평균·응답별 시간 추이는 `대화 전체 속도 추이`에 접어 둔다. compact state, 검색 k, prompt chunk 같은 구현 상세는 `기술 세부정보`를 명시적으로 선택했을 때만 렌더링한다.
 - `Monitoring`은 모든 대화의 속도, 공통 정확도, Native V2 검색 자료 상태와 문제 처리 도구를 다룬다.
 - `MONITORING_MODE=false`이거나 설정이 없으면 일반 Chat 화면만 렌더링한다.
 
@@ -63,7 +63,7 @@ Sidebar
 
 P95를 기본값으로 쓰는 이유는 평균만으로 가려지는 느린 꼬리 응답을 확인하기 위해서다.
 
-개별 Chat 화면의 평균은 현재 thread에서 성공했고 Native V2 provenance가 검증된 응답만 사용한다. RDB 조회시간은 SQL guardrail·연결·실행·결과 반환 구간이며, Vector DB 검색시간은 scope compile·lease·FAISS·hydration을 포함하는 `native_total_ns`이다. 호출하지 않은 backend나 과거 metadata처럼 표본이 없는 값은 `0`이 아니라 `측정 전`으로 표시한다. 정확도는 개별 응답에서 바로 판정하지 않고 전체 Monitoring의 검증된 evaluation run에서만 다룬다.
+개별 Chat의 기본 화면은 선택한 응답의 시간을 우선한다. 현재 thread 평균과 backend 평균은 `대화 전체 속도 추이`에서만 제공하며, 성공했고 Native V2 provenance가 검증된 응답만 표본으로 사용한다. RDB 조회시간은 SQL guardrail·연결·실행·결과 반환 구간이며, Vector DB 검색시간은 scope compile·lease·FAISS·hydration을 포함하는 `native_total_ns`이다. 호출하지 않은 backend나 과거 metadata처럼 표본이 없는 값은 `0`이 아니라 `측정 전`으로 표시한다. 정확도는 개별 응답에서 바로 판정하지 않고 전체 Monitoring의 검증된 evaluation run에서만 다룬다.
 
 개별 turn 상세의 시간 경계는 다음과 같다.
 
@@ -73,8 +73,14 @@ P95를 기본값으로 쓰는 이유는 평균만으로 가려지는 느린 꼬�
 | RDB 조회 | SQL guardrail·연결·실행·결과 반환 구간 |
 | Vector DB 검색 | Native V2 scope compile·lease·FAISS·hydration의 합계 |
 | Vector 세부 구간 | scope compile, eligibility, FAISS, hydration, lease가 backend에서 제공될 때의 개별 값 |
+| 비교 대상 검색 | 각 기업 branch의 retrieval wall time. 가장 느린 branch와 모든 branch 작업시간 합을 분리한다. |
+| 비교 검색 대기 | 동시성 제한을 얻기 전 각 branch의 queue wait. 화면에는 최댓값을 표시한다. |
+| 답변 합성 | 답변 생성에 사용된 모든 LLM 호출의 요청 시작부터 마지막 stream chunk까지의 합계 |
+| 최초 토큰 | 각 LLM 요청 시작부터 첫 content·reasoning·tool-call chunk까지의 시간. 여러 호출이면 최종 호출 값을 기본 표시한다. |
 
-LLM 생성과 query rewrite의 독립 구간 시간이 아직 없으면 추정값을 만들지 않고 `측정 전`으로 둔다.
+병렬 branch 작업시간 합은 전체 wall-clock 시간이 아니므로 전체 응답시간과 직접 합산하지 않는다. query rewrite와 rerank의 독립 구간 시간이 없으면 추정값을 만들지 않고 `측정 전`으로 둔다.
+
+답변 생성은 스트림을 직접 계측해 입력·출력·전체 토큰, 최초 토큰 시간, 요청 완료시간, 출력 토큰/초를 저장한다. 출력 토큰/초는 `출력 토큰 ÷ 요청 시작~완료 시간`인 client 관측 end-to-end 값이다. OpenRouter 요청은 router metadata를 opt-in해 실제 선택 provider와 gateway/model을 구분한다. cache 응답 등 router metadata가 없는 경우 provider를 추정하지 않고 `측정 전`으로 표시한다. 도구 호출 후 재생성처럼 LLM 호출이 여러 번이면 호출별 compact 지표와 turn 합계를 함께 저장한다.
 
 ### 3.2 개별 turn state와 검색 근거
 
@@ -98,9 +104,18 @@ LLM 생성과 query rewrite의 독립 구간 시간이 아직 없으면 추정�
 | `candidate_count_after_filter` | filter 후 후보 수 |
 | `context_count` | 최종 prompt에 들어간 passage 수 |
 
-Vector DB 사용 근거는 최종 prompt에 들어간 passage만 기록한다. Native V2에서는 `chunk_uid`, `parent_uid`, `report_uid`, span, rank, score와 문서 metadata를 저장한다. 문서 그룹과 인용 별칭은 `report_uid`, canonical path, 과거 `file_name` 순으로 식별한다. RDB 참고 문서는 별도 `rdb_evidence`로 표시하며 vector chunk로 세지 않는다. 청크 본문, PDF 본문, provider 원문 응답은 monitoring metadata에 복제하지 않는다. 과거 응답에 안정적 식별자가 없으면 임의 값을 만들지 않고 `identity_status=not_measured`와 빈 ID로 표시한다.
+Vector DB 사용 근거는 최종 prompt에 들어간 passage만 기록한다. Native V2에서는 `chunk_uid`, `parent_uid`, `report_uid`, span, rank, score와 문서 metadata를 저장한다. 문서 그룹과 인용 별칭은 `report_uid`, canonical path, 과거 `file_name` 순으로 식별한다. RDB 참고 문서는 별도 `rdb_evidence`로 표시하며 vector chunk로 세지 않는다. 청크 본문, PDF 본문, provider 원문 응답이나 전체 router metadata는 monitoring metadata에 복제하지 않는다. 과거 응답에 안정적 식별자가 없으면 임의 값을 만들지 않고 `identity_status=not_measured`와 빈 ID로 표시한다.
 
 `근거 연결 상태`는 의미 정확도 점수가 아니다. 선택 출처와 인용 번호 또는 RDB 결과가 구조적으로 연결되는지만 `linked`, `partial`, `unavailable`, `not_applicable`, `not_measured`로 표시하며 의미 검토 상태는 항상 별도의 `not_evaluated`로 둔다.
+
+복수 기업 비교 응답은 다음 compact 실행 근거를 추가로 저장한다.
+
+- plan type과 실제 `execution_mode` (운영 응답은 `send`; `sequential_reference`는 내부 회귀 비교에서만 사용)
+- 요청 대상 수, 근거 확보 대상 수, 대상별 `success`/`no_result`/`failed` 상태
+- 대상별 후보 수, retrieval 시간, queue wait
+- 전역 rerank 횟수, 답변 합성 횟수, 검색 동시성 상한
+
+개별 화면의 `Send 병렬 비교` 표시는 저장된 `execution_mode=send`가 있을 때만 사용한다. 과거 응답처럼 실행 방식이 저장되지 않았다면 대상 수나 source 수로 추정하지 않고 `방식 미계측`으로 표시한다.
 
 ### 3.3 답변 정확도
 
@@ -127,17 +142,15 @@ Vector DB 사용 근거는 최종 prompt에 들어간 passage만 기록한다. N
 
 ### 응답 원인 확인
 
-전체 Monitoring과 개별 Chat에서 대화와 assistant 응답을 선택한 뒤 다음 정보를 expander로 연다.
+전체 Monitoring은 기존 trace drill-down을 유지한다. `Chat > 답변 모니터링`은 assistant 응답을 선택하면 다음 순서로 표시한다.
 
-- 자동 debug hint
-- 직전 성공 응답과의 차이
-- query rewrite와 검색 범위
-- routing
-- retrieval/rerank와 선택 출처
-- answer/citation
-- 전체/backend 처리시간과 검색 k 단계값
-- compact state와 단계 상태
-- prompt에 실제 사용한 chunk·문서 식별정보
+- 기본: 총시간, 검색 실행 방식, 대상별 근거, 인용 연결
+- 기본: 실제로 측정된 구간만 있는 병목 표와 비교 대상별 검색 상태
+- 기본: 입력·출력 토큰, 최초 토큰, 실제 provider, 출력 토큰/초
+- 기본: 답변에 사용된 문서
+- 접힘: 현재 대화 평균과 backend별 시간 추이
+- 접힘: 직전 성공 응답과의 차이
+- 명시적 선택: `기술 세부정보`를 선택했을 때만 query rewrite, scope, routing, retrieval/rerank, 검색 k, answer/citation, prompt chunk, compact state를 렌더링
 
 선택한 trace는 issue report의 재현 context로 연결할 수 있다.
 

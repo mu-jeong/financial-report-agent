@@ -2,11 +2,35 @@ from datetime import date
 
 from src.configs.settings import (
     BASE_DIR,
+    CONFIG_SPECS,
     get_config_value,
     quickstart_env_updates,
     render_env_example,
     resolve_retrieval_path_settings,
 )
+
+
+def test_vector_comparison_execution_mode_is_not_an_environment_setting():
+    assert "VECTOR_COMPARISON_EXECUTION_MODE" not in CONFIG_SPECS
+
+
+def test_runtime_config_rejects_invalid_vector_retrieval_concurrency():
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["VECTOR_RETRIEVAL_CONCURRENCY"] = "0"
+    result = subprocess.run(
+        [sys.executable, "-c", "import src.configs.config"],
+        cwd=BASE_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "VECTOR_RETRIEVAL_CONCURRENCY" in result.stderr
 
 
 def test_get_config_value_parses_typed_environment(monkeypatch):
@@ -19,6 +43,7 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
     monkeypatch.setenv("DATA_ROOT", "/tmp/eval")
     monkeypatch.setenv("RERANK_CACHE_DIR", "/tmp/model-cache")
     monkeypatch.setenv("COMPANY_INDUSTRY_DATA_PATH", "/tmp/eval/listed_company_industries.csv")
+    monkeypatch.setenv("VECTOR_RETRIEVAL_CONCURRENCY", "3")
 
     assert get_config_value("CRAWLER_LOOKBACK_DAYS") == 14
     assert get_config_value("USE_RERANKER") is True
@@ -29,6 +54,7 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
     assert get_config_value("DATA_ROOT") == "/tmp/eval"
     assert get_config_value("RERANK_CACHE_DIR") == "/tmp/model-cache"
     assert get_config_value("COMPANY_INDUSTRY_DATA_PATH") == "/tmp/eval/listed_company_industries.csv"
+    assert get_config_value("VECTOR_RETRIEVAL_CONCURRENCY") == 3
 
 
 def test_pdf_extraction_engine_can_be_set_with_friendly_env_names(monkeypatch):
@@ -64,6 +90,7 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     monkeypatch.setenv("ISSUE_REPORT_PUBLISHABLE_KEY", "")
     monkeypatch.delenv("DATA_ROOT", raising=False)
     monkeypatch.delenv("SEARCH_CANDIDATE_MULTIPLIER", raising=False)
+    monkeypatch.delenv("VECTOR_RETRIEVAL_CONCURRENCY", raising=False)
     monkeypatch.setenv("CRAWLER_TARGET_DATE", "")
     monkeypatch.setenv("UNEMBEDDED_EXTRACTION_ENGINE", "")
 
@@ -82,6 +109,7 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     )
     assert get_config_value("DATA_ROOT") == str(BASE_DIR / "data")
     assert get_config_value("SEARCH_CANDIDATE_MULTIPLIER") == 1
+    assert get_config_value("VECTOR_RETRIEVAL_CONCURRENCY") == 5
 
 
 def test_data_root_is_the_canonical_retrieval_authority(tmp_path):
@@ -163,6 +191,8 @@ def test_render_env_example_contains_generated_defaults():
     ) in content
     assert "ISSUE_REPORT_OUTBOX_DIR=" in content
     assert "SEARCH_CANDIDATE_MULTIPLIER=1" in content
+    assert "VECTOR_COMPARISON_EXECUTION_MODE" not in content
+    assert "VECTOR_RETRIEVAL_CONCURRENCY=5" in content
     assert "RERANK_CANDIDATE_MULTIPLIER" not in content
 
 

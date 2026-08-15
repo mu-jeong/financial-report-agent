@@ -436,6 +436,7 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
             else None
         )
         retrieval_k = _build_retrieval_k_trace(metadata)
+        execution = _build_retrieval_execution_trace(metadata)
         grounding = _build_grounding_trace(
             metadata,
             selected_sources=selected_sources,
@@ -462,6 +463,11 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
                 "requested_k": retrieval_k.get("requested_k"),
                 "fetch_k": retrieval_k.get("fetch_k"),
                 "context_count": retrieval_k.get("context_count"),
+                "execution_strategy": execution.get("strategy"),
+                "execution_mode": execution.get("execution_mode"),
+                "execution_status": execution.get("status"),
+                "requested_target_count": execution.get("requested_target_count"),
+                "available_target_count": execution.get("available_target_count"),
                 "search_filters": search_filters,
                 "scope_source": metadata.get("scope_source") or search_scope.get("scope_source"),
                 "scope_decision_reason": scope_decision.get("reason"),
@@ -520,6 +526,16 @@ def _metadata_retrieval(metadata: dict[str, Any]) -> dict[str, Any]:
     return (metadata.get("monitoring") or {}).get("retrieval") or {}
 
 
+def _metadata_comparison(metadata: dict[str, Any]) -> dict[str, Any]:
+    comparison = (metadata.get("monitoring") or {}).get("comparison") or {}
+    return comparison if isinstance(comparison, dict) else {}
+
+
+def _metadata_generation(metadata: dict[str, Any]) -> dict[str, Any]:
+    generation = (metadata.get("monitoring") or {}).get("generation") or {}
+    return generation if isinstance(generation, dict) else {}
+
+
 def _metadata_query_rewrite(metadata: dict[str, Any]) -> dict[str, Any]:
     return (metadata.get("monitoring") or {}).get("query_rewrite") or {}
 
@@ -538,15 +554,140 @@ def _first_measured_int(*values: Any) -> int | None:
     return None
 
 
+def _build_generation_trace(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one answer's LLM usage, provider, TTFT, and throughput."""
+
+    generation = _metadata_generation(metadata)
+    if not generation:
+        return {
+            "status": "not_measured",
+            "measurement_gaps": [
+                "input_tokens",
+                "output_tokens",
+                "time_to_first_token",
+                "provider_name",
+                "output_tokens_per_second",
+            ],
+            "calls": [],
+        }
+
+    call_rows: list[dict[str, Any]] = []
+    raw_calls = generation.get("calls")
+    if isinstance(raw_calls, list):
+        for index, raw_call in enumerate(raw_calls, 1):
+            if not isinstance(raw_call, Mapping):
+                continue
+            call_rows.append(
+                {
+                    "call": index,
+                    "phase": raw_call.get("phase"),
+                    "status": raw_call.get("status"),
+                    "streamed": raw_call.get("streamed"),
+                    "provider_name": raw_call.get("provider_name"),
+                    "gateway_provider": raw_call.get("gateway_provider"),
+                    "model_name": raw_call.get("model_name"),
+                    "input_tokens": _nonnegative_int(raw_call.get("input_tokens")),
+                    "output_tokens": _nonnegative_int(raw_call.get("output_tokens")),
+                    "total_tokens": _nonnegative_int(raw_call.get("total_tokens")),
+                    "time_to_first_token_seconds": _duration_seconds_from_ns(
+                        raw_call.get("time_to_first_token_ns")
+                    ),
+                    "request_seconds": _duration_seconds_from_ns(
+                        raw_call.get("request_ns")
+                    ),
+                    "output_tokens_per_second": _duration_seconds(
+                        raw_call.get("output_tokens_per_second")
+                    ),
+                    "router_metadata_status": raw_call.get(
+                        "router_metadata_status"
+                    ),
+                }
+            )
+
+    input_tokens = _nonnegative_int(generation.get("input_tokens"))
+    output_tokens = _nonnegative_int(generation.get("output_tokens"))
+    ttft_seconds = _duration_seconds_from_ns(
+        generation.get("time_to_first_token_ns")
+    )
+    provider_names = [
+        str(value).strip()
+        for value in generation.get("provider_names") or []
+        if str(value).strip()
+    ]
+    provider_name = (
+        str(generation.get("provider_name") or "").strip()
+        or " / ".join(provider_names)
+        or None
+    )
+    throughput = _duration_seconds(generation.get("output_tokens_per_second"))
+    measured = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "time_to_first_token": ttft_seconds,
+        "provider_name": provider_name,
+        "output_tokens_per_second": throughput,
+    }
+    measurement_gaps = [key for key, value in measured.items() if value is None]
+    status = str(generation.get("status") or "").strip()
+    if status not in {"measured", "partial", "not_measured"}:
+        status = (
+            "measured"
+            if not measurement_gaps
+            else "partial"
+            if len(measurement_gaps) < len(measured)
+            else "not_measured"
+        )
+    return {
+        "status": status,
+        "call_count": _nonnegative_int(generation.get("call_count")),
+        "streamed_call_count": _nonnegative_int(
+            generation.get("streamed_call_count")
+        ),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": _nonnegative_int(generation.get("total_tokens")),
+        "cache_read_tokens": _nonnegative_int(
+            generation.get("cache_read_tokens")
+        ),
+        "reasoning_tokens": _nonnegative_int(generation.get("reasoning_tokens")),
+        "time_to_first_token_seconds": ttft_seconds,
+        "max_time_to_first_token_seconds": _duration_seconds_from_ns(
+            generation.get("max_time_to_first_token_ns")
+        ),
+        "request_seconds": _duration_seconds_from_ns(generation.get("request_ns")),
+        "after_first_token_seconds": _duration_seconds_from_ns(
+            generation.get("after_first_token_ns")
+        ),
+        "output_tokens_per_second": throughput,
+        "throughput_basis": generation.get("throughput_basis"),
+        "provider_name": provider_name,
+        "provider_names": provider_names,
+        "gateway_provider": generation.get("gateway_provider"),
+        "model_name": generation.get("model_name"),
+        "model_names": generation.get("model_names") or [],
+        "router_metadata_status": generation.get("router_metadata_status"),
+        "measurement_gaps": measurement_gaps,
+        "calls": call_rows,
+    }
+
+
 def _build_turn_timing_trace(metadata: dict[str, Any]) -> dict[str, Any]:
     monitoring = metadata.get("monitoring") or {}
     retrieval = _metadata_retrieval(metadata)
+    comparison = _metadata_comparison(metadata)
+    generation = _metadata_generation(metadata)
     rdb = monitoring.get("rdb") or {}
     total_seconds = _duration_seconds(metadata.get("latency_seconds"))
     if total_seconds is None:
         total_seconds = _duration_seconds((monitoring.get("timing") or {}).get("total_seconds"))
     rdb_seconds = _duration_seconds_from_ns(rdb.get("query_ns"))
     vector_seconds = _duration_seconds_from_ns(retrieval.get("native_total_ns"))
+    if vector_seconds is None:
+        vector_seconds = _duration_seconds_from_ns(comparison.get("retrieval_wall_ns"))
+    preflight_seconds = _duration_seconds_from_ns(comparison.get("preflight_ns"))
+    synthesis_seconds = _duration_seconds_from_ns(generation.get("request_ns"))
+    if synthesis_seconds is None:
+        synthesis_seconds = _duration_seconds_from_ns(comparison.get("synthesis_ns"))
     vector_stages = {
         "scope_compile": _duration_seconds_from_ns(retrieval.get("native_scope_compile_ns")),
         "eligibility": _duration_seconds_from_ns(retrieval.get("native_eligibility_ns")),
@@ -554,16 +695,185 @@ def _build_turn_timing_trace(metadata: dict[str, Any]) -> dict[str, Any]:
         "hydration": _duration_seconds_from_ns(retrieval.get("native_hydration_ns")),
         "lease": _duration_seconds_from_ns(retrieval.get("native_lease_ns")),
     }
+    attributed = [
+        value
+        for value in (rdb_seconds, vector_seconds, preflight_seconds, synthesis_seconds)
+        if value is not None
+    ]
+    unattributed_seconds = (
+        max(total_seconds - sum(attributed), 0.0)
+        if total_seconds is not None and attributed
+        else None
+    )
     measured = any(
         value is not None
-        for value in (total_seconds, rdb_seconds, vector_seconds, *vector_stages.values())
+        for value in (
+            total_seconds,
+            rdb_seconds,
+            vector_seconds,
+            preflight_seconds,
+            synthesis_seconds,
+            *vector_stages.values(),
+        )
     )
     return {
         "status": "measured" if measured else "not_measured",
         "total_seconds": total_seconds,
         "rdb_query_seconds": rdb_seconds,
         "vector_search_seconds": vector_seconds,
+        "comparison_preflight_seconds": preflight_seconds,
+        "answer_synthesis_seconds": synthesis_seconds,
+        "unattributed_seconds": unattributed_seconds,
         "vector_stage_seconds": vector_stages,
+    }
+
+
+def _build_retrieval_execution_trace(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Normalize persisted route and comparison metrics for per-answer monitoring."""
+
+    route = metadata.get("route")
+    plan = metadata.get("retrieval_plan") or {}
+    if not isinstance(plan, dict):
+        plan = {}
+    comparison = _metadata_comparison(metadata)
+    filters = _metadata_search_filters(metadata)
+    statuses = comparison.get("target_statuses") or {}
+    if not isinstance(statuses, dict):
+        statuses = {}
+    branch_metrics = comparison.get("branch_metrics") or {}
+    if not isinstance(branch_metrics, dict):
+        branch_metrics = {}
+
+    raw_targets = (
+        plan.get("target_names")
+        or plan.get("targets")
+        or filters.get("target_names")
+        or []
+    )
+    if not isinstance(raw_targets, list):
+        raw_targets = []
+    targets = list(
+        dict.fromkeys(
+            [str(target) for target in raw_targets if str(target).strip()]
+            + [str(target) for target in statuses]
+            + [str(target) for target in branch_metrics]
+        )
+    )
+
+    plan_type = plan.get("type")
+    if comparison and not plan_type:
+        plan_type = "company_comparison"
+    if plan_type == "company_comparison" or comparison:
+        strategy = "company_comparison"
+    elif route == "vectordb":
+        strategy = "vectordb"
+    elif route == "rdb":
+        strategy = "rdb"
+    else:
+        strategy = "unknown"
+    execution_mode = comparison.get("execution_mode") or plan.get("execution_mode")
+    if strategy != "company_comparison":
+        targets = []
+
+    branches: list[dict[str, Any]] = []
+    retrieval_durations: list[float] = []
+    queue_durations: list[float] = []
+    for target in targets:
+        raw_metrics = branch_metrics.get(target) or {}
+        if not isinstance(raw_metrics, dict):
+            raw_metrics = {}
+        retrieval_seconds = _duration_seconds_from_ns(raw_metrics.get("retrieval_ns"))
+        queue_wait_seconds = _duration_seconds_from_ns(raw_metrics.get("queue_wait_ns"))
+        backend_seconds = _duration_seconds_from_ns(raw_metrics.get("native_total_ns"))
+        if retrieval_seconds is not None:
+            retrieval_durations.append(retrieval_seconds)
+        if queue_wait_seconds is not None:
+            queue_durations.append(queue_wait_seconds)
+        branches.append(
+            {
+                "target": target,
+                "status": statuses.get(target, "not_measured"),
+                "candidate_count": _nonnegative_int(raw_metrics.get("candidate_count")),
+                "retrieval_seconds": retrieval_seconds,
+                "queue_wait_seconds": queue_wait_seconds,
+                "backend_seconds": backend_seconds,
+            }
+        )
+
+    requested_target_count = _first_measured_int(
+        comparison.get("requested_target_count"),
+        len(targets) if strategy == "company_comparison" else None,
+    )
+    available_target_count = _first_measured_int(
+        comparison.get("available_target_count"),
+        (
+            sum(
+                status in {"success", "success_degraded"}
+                for status in statuses.values()
+            )
+            if statuses
+            else None
+        ),
+    )
+    measurement_gaps: list[str] = []
+    if strategy == "company_comparison" and not execution_mode:
+        measurement_gaps.append("execution_mode_not_measured")
+    if strategy == "company_comparison" and not retrieval_durations:
+        measurement_gaps.append("comparison_branch_timing_not_measured")
+
+    return {
+        "strategy": strategy,
+        "plan_type": plan_type,
+        "execution_mode": execution_mode,
+        "execution_mode_status": (
+            "measured" if execution_mode else "not_measured"
+        ),
+        "status": comparison.get("status") or metadata.get("vector_outcome"),
+        "retryable": metadata.get("vector_retryable"),
+        "requested_target_count": requested_target_count,
+        "available_target_count": available_target_count,
+        "selected_source_count": _first_measured_int(
+            comparison.get("selected_source_count"),
+            _metadata_retrieval(metadata).get("source_count"),
+        ),
+        "union_candidate_count": _nonnegative_int(
+            comparison.get("union_candidate_count")
+        ),
+        "rerank_calls": _nonnegative_int(comparison.get("rerank_calls")),
+        "synthesis_calls": _nonnegative_int(comparison.get("synthesis_calls")),
+        "selection_mode": comparison.get("selection_mode") or plan.get("selection_mode"),
+        "latest_selection": (
+            comparison.get("latest_selection")
+            if isinstance(comparison.get("latest_selection"), dict)
+            else {}
+        ),
+        "retrieval_concurrency_limit": _nonnegative_int(
+            comparison.get("retrieval_concurrency_limit")
+        ),
+        "process_retrieval_concurrency_limit": _nonnegative_int(
+            comparison.get("process_retrieval_concurrency_limit")
+        ),
+        "observed_peak_retrieval_concurrency": _nonnegative_int(
+            comparison.get("observed_peak_retrieval_concurrency")
+        ),
+        "retrieval_wall_seconds": _duration_seconds_from_ns(
+            comparison.get("retrieval_wall_ns")
+        ),
+        "preflight_seconds": _duration_seconds_from_ns(comparison.get("preflight_ns")),
+        "synthesis_seconds": _duration_seconds_from_ns(comparison.get("synthesis_ns")),
+        "missing_targets": list(comparison.get("missing_targets") or []),
+        "branches": branches,
+        "branch_timing": {
+            "status": "measured" if retrieval_durations or queue_durations else "not_measured",
+            "slowest_retrieval_seconds": (
+                max(retrieval_durations) if retrieval_durations else None
+            ),
+            "total_retrieval_work_seconds": (
+                sum(retrieval_durations) if retrieval_durations else None
+            ),
+            "max_queue_wait_seconds": max(queue_durations) if queue_durations else None,
+        },
+        "measurement_gaps": measurement_gaps,
     }
 
 
@@ -580,16 +890,47 @@ def _build_retrieval_k_trace(metadata: dict[str, Any]) -> dict[str, Any]:
         }
 
     retrieval = _metadata_retrieval(metadata)
+    comparison = _metadata_comparison(metadata)
+    branch_metrics = comparison.get("branch_metrics") or {}
+    if not isinstance(branch_metrics, dict):
+        branch_metrics = {}
+
+    def branch_values(key: str) -> list[int]:
+        values: list[int] = []
+        for raw_metrics in branch_metrics.values():
+            if not isinstance(raw_metrics, dict):
+                continue
+            value = _nonnegative_int(raw_metrics.get(key))
+            if value is not None:
+                values.append(value)
+        return values
+
+    search_top_k_values = branch_values("search_top_k")
+    requested_k_values = branch_values("requested_k")
+    fetch_k_values = branch_values("fetch_k")
+    candidate_values = branch_values("native_candidate_count")
+    filtered_values = branch_values("candidate_count")
     values = {
-        "configured_top_k": _nonnegative_int(retrieval.get("search_top_k")),
-        "requested_k": _nonnegative_int(retrieval.get("requested_k")),
-        "fetch_k": _nonnegative_int(retrieval.get("fetch_k")),
+        "configured_top_k": _first_measured_int(
+            retrieval.get("search_top_k"),
+            max(search_top_k_values) if search_top_k_values else None,
+        ),
+        "requested_k": _first_measured_int(
+            retrieval.get("requested_k"),
+            max(requested_k_values) if requested_k_values else None,
+        ),
+        "fetch_k": _first_measured_int(
+            retrieval.get("fetch_k"),
+            max(fetch_k_values) if fetch_k_values else None,
+        ),
         "candidate_count_before_filter": _first_measured_int(
             retrieval.get("candidate_count_before_filter"),
             retrieval.get("native_candidate_count"),
+            sum(candidate_values) if candidate_values else None,
         ),
-        "candidate_count_after_filter": _nonnegative_int(
-            retrieval.get("candidate_count_after_filter")
+        "candidate_count_after_filter": _first_measured_int(
+            retrieval.get("candidate_count_after_filter"),
+            sum(filtered_values) if filtered_values else None,
         ),
         "context_count": _first_measured_int(
             retrieval.get("selected_source_count"),
@@ -805,6 +1146,7 @@ def _build_state_status_trace(metadata: dict[str, Any]) -> dict[str, Any]:
     monitoring = metadata.get("monitoring") or {}
     query_rewrite = _metadata_query_rewrite(metadata)
     retrieval = _metadata_retrieval(metadata)
+    comparison = _metadata_comparison(metadata)
     route = metadata.get("route")
     state_trace = monitoring.get("state_trace") or {}
     state_snapshot = monitoring.get("state_snapshot") or {}
@@ -818,7 +1160,14 @@ def _build_state_status_trace(metadata: dict[str, Any]) -> dict[str, Any]:
         answer_status = "running"
     else:
         answer_status = "not_measured"
-    if route == "vectordb" and metadata.get("no_vector_results"):
+    comparison_status = comparison.get("status")
+    if comparison_status in {"partial", "insufficient"}:
+        retrieval_status = "partial"
+    elif comparison_status in {"all_failed", "revision_mismatch"}:
+        retrieval_status = "failed"
+    elif comparison_status == "complete":
+        retrieval_status = "completed"
+    elif route == "vectordb" and metadata.get("no_vector_results"):
         retrieval_status = "no_results"
     elif route == "vectordb" and retrieval:
         retrieval_status = "completed"
@@ -1013,6 +1362,8 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
         "state_transitions": _build_state_transition_trace(metadata),
         "state_status": _build_state_status_trace(metadata),
         "timing": _build_turn_timing_trace(metadata),
+        "generation_performance": _build_generation_trace(metadata),
+        "execution": _build_retrieval_execution_trace(metadata),
         "retrieval_k": _build_retrieval_k_trace(metadata),
         "grounding": _build_grounding_trace(
             metadata,
@@ -1045,10 +1396,13 @@ def build_message_trace_summary(
     scope = detail.get("scope") or {}
     routing = detail.get("routing") or {}
     retrieval = detail.get("retrieval") or {}
+    execution = detail.get("execution") or {}
     retrieval_k = detail.get("retrieval_k") or {}
     state_status = detail.get("state_status") or {}
     grounding = detail.get("grounding") or {}
+    generation = detail.get("generation_performance") or {}
     answer = detail.get("answer") or {}
+    latest_selection = execution.get("latest_selection") or {}
     scope_decision = query_rewrite.get("scope_decision") or {}
     industry_lookup = scope.get("industry_lookup_context") or {}
     return {
@@ -1061,6 +1415,19 @@ def build_message_trace_summary(
         "industry_term": scope_decision.get("industry_term") or industry_lookup.get("term"),
         "search_filters": scope.get("search_filters") or {},
         "candidate_count_after_filter": retrieval.get("candidate_count_after_filter"),
+        "execution_strategy": execution.get("strategy"),
+        "execution_mode": execution.get("execution_mode"),
+        "execution_status": execution.get("status"),
+        "selection_mode": execution.get("selection_mode"),
+        "retrieval_concurrency_limit": execution.get("retrieval_concurrency_limit"),
+        "observed_peak_retrieval_concurrency": execution.get(
+            "observed_peak_retrieval_concurrency"
+        ),
+        "requested_target_count": execution.get("requested_target_count"),
+        "available_target_count": execution.get("available_target_count"),
+        "latest_resolved_target_count": latest_selection.get("resolved_target_count"),
+        "latest_context_target_count": latest_selection.get("context_target_count"),
+        "latest_cited_target_count": latest_selection.get("cited_target_count"),
         "source_count": (
             answer.get("source_count")
             if answer.get("source_count") is not None
@@ -1072,6 +1439,16 @@ def build_message_trace_summary(
         "state_status": state_status.get("overall"),
         "grounding_status": grounding.get("status"),
         "source_identity_status": grounding.get("source_identity_status"),
+        "generation_status": generation.get("status"),
+        "generation_call_count": generation.get("call_count"),
+        "input_tokens": generation.get("input_tokens"),
+        "output_tokens": generation.get("output_tokens"),
+        "time_to_first_token_seconds": generation.get(
+            "time_to_first_token_seconds"
+        ),
+        "provider_name": generation.get("provider_name"),
+        "model_name": generation.get("model_name"),
+        "output_tokens_per_second": generation.get("output_tokens_per_second"),
         "configured_top_k": retrieval_k.get("configured_top_k"),
         "requested_k": retrieval_k.get("requested_k"),
         "fetch_k": retrieval_k.get("fetch_k"),
@@ -1146,6 +1523,7 @@ def build_chat_trace_debug_hints(
     filters = _metadata_search_filters(metadata)
     previous_filters = _metadata_search_filters(previous_metadata)
     retrieval = _metadata_retrieval(metadata)
+    comparison = _metadata_comparison(metadata)
     question = str(user_question or metadata.get("question") or "")
     followup_intent = bool(metadata.get("followup_scope_intent") or _metadata_query_rewrite(metadata).get("followup_scope_intent"))
     if followup_intent and metadata.get("scope_source") != "prior_search_scope" and not metadata.get("scope_decision"):
@@ -1165,6 +1543,26 @@ def build_chat_trace_debug_hints(
     multi_doc_terms = ("전체", "각각", "리포트들", "목록", "비교", "모두", "여러")
     if any(term in question for term in multi_doc_terms) and retrieval.get("document_coverage_applied") is False:
         hints.append("⚠️ document_coverage_applied=False인데 질문에 전체/각각/리포트들이 포함되어 있습니다.")
+    latest_selection = comparison.get("latest_selection") or {}
+    if isinstance(latest_selection, dict) and latest_selection.get("mode") == "latest_per_target":
+        missing_preflight = list(latest_selection.get("missing_preflight_targets") or [])
+        missing_context = list(latest_selection.get("missing_context_targets") or [])
+        missing_citations = list(latest_selection.get("missing_citation_targets") or [])
+        if missing_preflight:
+            hints.append(
+                "⚠️ 최신 문서를 확정하지 못한 기업이 있습니다: "
+                + ", ".join(str(target) for target in missing_preflight)
+            )
+        if missing_context:
+            hints.append(
+                "⚠️ 확정한 최신 문서가 최종 prompt context에서 누락되었습니다: "
+                + ", ".join(str(target) for target in missing_context)
+            )
+        if latest_selection.get("citation_status") == "partial" and missing_citations:
+            hints.append(
+                "⚠️ 답변에서 최신 문서를 인용하지 않은 기업이 있습니다: "
+                + ", ".join(str(target) for target in missing_citations)
+            )
     return list(dict.fromkeys(hints))
 
 
@@ -5728,6 +6126,34 @@ def build_monitoring_page_labels() -> list[str]:
     return ["Chat", "Monitoring"]
 
 
+def _compact_retrieval_plan(plan: Any) -> dict[str, Any] | None:
+    """Persist only the plan fields needed to explain one answer's execution."""
+
+    if not isinstance(plan, dict):
+        return None
+    compact = {
+        key: plan.get(key)
+        for key in (
+            "type",
+            "execution_mode",
+            "fallback_mode",
+            "selection_mode",
+            "preflight",
+            "max_targets",
+            "candidate_budget_per_target",
+            "final_budget",
+            "union_candidate_limit",
+        )
+        if plan.get(key) is not None
+    }
+    raw_targets = plan.get("target_names") or plan.get("targets") or []
+    if isinstance(raw_targets, list):
+        compact["target_names"] = [
+            str(target) for target in raw_targets[:10] if str(target).strip()
+        ]
+    return compact or None
+
+
 def compact_graph_monitoring_metadata(
     *,
     final_state: dict[str, Any],
@@ -5785,6 +6211,11 @@ def compact_graph_monitoring_metadata(
     for section, values in (final_state.get("monitoring_metrics") or {}).items():
         if isinstance(values, dict):
             metadata["monitoring"].setdefault(section, {}).update(values)
+    if retrieval_plan := _compact_retrieval_plan(final_state.get("retrieval_plan")):
+        metadata["retrieval_plan"] = retrieval_plan
+    for key in ("vector_outcome", "vector_retryable"):
+        if key in final_state:
+            metadata[key] = final_state.get(key)
     if route == "rdb":
         metadata["monitoring"]["rdb"] = _compact_rdb_metrics(final_state)
     return metadata

@@ -40,6 +40,7 @@ def test_chat_model_has_bounded_request_defaults(monkeypatch):
 
     assert captured["timeout"] == 60_000
     assert captured["max_retries"] == 0
+    assert captured["stream_usage"] is True
     assert captured["model_kwargs"] == {"retries": None}
 
 

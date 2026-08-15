@@ -67,6 +67,63 @@ def _pick_longest_mentioned(query: str, candidates: Iterable[str]) -> str | None
     return max(mentioned, key=len)
 
 
+def _safe_target_aliases(target: str) -> set[str]:
+    """Return conservative aliases derived only from a corpus canonical name."""
+    canonical = str(target or "").strip()
+    normalized = _normalize_text(canonical)
+    aliases = {normalized} if normalized else set()
+
+    # A whitespace boundary and an ASCII-prefix-to-local-name boundary cover
+    # corpus forms such as ``SK 하이닉스``/``SK하이닉스`` without inventing
+    # arbitrary substrings of a company name.
+    for match in re.finditer(r"\s+(\S.*)$", canonical):
+        alias = _normalize_text(match.group(1))
+        if len(alias) >= 2:
+            aliases.add(alias)
+    for index in range(1, len(normalized)):
+        if (
+            normalized[index - 1].isascii()
+            and normalized[index - 1].isalnum()
+            and not normalized[index].isascii()
+        ):
+            alias = normalized[index:]
+            if len(alias) >= 2:
+                aliases.add(alias)
+    return aliases
+
+
+def _pick_ordered_mentioned_targets(query: str, candidates: Iterable[str]) -> list[str]:
+    """Resolve explicit corpus targets in question order, without ambiguous aliases."""
+    canonical_names = tuple(dict.fromkeys(str(value) for value in candidates if value))
+    alias_owners: dict[str, set[str]] = {}
+    for canonical in canonical_names:
+        for alias in _safe_target_aliases(canonical):
+            alias_owners.setdefault(alias, set()).add(canonical)
+
+    normalized_query = _normalize_text(query)
+    mentions: list[tuple[int, int, str]] = []
+    for alias, owners in alias_owners.items():
+        if len(owners) != 1 or not alias:
+            continue
+        canonical = next(iter(owners))
+        start = normalized_query.find(alias)
+        while start >= 0:
+            mentions.append((start, len(alias), canonical))
+            start = normalized_query.find(alias, start + 1)
+
+    # Prefer the longest canonical/alias when names overlap at one mention,
+    # then retain the first non-overlapping occurrence of each canonical name.
+    ordered: list[str] = []
+    occupied_until = -1
+    for start, length, canonical in sorted(mentions, key=lambda item: (item[0], -item[1], item[2])):
+        if start < occupied_until:
+            continue
+        occupied_until = start + length
+        if canonical not in ordered:
+            ordered.append(canonical)
+    return ordered
+
+
 def _target_is_only_part_of_broker(query: str, target: str | None, broker: str | None) -> bool:
     """증권사명 내부의 일반 target 조각을 별도 검색 대상으로 보지 않습니다."""
     if not target or not broker:
@@ -633,17 +690,33 @@ def infer_search_filters(
         )
     )
 
-    target = _pick_longest_mentioned(query, values.get("target_name", ()))
-    if target:
-        filters["target_name"] = target
+    targets = _pick_ordered_mentioned_targets(query, values.get("target_name", ()))
+    target = targets[0] if len(targets) == 1 else None
+    if len(targets) == 1:
+        filters["target_name"] = targets[0]
+    elif targets:
+        filters["target_names"] = targets
 
     broker = _pick_longest_mentioned(query, values.get("broker", ()))
     if broker:
         filters["broker"] = broker
 
-    if _target_is_only_part_of_broker(query, target, broker):
+    if broker and targets:
+        targets = [
+            target_name
+            for target_name in targets
+            if not _target_is_only_part_of_broker(query, target_name, broker)
+        ]
         filters.pop("target_name", None)
-        target = None
+        filters.pop("target_names", None)
+        if len(targets) == 1:
+            filters["target_name"] = targets[0]
+            target = targets[0]
+        elif targets:
+            filters["target_names"] = targets
+            target = None
+        else:
+            target = None
 
     explicit_report_types = [
         report_type
@@ -670,10 +743,18 @@ def infer_search_filters(
     elif report_types:
         filters["report_types"] = report_types
 
-    if target and not ({"report_type", "report_types"} & filters.keys()):
+    if targets and not ({"report_type", "report_types"} & filters.keys()):
         target_report_types = values.get("target_report_types")
         if isinstance(target_report_types, dict):
-            report_types = tuple(target_report_types.get(target, ()))
+            report_types = tuple(
+                sorted(
+                    {
+                        str(report_type)
+                        for target_name in targets
+                        for report_type in target_report_types.get(target_name, ())
+                    }
+                )
+            )
             if len(report_types) == 1:
                 filters["report_type"] = report_types[0]
 
@@ -716,6 +797,15 @@ def metadata_matches(metadata: dict[str, Any], filters: SearchFilters) -> bool:
                 return False
             actual = metadata.get("report_type")
             if not actual or _normalize_text(actual) not in expected_types:
+                return False
+            continue
+
+        if key == "target_names":
+            if not isinstance(expected, (list, tuple, set, frozenset)):
+                return False
+            expected_targets = {_normalize_text(target_name) for target_name in expected or []}
+            actual = metadata.get("target_name")
+            if not actual or _normalize_text(actual) not in expected_targets:
                 return False
             continue
 

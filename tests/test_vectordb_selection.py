@@ -1,11 +1,63 @@
+import sqlite3
+
 from langchain_core.documents import Document
 
 from src.nodes.vectordb import (
     build_temporal_preflight_plan,
     ensure_document_coverage,
+    fetch_latest_reports_by_target,
     required_file_names_from_prior_scope,
     select_top_passages,
 )
+
+
+def test_latest_report_preflight_selects_one_newest_active_file_per_target(
+    monkeypatch,
+):
+    import src.nodes.vectordb as vectordb
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.create_function(
+        "v2_basename",
+        1,
+        lambda value: str(value).replace("\\", "/").rsplit("/", 1)[-1],
+    )
+    connection.executescript(
+        """
+        CREATE TABLE active_reports (
+            report_uid TEXT,
+            report_id INTEGER,
+            report_type TEXT,
+            report_date TEXT,
+            target_name TEXT,
+            broker TEXT,
+            title TEXT,
+            canonical_relative_path TEXT
+        );
+        INSERT INTO active_reports VALUES
+            ('a-old', 1, 'company', '2026-08-01', 'A', 'X', 'old', 'downloaded/a-old.pdf'),
+            ('a-new-1', 2, 'company', '2026-08-10', 'A', 'X', 'new 1', 'downloaded/a-new-1.pdf'),
+            ('a-new-2', 3, 'company', '2026-08-10', 'A', 'X', 'new 2', 'downloaded/a-new-2.pdf'),
+            ('b-new', 4, 'company', '2026-08-09', 'B', 'Y', 'new', 'downloaded/b-new.pdf'),
+            ('b-industry', 5, 'industry', '2026-08-11', 'B', 'Y', 'industry', 'downloaded/b-industry.pdf');
+        """
+    )
+    monkeypatch.setattr(
+        vectordb,
+        "get_connection",
+        lambda *, materialize_reports=False: connection,
+    )
+
+    selected = fetch_latest_reports_by_target(
+        ["B", "A"],
+        {"report_type": "company"},
+    )
+
+    assert list(selected) == ["B", "A"]
+    assert selected["B"]["file_name"] == "b-new.pdf"
+    assert selected["A"]["file_name"] == "a-new-2.pdf"
+    assert selected["A"]["report_date"] == "2026-08-10"
 
 
 def test_requested_candidate_count_uses_one_configurable_multiplier(monkeypatch):
@@ -470,7 +522,12 @@ def test_native_dispatch_embeds_once_and_uses_one_scoped_reader_request(
         hydration_rows=1,
         hydration_cache_hits=1,
         hydration_cache_misses=0,
-        revision=SimpleNamespace(snapshot_id="snapshot-1", publication_generation=4),
+        revision=SimpleNamespace(
+            snapshot_id="snapshot-1",
+            publication_generation=4,
+            delta_generation=2,
+            profile_id="profile-1",
+        ),
     )
 
     class FakeReader:
@@ -516,6 +573,14 @@ def test_native_dispatch_embeds_once_and_uses_one_scoped_reader_request(
     assert metrics["runtime_mode"] == "native"
     assert metrics["snapshot_id"] == "snapshot-1"
     assert metrics["publication_generation"] == 4
+    assert metrics["delta_generation"] == 2
+    assert metrics["profile_id"] == "profile-1"
+    assert metrics["revision"] == {
+        "publication_generation": 4,
+        "snapshot_id": "snapshot-1",
+        "delta_generation": 2,
+        "profile_id": "profile-1",
+    }
     assert metrics["native_hydration_rows"] == 1
     assert metrics["native_hydration_cache_hits"] == 1
     assert metrics["native_hydration_cache_misses"] == 0
@@ -694,6 +759,10 @@ def test_vectordb_node_records_prompt_chunk_and_document_identifiers(monkeypatch
     assert source["publication_generation"] == 4
     assert "text" not in source
     assert "page_content" not in source
+    assert result["monitoring_metrics"]["generation"]["call_count"] == 1
+    assert result["monitoring_metrics"]["generation"]["calls"][0]["phase"] == (
+        "vectordb_answer"
+    )
 
 
 def test_vectordb_passes_matching_prior_files_into_single_retrieval_scope(monkeypatch):

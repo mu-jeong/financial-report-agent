@@ -1,6 +1,7 @@
 import sqlite3
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from src.core import db_manager
 from src.core.company_industry import resolve_report_file_scope_for_companies
@@ -200,6 +201,41 @@ def test_rdb_execute_node_records_query_duration_on_blocked_result(monkeypatch):
     )
 
     assert result["monitoring_metrics"]["rdb"]["query_ns"] == 125_000_000
+
+
+def test_rdb_execute_node_records_answer_generation_metrics(monkeypatch):
+    class FakeChatModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            return AIMessage(
+                content="총 1건입니다.",
+                usage_metadata={
+                    "input_tokens": 30,
+                    "output_tokens": 5,
+                    "total_tokens": 35,
+                },
+            )
+
+    monkeypatch.setattr(
+        rdb,
+        "execute_sql",
+        lambda _query: {"columns": ["count"], "rows": [(1,)]},
+    )
+    monkeypatch.setattr(rdb, "build_chat_model", lambda **_kwargs: FakeChatModel())
+
+    result = rdb.rdb_execute_node(
+        {
+            "question": "리포트 수",
+            "sql_query": "SELECT COUNT(*) AS count FROM reports",
+        }
+    )
+
+    generation = result["monitoring_metrics"]["generation"]
+    assert generation["input_tokens"] == 30
+    assert generation["output_tokens"] == 5
+    assert generation["calls"][0]["phase"] == "rdb_answer"
 
 
 def test_extract_sources_from_rdb_result_uses_file_name_rows():
