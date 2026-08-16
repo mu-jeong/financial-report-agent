@@ -276,6 +276,10 @@ def test_unified_report_context_defaults_to_selected_turn_without_full_chat(
     assert preview["selected_message_id"] == "a2"
     assert preview["includes_compact_trace"] is True
     assert preview["includes_prior_search_scope"] is True
+    assert "includes_turn_trace" not in preview
+    assert "turn_trace_count" not in preview
+    assert "turn_trace_truncated_count" not in preview
+    assert "turn_trace_truncated_count" not in context
     assert preview["includes_full_conversation"] is False
 
     monkeypatch.setattr(

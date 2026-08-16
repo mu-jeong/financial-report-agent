@@ -5,6 +5,48 @@ from __future__ import annotations
 import re
 from typing import Any
 
+_KOREAN_ORDINAL_INDEXES = {
+    "첫번째": 0,
+    "첫째": 0,
+    "첫": 0,
+    "두번째": 1,
+    "둘째": 1,
+    "세번째": 2,
+    "셋째": 2,
+    "네번째": 3,
+    "넷째": 3,
+    "다섯번째": 4,
+    "다섯째": 4,
+    "여섯번째": 5,
+    "여섯째": 5,
+    "일곱번째": 6,
+    "일곱째": 6,
+    "여덟번째": 7,
+    "여덟째": 7,
+    "아홉번째": 8,
+    "아홉째": 8,
+    "열번째": 9,
+    "열째": 9,
+}
+_ORDINAL_TOKEN = (
+    r"(?P<numeric>[1-9]\d*)\s*(?:번째|번)"
+    r"|(?P<korean>첫\s*번째|첫째|첫|두\s*번째|둘째|세\s*번째|셋째|"
+    r"네\s*번째|넷째|다섯\s*번째|다섯째|여섯\s*번째|여섯째|"
+    r"일곱\s*번째|일곱째|여덟\s*번째|여덟째|아홉\s*번째|아홉째|"
+    r"열\s*번째|열째)"
+    r"|(?P<last>마지막|끝)"
+)
+_REPORT_TYPE_BETWEEN_ORDINAL_AND_DOCUMENT = (
+    r"(?:(?:company|industry|economy|개별\s*종목|기업|회사|산업|업종|섹터|"
+    r"경제|거시\s*경제)\s*)?"
+)
+_DOCUMENT_NOUN = r"(?:리포트|보고서|문서|자료)"
+_ORDINAL_BEFORE_DOCUMENT_RE = re.compile(
+    rf"(?:{_ORDINAL_TOKEN})\s*(?:로\s*)?"
+    rf"{_REPORT_TYPE_BETWEEN_ORDINAL_AND_DOCUMENT}{_DOCUMENT_NOUN}",
+    re.IGNORECASE,
+)
+
 REPORT_TYPE_FILTER_KEY = "report_type"
 REPORT_TYPES_FILTER_KEY = "report_types"
 DATE_FILTER_KEYS = ("report_date_start", "report_date_end")
@@ -47,6 +89,54 @@ def _normalize_text(value: Any) -> str:
 
 def _normalized_contains(text: str, keyword: str) -> bool:
     return _normalize_text(keyword) in _normalize_text(text)
+
+
+def parse_ordinal_reference(question: str) -> int | None:
+    """Return a zero-based rank only for an ordinal document reference."""
+    text = str(question or "")
+    match = _ORDINAL_BEFORE_DOCUMENT_RE.search(text)
+    if match is None:
+        return None
+    if match.group("last"):
+        return -1
+    if numeric := match.group("numeric"):
+        return int(numeric) - 1
+    korean = re.sub(r"\s+", "", str(match.group("korean") or ""))
+    return _KOREAN_ORDINAL_INDEXES.get(korean)
+
+
+def _ordered_file_names(values: Any) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        file_name = str(value or "").strip()
+        if not file_name or file_name == "-" or file_name in seen:
+            continue
+        seen.add(file_name)
+        ordered.append(file_name)
+    return ordered
+
+
+def _ordinal_candidates(
+    question: str,
+    prior_search_scope: dict[str, Any],
+) -> tuple[list[str], dict[str, Any] | None, str | None]:
+    sections = _sections_for_prior_scope(prior_search_scope)
+    ordinal_phrase = _ORDINAL_BEFORE_DOCUMENT_RE.search(str(question or ""))
+    section, matched_alias = _match_section(
+        ordinal_phrase.group(0) if ordinal_phrase else "",
+        sections,
+    )
+    if section:
+        section_files = _ordered_file_names(section.get("file_names"))
+        if section_files:
+            return section_files, section, matched_alias
+    candidates = _ordered_file_names(prior_search_scope.get("file_names"))
+    if not candidates:
+        candidates = _ordered_file_names(
+            (prior_search_scope.get("search_filters") or {}).get("file_names")
+        )
+    return candidates, section, matched_alias
 
 
 def is_section_deep_dive_followup(question: str) -> bool:
@@ -169,7 +259,55 @@ def resolve_section_followup_scope(
     """Resolve a section-referencing follow-up into concrete search filters."""
     prior_search_scope = prior_search_scope or {}
     current_filters = dict(current_filters or {})
-    if not prior_search_scope or not is_section_deep_dive_followup(question):
+    if not prior_search_scope:
+        return {"matched": False, "reason": "no_section_alias_match"}
+
+    ordinal = parse_ordinal_reference(question)
+    if ordinal is not None:
+        candidates, section, matched_alias = _ordinal_candidates(
+            question,
+            prior_search_scope,
+        )
+        selected_index = len(candidates) - 1 if ordinal < 0 else ordinal
+        requested_rank = len(candidates) if ordinal < 0 else ordinal + 1
+        if selected_index < 0 or selected_index >= len(candidates):
+            return {
+                "matched": False,
+                "reason": "document_ordinal_out_of_range",
+                "requested_document_rank": requested_rank,
+                "document_count": len(candidates),
+            }
+
+        inherited_filters = _date_filters(
+            _base_filters_without_file_scope(prior_search_scope)
+        )
+        added_filters: dict[str, Any] = {}
+        if section:
+            added_filters.update(
+                {
+                    key: value
+                    for key, value in (section.get("filters") or {}).items()
+                    if key not in DATE_FILTER_KEYS
+                }
+            )
+        search_filters = {
+            **inherited_filters,
+            **added_filters,
+            "file_names": [candidates[selected_index]],
+        }
+        return {
+            "matched": True,
+            "reason": "matched_ordinal_report_reference",
+            "matched_alias": matched_alias or "ordinal_reference",
+            "matched_document_rank": selected_index + 1,
+            "selected_file_name": candidates[selected_index],
+            "inherited_filters": inherited_filters,
+            "added_filters": added_filters,
+            "dropped_filters": ["file_names"],
+            "search_filters": search_filters,
+        }
+
+    if not is_section_deep_dive_followup(question):
         return {"matched": False, "reason": "no_section_alias_match"}
 
     section, matched_alias = _match_section(question, _sections_for_prior_scope(prior_search_scope))

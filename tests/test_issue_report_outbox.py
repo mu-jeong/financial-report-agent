@@ -122,7 +122,9 @@ def test_remote_report_is_exact_bounded_and_redacted():
     assert "must stay local" not in serialized
     assert remote["observed"]["latency_ms"] == 1250
     assert remote["observed"]["result_count"] == 3
+    assert remote["observed"]["result_count_kind"] == "document"
     assert remote["observed"]["citation_count"] == 2
+    assert remote["observed"]["turn_trace"] == []
     assert remote["diagnostics"]["stack_hash"] == "a" * 64
     assert remote["app_version"] == "1.2.3"
     assert {
@@ -165,7 +167,154 @@ def test_remote_content_consent_is_explicit_and_fail_closed():
         assert remote["comment"] == ""
         assert remote["observed"]["selected_question"] is None
         assert remote["observed"]["selected_answer"] is None
+        assert remote["observed"]["turn_trace"] == []
         assert remote["consent"]["include_comment"] is False
+
+
+def test_remote_report_uses_rdb_row_count_instead_of_source_count():
+    report = _report()
+    report["context"]["selected_message"]["metadata"]["route"] = "rdb"
+    report["context"]["trace_detail"]["routing"]["route"] = "rdb"
+    report["context"]["trace_detail"]["answer"].update(
+        {
+            "source_count": 0,
+            "result_count": 7,
+            "result_count_kind": "row",
+            "citation_ranks_used": [],
+        }
+    )
+
+    remote = issue_report_outbox.build_remote_report(report)
+
+    assert remote["observed"]["result_count"] == 7
+    assert remote["observed"]["result_count_kind"] == "row"
+
+
+def test_remote_turn_trace_requires_consent_and_redacts_each_turn():
+    report = _report()
+    report["context"]["turn_trace"] = [
+        {
+            "turn_index": 1,
+            "question": "삼성전자 자료를 보여줘",
+            "rewritten_query": "C:\\Users\\alice\\secret.txt 삼성전자 자료",
+            "route": "vectordb",
+            "status": "succeeded",
+            "followup_scope_intent": False,
+            "scope_source": None,
+            "scope_reason": None,
+            "matched_document_rank": None,
+            "search_filters": {
+                "target_name": "삼성전자",
+                "report_date": "2026-08-01",
+            },
+            "prior_search_filters": {},
+            "prior_file_names": [],
+            "selected_file_names": ["safe-report.pdf"],
+            "result_count": 1,
+            "result_count_kind": "document",
+        },
+        {
+            "turn_index": 2,
+            "question": "첫번째 리포트를 다시 확인해줘",
+            "rewritten_query": "첫번째 리포트 본문 재확인",
+            "route": "vectordb",
+            "status": "succeeded",
+            "followup_scope_intent": True,
+            "scope_source": "prior_search_scope",
+            "scope_reason": "matched_ordinal_report_reference",
+            "matched_document_rank": 1,
+            "search_filters": {"file_names": ["safe-report.pdf"]},
+            "prior_search_filters": {"target_name": "삼성전자"},
+            "prior_file_names": ["safe-report.pdf"],
+            "selected_file_names": ["safe-report.pdf"],
+            "result_count": 1,
+            "result_count_kind": "document",
+        },
+    ]
+
+    without_consent = issue_report_outbox.build_remote_report(report)
+    with_consent = issue_report_outbox.build_remote_report(
+        report,
+        consent={
+            "consent_version": 1,
+            "include_selected_question": True,
+            "include_previous_turns": True,
+        },
+    )
+
+    assert without_consent["observed"]["turn_trace"] == []
+    assert without_consent["consent"]["include_previous_turns"] is False
+    assert with_consent["consent"]["include_previous_turns"] is True
+    assert len(with_consent["observed"]["turn_trace"]) == 2
+    assert with_consent["observed"]["turn_trace"][0]["search_filters"] == {
+        "target_name": "삼성전자",
+        "report_date": "2026-08-01",
+    }
+    assert with_consent["observed"]["turn_trace"][1]["matched_document_rank"] == 1
+    serialized = json.dumps(with_consent, ensure_ascii=False)
+    assert "C:\\Users\\alice" not in serialized
+    assert "[REDACTED:path]" in serialized
+
+
+def test_maximum_turn_trace_stays_within_the_durable_envelope_limit(tmp_path):
+    report = _report("large-turn-trace")
+    report["comment"] = "c" * (4 * 1024)
+    report["context"]["selected_user_question"] = "q" * (16 * 1024)
+    report["context"]["selected_message"]["content_preview"] = "a" * (16 * 1024)
+    filter_value = [str(index) * 256 for index in range(1, 9)]
+    filters = {
+        key: filter_value
+        for key in issue_report_outbox._REMOTE_FILTER_KEYS
+    }
+    report["context"]["turn_trace"] = [
+        {
+            "turn_index": turn_index,
+            "question": "질문" * 1024,
+            "rewritten_query": "재작성" * 682,
+            "route": "vectordb",
+            "status": "succeeded",
+            "followup_scope_intent": True,
+            "scope_source": "prior_search_scope",
+            "scope_reason": "matched_ordinal_report_reference",
+            "matched_document_rank": 1,
+            "route_hint": "vectordb",
+            "has_vector_intent": True,
+            "search_filters": filters,
+            "prior_search_filters": filters,
+            "prior_file_names": ["p" * 256] * 8,
+            "selected_file_names": ["s" * 256] * 8,
+            "result_count": 1,
+            "result_count_kind": "document",
+        }
+        for turn_index in range(1, 9)
+    ]
+    consent = {
+        "consent_version": 1,
+        "include_comment": True,
+        "include_selected_question": True,
+        "include_selected_answer": True,
+        "include_previous_turns": True,
+    }
+
+    remote = issue_report_outbox.build_remote_report(report, consent=consent)
+    envelope = {
+        "ingest_contract_version": 1,
+        "event_id": "018f47a0-1111-7111-8111-111111111111",
+        "installation_id": "018f47a0-2222-7222-8222-222222222222",
+        "queued_at": "2026-08-09T00:00:00Z",
+        "report": remote,
+    }
+
+    assert len(json.dumps(envelope, ensure_ascii=False).encode("utf-8")) <= (
+        issue_report_outbox.MAX_EVENT_BYTES
+    )
+    result = issue_report_outbox.enqueue_report(
+        report,
+        consent=consent,
+        database_path=tmp_path / "outbox.sqlite3",
+        now=NOW,
+    )
+    assert result["status"] == "queued"
 
 
 @pytest.mark.parametrize(

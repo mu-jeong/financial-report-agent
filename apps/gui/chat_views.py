@@ -14,7 +14,10 @@ from src.configs import config as config_module
 from src.core import conversation_store
 from src.core import issue_report_outbox
 from src.core import issue_report_store
-from src.core.chat_ui_helpers import build_no_result_suggestions
+from src.core.chat_ui_helpers import (
+    build_no_result_suggestions,
+    escape_numeric_tildes_for_markdown,
+)
 from src.utils import citations
 
 
@@ -157,6 +160,7 @@ def _render_issue_report_control(
         remote_delivery = issue_report_outbox.remote_delivery_available()
         include_comment_remote = False
         include_selected_remote = False
+        include_turn_trace_remote = False
         if remote_delivery:
             st.caption(
                 "동의한 최소 정보만 운영자 Supabase 수신함으로 전송됩니다. "
@@ -181,6 +185,16 @@ def _render_issue_report_control(
                 ),
                 key=f"issue_report_include_remote_content_{current_thread['id']}",
             )
+            if report_target_type == "response":
+                include_turn_trace_remote = st.checkbox(
+                    "선택한 응답까지의 질문과 검색 상태를 원격 신고에 포함",
+                    value=False,
+                    help=(
+                        "최대 8개 turn의 질문과 라우팅·검색 필터·문서 범위만 "
+                        "전송합니다. 답변 본문은 포함하지 않습니다."
+                    ),
+                    key=f"issue_report_include_remote_turn_trace_{current_thread['id']}",
+                )
         else:
             st.warning(
                 "신고 서버에 연결할 수 없어 현재 제출할 수 없습니다. "
@@ -199,12 +213,15 @@ def _render_issue_report_control(
             "consent_version": 1,
             "include_comment": remote_delivery and include_comment_remote,
             "include_selected_question": (
-                remote_delivery and include_selected_remote
+                remote_delivery
+                and (include_selected_remote or include_turn_trace_remote)
             ),
             "include_selected_answer": (
                 remote_delivery and include_selected_remote
             ),
-            "include_previous_turns": False,
+            "include_previous_turns": (
+                remote_delivery and include_turn_trace_remote
+            ),
         }
         preview = issue_report_store.build_issue_report_preview(
             context=report_context,
@@ -219,7 +236,9 @@ def _render_issue_report_control(
         preview["remote_includes_selected_content"] = (
             remote_delivery and include_selected_remote
         )
-        preview["remote_excludes_previous_turns"] = True
+        preview["remote_includes_turn_trace"] = (
+            remote_delivery and include_turn_trace_remote
+        )
         if remote_delivery:
             try:
                 remote_preview = issue_report_outbox.build_remote_report(
@@ -243,6 +262,7 @@ def _render_issue_report_control(
                     "selected_answer": remote_preview["observed"][
                         "selected_answer"
                     ],
+                    "turn_trace": remote_preview["observed"]["turn_trace"],
                     "removed_fields": remote_preview["privacy"][
                         "removed_fields"
                     ],
@@ -283,10 +303,15 @@ def _render_issue_report_control(
                 kind=report_kind,
                 report_target_type=report_target_type,
             )
-            issue_report_outbox.queue_report(
+            delivery_result = issue_report_outbox.queue_report(
                 report,
                 consent=report_context["remote_consent"],
             )
+            if delivery_result.get("status") != "queued":
+                st.error(
+                    "신고를 제출하지 못했습니다. 잠시 후 다시 시도해 주세요."
+                )
+                return
             st.session_state.show_issue_report_form = False
             st.session_state.issue_report_notice = {
                 "thread_id": current_thread["id"],
@@ -488,7 +513,7 @@ def _render_message(message: dict, *, index: int) -> None:
                 anchor_prefix=anchor_prefix,
                 source_count=source_count,
             )
-            st.markdown(linked_content)
+            st.markdown(escape_numeric_tildes_for_markdown(linked_content))
             _render_sources(
                 selected_sources,
                 key_prefix=f"message_{index}",
@@ -498,7 +523,7 @@ def _render_message(message: dict, *, index: int) -> None:
             )
             _render_no_result_actions(message, index=index)
         else:
-            st.markdown(message["content"])
+            st.markdown(escape_numeric_tildes_for_markdown(message["content"]))
 
 
 def render_chat(current_id: str, current_thread: dict) -> None:
@@ -591,7 +616,7 @@ def render_chat(current_id: str, current_thread: dict) -> None:
             conversation_store.rename_thread(current_id, thread_name)
 
         with st.chat_message("user"):
-            st.markdown(user_query)
+            st.markdown(escape_numeric_tildes_for_markdown(user_query))
 
         live_anchor_id = chat_jobs.chat_message_anchor_id(
             assistant_message_id,

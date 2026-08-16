@@ -239,6 +239,24 @@ def test_infer_search_filters_resolves_only_unique_safe_suffix_aliases():
     assert "target_names" not in ambiguous
 
 
+def test_infer_search_filters_does_not_derive_industry_keyword_from_company_name():
+    candidates = {
+        "target_name": ["KC산업"],
+        "broker": [],
+        "target_report_types": {"KC산업": ("company",)},
+    }
+
+    generic = infer_search_filters(
+        "화장품 산업에 관련된 회사들 리포트 정리해서 알려줘",
+        candidates,
+    )
+    explicit = infer_search_filters("KC산업 회사 리포트 정리해서 알려줘", candidates)
+
+    assert "target_name" not in generic
+    assert "target_names" not in generic
+    assert explicit["target_name"] == "KC산업"
+
+
 def test_metadata_matches_accepts_any_target_in_ordered_target_scope():
     filters = {"target_names": ["삼성전자", "SK하이닉스"], "report_type": "company"}
 
@@ -330,6 +348,34 @@ def test_current_report_types_replace_incompatible_prior_scalar_filter():
     assert merged == {
         "report_types": ["industry", "economy"],
         "broker": "하나증권",
+    }
+
+
+def test_same_target_and_report_type_keep_prior_file_scope():
+    merged = search_scope._merge_prior_filters_with_current(
+        {
+            "target_name": "화장품",
+            "report_type": "industry",
+            "file_names": ["first.pdf", "second.pdf"],
+        },
+        {"target_name": "화장품", "report_type": "industry"},
+    )
+
+    assert merged["file_names"] == ["first.pdf", "second.pdf"]
+
+
+def test_new_target_keeps_prior_broker_but_drops_prior_file_scope():
+    merged = search_scope._merge_prior_filters_with_current(
+        {
+            "broker": "하나증권",
+            "file_names": ["hana-a.pdf"],
+        },
+        {"target_name": "삼성전자"},
+    )
+
+    assert merged == {
+        "broker": "하나증권",
+        "target_name": "삼성전자",
     }
 
 
@@ -1161,6 +1207,100 @@ def test_search_scope_keeps_prior_dates_and_adds_company_filter_for_section_deep
     }
 
 
+def test_search_scope_handles_ordinal_report_followup_with_file_indexing():
+    result = search_scope.search_scope_node(
+        {
+            "question": "첫번째 리포트 좀 더 자세히 알려줘",
+            "rewritten_query": "첫번째 리포트 좀 더 자세히 알려줘",
+            "chat_history": [],
+            "followup_scope_intent": True,
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "report_date_start": "2026-06-15",
+                    "report_date_end": "2026-06-21",
+                },
+                "file_names": ["company-a.pdf", "industry-a.pdf", "economy-a.pdf"],
+            },
+        }
+    )
+
+    assert result["scope_source"] == "prior_search_scope"
+    assert result["search_filters"] == {
+        "report_date_start": "2026-06-15",
+        "report_date_end": "2026-06-21",
+        "file_names": ["company-a.pdf"],
+    }
+
+
+def test_report_content_recheck_uses_first_prior_document_and_vectordb(monkeypatch):
+    question = "첫번째 리포트에서 화장품과 관련된 내용이 확인되지 않아. 다시 확인해봐"
+
+    monkeypatch.setattr(
+        search_scope,
+        "infer_search_filters",
+        lambda _query: {"target_name": "화장품", "report_type": "industry"},
+    )
+    result = search_scope.search_scope_node(
+        {
+            "question": question,
+            "rewritten_query": (
+                "하나증권 Weekly Retail-Cos. Letter 기대가 확신으로 바뀌는 순간 "
+                "화장품 관련 내용 재확인"
+            ),
+            "chat_history": [],
+            "followup_scope_intent": True,
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {
+                    "target_name": "화장품",
+                    "report_type": "industry",
+                },
+                "file_names": ["weekly-retail-cos.pdf", "second-report.pdf"],
+            },
+        }
+    )
+
+    assert result["routing_context"] == {
+        "has_vector_intent": True,
+        "route_hint": None,
+        "full_period_request": False,
+    }
+    assert result["search_filters"] == {
+        "file_names": ["weekly-retail-cos.pdf"],
+    }
+    assert result["scope_decision"]["reason"] == "matched_ordinal_report_reference"
+    assert router.router_node({"question": question, **result}) == {"route": "vectordb"}
+
+
+def test_out_of_range_ordinal_does_not_expand_to_all_prior_documents():
+    result = search_scope.search_scope_node(
+        {
+            "question": "세 번째 리포트를 확인해줘",
+            "rewritten_query": "세 번째 리포트를 확인해줘",
+            "followup_scope_intent": True,
+            "prior_search_scope": {
+                "route": "vectordb",
+                "search_filters": {},
+                "file_names": ["a.pdf", "b.pdf"],
+            },
+        }
+    )
+
+    assert result["search_filters"] == {"file_names": []}
+    assert result["scope_decision"] == {
+        "matched": False,
+        "reason": "document_ordinal_out_of_range",
+        "requested_document_rank": 3,
+        "document_count": 2,
+    }
+    assert result["routing_context"]["route_hint"] == "vectordb"
+    assert not metadata_matches(
+        {"file_name": "a.pdf"},
+        result["search_filters"],
+    )
+
+
 def test_search_scope_drops_incompatible_sector_target_for_company_section_followup(monkeypatch):
     def fake_infer_search_filters(query):
         return {"target_name": "반도체", "report_type": "company"}
@@ -1217,6 +1357,82 @@ def test_search_scope_prepare_requests_industry_lookup_for_sector_company_questi
 
     assert result["scope_prepare"]["industry_lookup_request"] == {
         "term": "반도체",
+        "reason": "sector_company_request",
+        "target": "company_universe",
+    }
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "화장품 산업에 관련된 회사들 리포트 정리해서 알려줘",
+        "화장품 업종에 관련된 회사들 리포트 정리해서 알려줘",
+    ],
+)
+def test_search_scope_prepare_routes_industry_synonyms_to_company_universe(
+    question,
+    monkeypatch,
+):
+    candidates = {
+        "target_name": ("KC산업",),
+        "broker": (),
+        "report_month": (),
+        "target_report_types": {"KC산업": ("company",)},
+    }
+    monkeypatch.setattr(metadata_filters_module, "get_metadata_candidates", lambda: candidates)
+    monkeypatch.setattr(search_scope, "get_metadata_candidates", lambda: candidates)
+
+    result = search_scope.search_scope_prepare_node({"question": question})
+    prepare = result["scope_prepare"]
+
+    assert "target_name" not in prepare["question_filters"]
+    assert "target_names" not in prepare["question_filters"]
+    assert prepare["industry_lookup_request"] == {
+        "term": "화장품",
+        "reason": "sector_company_request",
+        "target": "company_universe",
+    }
+
+
+def test_search_scope_prepare_keeps_exact_industry_suffixed_company_as_company_lookup(
+    monkeypatch,
+):
+    candidates = {
+        "target_name": ("KC산업",),
+        "broker": (),
+        "report_month": (),
+        "target_report_types": {"KC산업": ("company",)},
+    }
+    monkeypatch.setattr(metadata_filters_module, "get_metadata_candidates", lambda: candidates)
+    monkeypatch.setattr(search_scope, "get_metadata_candidates", lambda: candidates)
+
+    result = search_scope.search_scope_prepare_node(
+        {"question": "KC산업 회사 리포트 정리해서 알려줘"}
+    )
+    prepare = result["scope_prepare"]
+
+    assert prepare["question_filters"]["target_name"] == "KC산업"
+    assert "industry_lookup_request" not in prepare
+
+
+def test_search_scope_prepare_keeps_separate_company_and_industry_lookup(monkeypatch):
+    candidates = {
+        "target_name": ("삼성전자",),
+        "broker": (),
+        "report_month": (),
+        "target_report_types": {"삼성전자": ("company",)},
+    }
+    monkeypatch.setattr(metadata_filters_module, "get_metadata_candidates", lambda: candidates)
+    monkeypatch.setattr(search_scope, "get_metadata_candidates", lambda: candidates)
+
+    result = search_scope.search_scope_prepare_node(
+        {"question": "삼성전자와 화장품 산업 관련 회사들을 비교해줘"}
+    )
+    prepare = result["scope_prepare"]
+
+    assert prepare["question_filters"]["target_name"] == "삼성전자"
+    assert prepare["industry_lookup_request"] == {
+        "term": "화장품",
         "reason": "sector_company_request",
         "target": "company_universe",
     }

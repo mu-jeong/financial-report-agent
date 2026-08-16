@@ -53,6 +53,23 @@ _ALLOWED_CATEGORIES = {
 _ALLOWED_KINDS = {"user_feedback", "system_error"}
 _ALLOWED_TARGET_TYPES = {"response", "ui_or_system"}
 _ALLOWED_SOURCES = {"local_chat", "chat_monitoring_trace", "system"}
+_RESULT_COUNT_KINDS = {"document", "row", "source"}
+_REMOTE_TURN_TRACE_LIMIT = 8
+_REMOTE_TURN_TRACE_BYTES = 48 * 1024
+_REMOTE_FILTER_BYTES = 2 * 1024
+_REMOTE_FILTER_KEYS = {
+    "broker",
+    "brokers",
+    "file_names",
+    "report_date",
+    "report_date_end",
+    "report_date_start",
+    "report_month",
+    "report_type",
+    "report_types",
+    "target_name",
+    "target_names",
+}
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$")
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -306,6 +323,16 @@ def build_remote_report(
         removed_fields.add("observed.selected_answer")
 
     question, answer = _bound_selected_content(question, answer)
+    turn_trace = (
+        _compact_remote_turn_trace(
+            context.get("turn_trace"),
+            removed_fields=removed_fields,
+        )
+        if explicitly_allowed("include_previous_turns") and question is not None
+        else []
+    )
+    if not turn_trace and context.get("turn_trace"):
+        removed_fields.add("context.turn_trace")
     hints = _remote_debug_hints(
         diagnostics.get("debug_hints") or context.get("debug_hints") or [],
         removed_fields=removed_fields,
@@ -324,7 +351,17 @@ def build_remote_report(
         trace_timing.get("total_seconds") or observed.get("latency")
     )
     result_count = _bounded_count(
-        trace_answer.get("source_count"), maximum=1_000_000
+        trace_answer.get("result_count"), maximum=1_000_000
+    )
+    if result_count is None:
+        result_count = _bounded_count(
+            trace_answer.get("source_count"), maximum=1_000_000
+        )
+    raw_result_count_kind = trace_answer.get("result_count_kind")
+    result_count_kind = (
+        str(raw_result_count_kind)
+        if raw_result_count_kind in _RESULT_COUNT_KINDS
+        else "document" if route == "vectordb" else "source"
     )
     citation_ranks = trace_answer.get("citation_ranks_used")
     citation_count = (
@@ -379,16 +416,18 @@ def build_remote_report(
             "include_comment": bool(comment),
             "include_selected_question": question is not None,
             "include_selected_answer": answer is not None,
-            "include_previous_turns": False,
+            "include_previous_turns": bool(turn_trace),
         },
         "observed": {
             "route": route,
             "status": status,
             "latency_ms": latency_ms,
             "result_count": result_count,
+            "result_count_kind": result_count_kind,
             "citation_count": citation_count,
             "selected_question": question,
             "selected_answer": answer,
+            "turn_trace": turn_trace,
         },
         "diagnostics": {
             "stable_error_code": _nullable_token(
@@ -1020,6 +1059,190 @@ def _remote_debug_hints(
         hints.append(hint)
         total += len(encoded)
     return hints
+
+
+def _compact_remote_turn_trace(
+    value: Any,
+    *,
+    removed_fields: set[str],
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    raw_turns = value[-_REMOTE_TURN_TRACE_LIMIT:]
+    if len(value) > len(raw_turns):
+        removed_fields.add("observed.turn_trace")
+
+    turns: list[dict[str, Any]] = []
+    for raw_turn in raw_turns:
+        if not isinstance(raw_turn, Mapping):
+            removed_fields.add("observed.turn_trace")
+            continue
+        turn = {
+            "turn_index": _bounded_count(
+                raw_turn.get("turn_index"), maximum=1_000_000
+            ),
+            "question": _redact_and_bound(
+                raw_turn.get("question"),
+                maximum=2048,
+                field="observed.turn_trace.question",
+                removed_fields=removed_fields,
+            ),
+            "rewritten_query": _nullable_redacted_text(
+                raw_turn.get("rewritten_query"),
+                maximum=2048,
+                field="observed.turn_trace.rewritten_query",
+                removed_fields=removed_fields,
+            ),
+            "route": _nullable_token(raw_turn.get("route")),
+            "status": _nullable_token(raw_turn.get("status")),
+            "followup_scope_intent": _nullable_bool(
+                raw_turn.get("followup_scope_intent")
+            ),
+            "scope_source": _nullable_token(raw_turn.get("scope_source")),
+            "scope_reason": _nullable_token(raw_turn.get("scope_reason")),
+            "matched_document_rank": _bounded_count(
+                raw_turn.get("matched_document_rank"), maximum=1_000_000
+            ),
+            "route_hint": _nullable_token(raw_turn.get("route_hint")),
+            "has_vector_intent": _nullable_bool(
+                raw_turn.get("has_vector_intent")
+            ),
+            "search_filters": _compact_remote_filters(
+                raw_turn.get("search_filters"),
+                field="observed.turn_trace.search_filters",
+                removed_fields=removed_fields,
+            ),
+            "prior_search_filters": _compact_remote_filters(
+                raw_turn.get("prior_search_filters"),
+                field="observed.turn_trace.prior_search_filters",
+                removed_fields=removed_fields,
+            ),
+            "prior_file_names": _compact_remote_text_list(
+                raw_turn.get("prior_file_names"),
+                field="observed.turn_trace.prior_file_names",
+                removed_fields=removed_fields,
+            ),
+            "selected_file_names": _compact_remote_text_list(
+                raw_turn.get("selected_file_names"),
+                field="observed.turn_trace.selected_file_names",
+                removed_fields=removed_fields,
+            ),
+            "result_count": _bounded_count(
+                raw_turn.get("result_count"), maximum=1_000_000
+            ),
+            "result_count_kind": (
+                str(raw_turn.get("result_count_kind"))
+                if raw_turn.get("result_count_kind") in _RESULT_COUNT_KINDS
+                else None
+            ),
+        }
+        if turn["turn_index"] is None or not turn["question"]:
+            removed_fields.add("observed.turn_trace")
+            continue
+        turns.append(turn)
+    while turns and _json_bytes(turns) > _REMOTE_TURN_TRACE_BYTES:
+        turns.pop(0)
+        removed_fields.add("observed.turn_trace")
+    return turns
+
+
+def _compact_remote_filters(
+    value: Any,
+    *,
+    field: str,
+    removed_fields: set[str],
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    compact: dict[str, Any] = {}
+    for key, raw_value in value.items():
+        if key not in _REMOTE_FILTER_KEYS:
+            removed_fields.add(field)
+            continue
+        if isinstance(raw_value, (list, tuple)):
+            compact_value: Any = _compact_remote_text_list(
+                list(raw_value),
+                field=field,
+                removed_fields=removed_fields,
+            )
+        elif raw_value is not None:
+            compact_value = _redact_and_bound(
+                raw_value,
+                maximum=256,
+                field=field,
+                removed_fields=removed_fields,
+            )
+        else:
+            continue
+        candidate = {**compact, key: compact_value}
+        while (
+            isinstance(compact_value, list)
+            and compact_value
+            and _json_bytes(candidate) > _REMOTE_FILTER_BYTES
+        ):
+            compact_value.pop()
+            candidate[key] = compact_value
+            removed_fields.add(field)
+        if _json_bytes(candidate) > _REMOTE_FILTER_BYTES:
+            removed_fields.add(field)
+            continue
+        compact = candidate
+    return compact
+
+
+def _compact_remote_text_list(
+    value: Any,
+    *,
+    field: str,
+    removed_fields: set[str],
+) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    if len(value) > 8:
+        removed_fields.add(field)
+    return [
+        _redact_and_bound(
+            item,
+            maximum=256,
+            field=field,
+            removed_fields=removed_fields,
+        )
+        for item in value[:8]
+        if item is not None
+    ]
+
+
+def _nullable_redacted_text(
+    value: Any,
+    *,
+    maximum: int,
+    field: str,
+    removed_fields: set[str],
+) -> str | None:
+    if value is None:
+        return None
+    text = _redact_and_bound(
+        value,
+        maximum=maximum,
+        field=field,
+        removed_fields=removed_fields,
+    )
+    return text or None
+
+
+def _nullable_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _json_bytes(value: Any) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
 
 
 def _bound_selected_content(

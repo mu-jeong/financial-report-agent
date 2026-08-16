@@ -216,7 +216,7 @@ GUI 대화 이력은 `data/conversations.db`에 저장됩니다. deprecated CLI�
 
 GUI 답변 생성은 백그라운드 thread에서 실행됩니다. 답변 생성 중인 대화는 입력창이 잠기고, 다른 대화로 이동해도 작업은 계속되며 완료/실패 상태가 toast와 대화 목록 배지로 표시됩니다.
 
-채팅 입력창 아래의 `신고` 버튼은 별도 `.txt`/`.json` 신고 파일을 만들지 않습니다. 사용자가 각각 명시적으로 동의한 설명·선택 질문·응답과 제한된 진단값만 메모리에서 민감정보/로컬 경로 redaction한 뒤 Supabase 수신함으로 비동기 전송합니다. 원격 내용 동의는 모두 기본 해제이며 실제 redaction 결과를 제출 전에 미리 볼 수 있고, 전체 대화 첨부는 제공하지 않습니다. 사용자는 제출 즉시 `신고가 접수되었습니다.` 안내만 보며 HTTP POST, 재시도, 최종 전송 실패 상태는 백그라운드에서 처리되어 화면에 노출되지 않습니다. 최초 전송 실패 후 최대 3회만 재시도하며, 전달 성공·영구 거절·재시도 소진·7일 만료 시 해당 outbox 행과 payload를 즉시 삭제합니다. 기본 배포의 공개 Supabase URL과 publishable key가 내장되어 있으며, `ISSUE_REPORT_REMOTE_ENABLED=false`로 설정하면 로컬 파일로 대체 저장하지 않고 제출을 비활성화합니다.
+채팅 입력창 아래의 `신고` 버튼은 별도 `.txt`/`.json` 신고 파일을 만들지 않습니다. 사용자가 각각 명시적으로 동의한 설명·선택 질문·응답과 제한된 진단값만 메모리에서 민감정보/로컬 경로 redaction한 뒤 Supabase 수신함으로 비동기 전송합니다. 원격 내용 동의는 모두 기본 해제이며 실제 redaction 결과를 제출 전에 미리 볼 수 있습니다. 다중 turn 재현이 필요하면 별도 동의로 최대 8개 turn의 질문과 라우팅·검색 필터·문서 범위를 포함할 수 있지만, 이전 답변 본문은 포함하지 않습니다. durable outbox 기록이 확인된 뒤에만 `신고가 접수되었습니다.`를 표시하며, 이후 HTTP POST·재시도·최종 전송 실패 상태는 백그라운드에서 처리합니다. 최초 전송 실패 후 최대 3회만 재시도하며, 전달 성공·영구 거절·재시도 소진·7일 만료 시 해당 outbox 행과 payload를 즉시 삭제합니다. 기본 배포의 공개 Supabase URL과 publishable key가 내장되어 있으며, `ISSUE_REPORT_REMOTE_ENABLED=false`로 설정하면 로컬 파일로 대체 저장하지 않고 제출을 비활성화합니다.
 
 Supabase Free 호스팅 프로젝트를 사용할 때 로컬 Supabase 서버나 Docker는 필요하지 않습니다. 이 저장소의 `supabase/migrations/`와 `supabase/functions/`를 원격 프로젝트에 적용할 때만 Supabase CLI를 사용합니다. 배포와 보안 검증 절차는 [Issue report ingest deployment](docs/production/05_ISSUE_REPORT_INGEST_DEPLOYMENT.md)를 따릅니다.
 

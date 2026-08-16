@@ -23,10 +23,26 @@ VECTORDB_INTENT_KEYWORDS = (
     "summary",
     "content",
 )
+VECTORDB_CONTENT_INSPECTION_KEYWORDS = (
+    "관련 내용",
+    "관련된 내용",
+    "내용이 확인",
+    "내용을 확인",
+    "내용 재확인",
+    "본문 재확인",
+)
 TOP_TARGET_KEYWORDS = ("가장 많이", "최다", "많이 발간", "많이 언급", "top", "most frequent", "most published")
 TARGET_SCOPE_KEYWORDS = ("회사", "종목", "기업", "target")
 FULL_PERIOD_KEYWORDS = ("전체 기간", "전체기간", "전 기간", "전기간", "전체 데이터", "full period", "all period", "all time")
-INDUSTRY_COMPANY_KEYWORDS = ("섹터", "분야", "업종", "관련주", "관련 기업", "관련 회사")
+INDUSTRY_COMPANY_KEYWORDS = (
+    "섹터",
+    "분야",
+    "업종",
+    "산업",
+    "관련주",
+    "관련 기업",
+    "관련 회사",
+)
 TEMPORAL_REPORT_SET_KEYWORDS = (
     "시기별",
     "월별",
@@ -168,6 +184,35 @@ def _industry_lookup_term(text: str) -> str | None:
         return term or None
     return None
 
+
+def _industry_term_belongs_to_company_target(
+    text: str,
+    industry_term: str,
+    filters: dict,
+) -> bool:
+    targets = list(filters.get("target_names") or [])
+    if filters.get("target_name"):
+        targets.append(filters["target_name"])
+    if not targets:
+        return False
+
+    target_report_types = get_metadata_candidates().get("target_report_types")
+    if not isinstance(target_report_types, dict):
+        return False
+    normalized_text = _normalize_text(text)
+    normalized_term = _normalize_text(industry_term)
+    company_name_candidates = {
+        f"{normalized_term}{_normalize_text(keyword)}"
+        for keyword in INDUSTRY_COMPANY_KEYWORDS
+    }
+    return any(
+        "company" in target_report_types.get(target, ())
+        and _normalize_text(target) in normalized_text
+        and _normalize_text(target) in company_name_candidates
+        for target in targets
+    )
+
+
 def _date_range_is_inverted(filters: dict | None) -> bool:
     filters = filters or {}
     start = filters.get("report_date_start")
@@ -219,7 +264,12 @@ def search_scope_prepare_node(state: State) -> dict:
         "temporal_context": temporal_context,
         "base_filters": base_filters,
     }
-    if industry_term := _industry_lookup_term(question):
+    industry_term = _industry_lookup_term(question)
+    if industry_term and not _industry_term_belongs_to_company_target(
+        question,
+        industry_term,
+        current_question_filters,
+    ):
         prepare["industry_lookup_request"] = {
             "term": industry_term,
             "reason": "sector_company_request",
@@ -286,25 +336,39 @@ def _merge_prior_filters_with_current(prior_filters: dict, current_filters: dict
     """
     merged = dict(prior_filters or {})
     current = dict(current_filters or {})
-    current_targets = list(current.get("target_names") or [])
-    prior_target = merged.get("target_name")
+    prior_targets = set(merged.get("target_names") or [])
+    if merged.get("target_name"):
+        prior_targets.add(merged["target_name"])
+    current_targets = set(current.get("target_names") or [])
+    if current.get("target_name"):
+        current_targets.add(current["target_name"])
+    file_scope_changed = bool(current_targets) and current_targets != prior_targets
+    target_switched = bool(prior_targets) and file_scope_changed
+
     current_target = current.get("target_name")
-    if current_targets:
+    if current.get("target_names"):
         merged.pop("target_name", None)
         merged.pop("target_names", None)
-        merged.pop("file_names", None)
-    elif current_target and prior_target and current_target != prior_target:
+    elif current_target and target_switched:
         if "broker" not in current:
             merged.pop("broker", None)
-        merged.pop("file_names", None)
     if current_target:
         merged.pop("target_names", None)
+
+    prior_report_types = set(merged.get("report_types") or [])
+    if merged.get("report_type"):
+        prior_report_types.add(merged["report_type"])
+    current_report_types = set(current.get("report_types") or [])
+    if current.get("report_type"):
+        current_report_types.add(current["report_type"])
+    if current_report_types and current_report_types != prior_report_types:
+        file_scope_changed = True
     if "report_types" in current:
         merged.pop("report_type", None)
     elif "report_type" in current:
         merged.pop("report_types", None)
     merged.update(current)
-    if {"target_name", "target_names"} & current.keys():
+    if file_scope_changed:
         merged.pop("file_names", None)
     return merged
 
@@ -318,7 +382,10 @@ def search_scope_node(state: State) -> dict:
     """
     query = state.get("rewritten_query", state["question"])
     combined_intent_text = f"{state['question']} {query}"
-    has_vector_intent = any(keyword in combined_intent_text for keyword in VECTORDB_INTENT_KEYWORDS)
+    has_vector_intent = any(
+        keyword in combined_intent_text
+        for keyword in (*VECTORDB_INTENT_KEYWORDS, *VECTORDB_CONTENT_INSPECTION_KEYWORDS)
+    )
     full_period_request = _is_full_period_request(combined_intent_text)
     current_question_filters = _drop_incompatible_target_filter(infer_search_filters(state["question"]))
     current_temporal_context = None if full_period_request else resolve_temporal_context(state["question"])
@@ -375,13 +442,14 @@ def search_scope_node(state: State) -> dict:
             if section_decision.get("matched"):
                 search_filters = section_decision["search_filters"]
                 scope_decision = section_decision
+            elif section_decision.get("reason") == "document_ordinal_out_of_range":
+                search_filters = {"file_names": []}
+                scope_decision = section_decision
             else:
                 prior_filters = _merge_prior_filters_with_current(prior_filters, current_non_temporal_filters)
                 if current_temporal_context and not full_period_request:
                     prior_filters["report_date_start"] = current_temporal_context["report_date_start"]
                     prior_filters["report_date_end"] = current_temporal_context["report_date_end"]
-                    prior_filters.pop("file_names", None)
-                if {"report_type", "report_types"} & current_non_temporal_filters.keys():
                     prior_filters.pop("file_names", None)
                 if full_period_request:
                     prior_filters.pop("report_date_start", None)
@@ -403,6 +471,11 @@ def search_scope_node(state: State) -> dict:
                 and not has_vector_intent
             ):
                 route_hint = "rdb"
+            if (
+                scope_decision
+                and scope_decision.get("reason") == "document_ordinal_out_of_range"
+            ):
+                route_hint = "vectordb"
 
     scope_selection_request = None
     if _is_top_target_request(combined_intent_text) and not (

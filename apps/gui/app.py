@@ -79,6 +79,7 @@ def _reload_loaded_application_modules() -> None:
     Monitoring jobs can still be executing its functions during an app rerun.
     """
     for module_name in (
+        "src.core.chat_ui_helpers",
         "src.core.data_update_jobs",
         "src.core.conversation_store",
         "src.core.issue_report_store",

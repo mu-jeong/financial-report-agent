@@ -33,9 +33,11 @@ This function is the only public write boundary for central issue reports. Calle
       "status": "succeeded",
       "latency_ms": 1200,
       "result_count": 10,
+      "result_count_kind": "document",
       "citation_count": 3,
       "selected_question": null,
-      "selected_answer": null
+      "selected_answer": null,
+      "turn_trace": []
     },
     "diagnostics": {
       "stable_error_code": null,
@@ -51,9 +53,9 @@ This function is the only public write boundary for central issue reports. Calle
 }
 ```
 
-New clients send exactly the minimized report keys shown above. Selected question and answer total at most 32 KiB and must match their explicit consent flags. Comment is at most 4 KiB and must match `include_comment`. Previous turns are rejected in Phase 1. Debug hints contain at most eight 512-byte strings (4 KiB total). Before parsing, every POST is charged against IP/global quotas and read through a 128 KiB bounded stream. The server also applies global object, array, string, depth, timestamp, identifier, category, source, target, version, and residual-sensitive-content checks before storage. Attachments, screenshots, raw documents, prompts, credentials, arbitrary fields, and challenge tokens are not part of v1.
+New clients send the minimized report keys shown above. `result_count_kind` distinguishes VectorDB document counts, RDB row counts, and legacy source-count fallbacks. Selected question and answer total at most 32 KiB and must match their explicit consent flags. Comment is at most 4 KiB and must match `include_comment`. With separate consent, `turn_trace` may contain at most eight bounded question/state records; it excludes previous answer bodies and is reduced client-side to keep the complete envelope within 128 KiB. Debug hints contain at most eight 512-byte strings (4 KiB total). Before parsing, every POST is charged against IP/global quotas and read through a 128 KiB bounded stream. The server also applies global object, array, string, depth, timestamp, identifier, category, source, target, version, and residual-sensitive-content checks before storage. Attachments, screenshots, raw documents, prompts, credentials, arbitrary fields, and challenge tokens are not part of v1.
 
-For already queued legacy envelopes, the validator still accepts `id`, `created_at`, `thread_id`, `message_id`, and `job_id`, but removes them before storage. The database migration also deletes these local-only fields from existing rows and enforces the minimized stored shape. `app_version` remains because release-specific regressions require it; envelope-level `event_id`, `installation_id`, `queued_at`, and server `received_at` remain for idempotency, quota enforcement, retry freshness, and retention.
+For already queued legacy envelopes, the validator accepts reports that omit `result_count_kind` and `turn_trace`. It also accepts `id`, `created_at`, `thread_id`, `message_id`, and `job_id`, but removes those identifiers before storage. The database migration deletes these local-only fields from existing rows and enforces the minimized stored shape. `app_version` remains because release-specific regressions require it; envelope-level `event_id`, `installation_id`, `queued_at`, and server `received_at` remain for idempotency, quota enforcement, retry freshness, and retention.
 
 Success is exactly `{"ok":true,"disposition":"accepted|duplicate","receipt_id":"uuid","received_at":"RFC3339"}`. Contract failures return 4xx; transient storage/configuration failures return 503; quota failures return 429 plus `Retry-After`. Retrying must preserve `event_id`.
 

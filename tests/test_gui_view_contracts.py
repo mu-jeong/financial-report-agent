@@ -149,6 +149,7 @@ EXPLICIT_WIDGET_KEYS = {
     "f\"issue_report_submit_{current_thread['id']}\"",
     "f\"issue_report_include_remote_comment_{current_thread['id']}\"",
     "f\"issue_report_include_remote_content_{current_thread['id']}\"",
+    "f\"issue_report_include_remote_turn_trace_{current_thread['id']}\"",
     "f\"candidate_approve_{candidate['id']}\"",
     "f\"candidate_attach_handoff_{item['handoff_id']}\"",
     "f\"candidate_attach_run_{run['run_id']}\"",
@@ -400,15 +401,13 @@ def test_issue_reporting_uses_retry_only_outbox_without_local_file_ui():
     assert '"experiments": ("evaluation", "parsing")' in monitoring_source
 
 
-def test_issue_reporting_acknowledges_click_without_transport_status_ui():
+def test_issue_reporting_acknowledges_only_after_durable_queueing():
     chat_source = CHAT_VIEWS_PATH.read_text(encoding="utf-8-sig")
 
     assert '"message": "신고가 접수되었습니다."' in chat_source
     assert "접수 후 전송과 재시도는 백그라운드에서 처리" in chat_source
-    assert (
-        "delivery_result = issue_report_outbox.queue_report(" not in chat_source
-    )
-    assert "신고를 제출하지 못했습니다" not in chat_source
+    assert "delivery_result = issue_report_outbox.queue_report(" in chat_source
+    assert "신고를 제출하지 못했습니다" in chat_source
     assert "전송 실패 시 자동으로 다시 시도합니다" not in chat_source
 
 
@@ -1798,6 +1797,24 @@ def test_app_imports_or_reloads_gui_modules_once_per_run():
         in app_source
     )
     assert 'search_engine = _import_or_reload("apps.gui.search_engine")' not in app_source
+
+
+def test_app_reloads_chat_ui_helpers_before_importing_chat_views():
+    app_source = APP_PATH.read_text(encoding="utf-8-sig")
+    app_tree = ast.parse(app_source, filename=str(APP_PATH))
+    reload_function = next(
+        node
+        for node in app_tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_reload_loaded_application_modules"
+    )
+    reloaded_modules = {
+        node.value
+        for node in ast.walk(reload_function)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert "src.core.chat_ui_helpers" in reloaded_modules
 
 
 def test_app_only_composes_extracted_views_and_leaf_modules_do_not_import_app():

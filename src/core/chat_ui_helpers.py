@@ -15,6 +15,9 @@ _DATE_RANGE_PATTERNS = [
     re.compile(r"20\d{2}\s*년\s*(?:1[0-2]|0?[1-9])\s*월"),
     re.compile(r"(?:이번주|지난주|전주|금주|다음주|차주|이번달|지난달|전월|금월|다음달|익월|오늘|어제|그제|내일|모레)"),
 ]
+_NUMERIC_TILDE_RE = re.compile(r"(?<![\\~])~(?!~)(?=[ \t]*\d)")
+_BACKTICK_CODE_RE = re.compile(r"(?P<delimiter>`+).*?(?P=delimiter)", re.DOTALL)
+_TILDE_FENCE_RE = re.compile(r"^[ \t]{0,3}(~{3,})(.*)$")
 
 
 def _compact_spaces(value: str) -> str:
@@ -30,6 +33,50 @@ def _strip_temporal_phrases(question: str) -> str:
 
 def _has_temporal_phrase(question: str) -> bool:
     return any(pattern.search(str(question or "")) for pattern in _DATE_RANGE_PATTERNS)
+
+
+def _escape_numeric_tildes_outside_inline_code(text: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for match in _BACKTICK_CODE_RE.finditer(text):
+        parts.append(_NUMERIC_TILDE_RE.sub(r"\\~", text[cursor:match.start()]))
+        parts.append(match.group(0))
+        cursor = match.end()
+    parts.append(_NUMERIC_TILDE_RE.sub(r"\\~", text[cursor:]))
+    return "".join(parts)
+
+
+def escape_numeric_tildes_for_markdown(text: str) -> str:
+    """Escape financial range tildes without changing code or raw chat data."""
+    escaped: list[str] = []
+    plain_lines: list[str] = []
+    fence_length = 0
+
+    def flush_plain_lines() -> None:
+        if plain_lines:
+            escaped.append(_escape_numeric_tildes_outside_inline_code("".join(plain_lines)))
+            plain_lines.clear()
+
+    for line in str(text or "").splitlines(keepends=True):
+        fence_match = _TILDE_FENCE_RE.match(line)
+        if fence_length:
+            escaped.append(line)
+            if (
+                fence_match
+                and len(fence_match.group(1)) >= fence_length
+                and not fence_match.group(2).strip()
+            ):
+                fence_length = 0
+            continue
+        if fence_match:
+            flush_plain_lines()
+            fence_length = len(fence_match.group(1))
+            escaped.append(line)
+            continue
+        plain_lines.append(line)
+
+    flush_plain_lines()
+    return "".join(escaped)
 
 
 def build_scope_notice(state_or_metadata: dict[str, Any]) -> str | None:

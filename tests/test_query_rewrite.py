@@ -155,3 +155,23 @@ def test_query_rewrite_marks_section_deep_dive_as_prior_scope_followup():
         "uses_chat_history": False,
         "followup_scope_intent": True,
     }
+
+
+def test_query_rewrite_marks_ordinal_report_followup():
+    for question in ("첫번째 리포트 정리해줘", "첫 번째 리포트 정리해줘"):
+        result = query_rewrite.query_rewrite_node(
+            {
+                "question": question,
+                "chat_history": [],
+            }
+        )
+
+        assert result == {
+            "rewritten_query": question,
+            "uses_chat_history": False,
+            "followup_scope_intent": True,
+        }
+
+
+def test_query_rewrite_does_not_treat_unrelated_ordinal_as_scope_followup():
+    assert query_rewrite.is_scope_followup("첫 고객사 매출을 알려줘") is False

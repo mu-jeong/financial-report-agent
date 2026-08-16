@@ -615,6 +615,9 @@ def test_rdb_turn_keeps_document_evidence_separate_from_vector_chunks():
     ]
     assert detail["answer"]["citation_ranks_used"] == []
     assert detail["answer"]["citation_valid"] is None
+    assert detail["answer"]["source_count"] == 1
+    assert detail["answer"]["result_count"] == 2
+    assert detail["answer"]["result_count_kind"] == "row"
     assert detail["grounding"]["status"] == "linked"
 
 
@@ -1051,6 +1054,12 @@ def test_chat_trace_issue_context_includes_selected_previous_diff_and_hints():
     assert context["previous_message"]["id"] == 2
     assert context["diff"]["search_filters"]["added"] == {"report_type": "company"}
     assert context["trace_detail"]["scope"]["search_filters"]["report_type"] == "company"
+    assert [turn["question"] for turn in context["turn_trace"]] == [
+        "지난주 리포트 정리",
+        "개별 종목 자세히",
+    ]
+    assert context["turn_trace"][1]["route"] == "vectordb"
+    assert context["turn_trace"][1]["scope_reason"] == "matched_prior_section_alias"
     assert "conversation_messages" not in context
 
 def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():

@@ -1324,6 +1324,19 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
         if route == "vectordb"
         else len(rdb_sources)
     )
+    rdb_row_count = _nonnegative_int(
+        ((monitoring.get("rdb") or {}).get("row_count"))
+    )
+    result_count = (
+        rdb_row_count
+        if route == "rdb" and rdb_row_count is not None
+        else source_count
+    )
+    result_count_kind = (
+        "row"
+        if route == "rdb" and rdb_row_count is not None
+        else "document" if route == "vectordb" else "source"
+    )
     answer = str(message.get("content") or "")
     citation_ranks = (
         sorted(extract_citation_ranks(answer, source_count=None))
@@ -1379,6 +1392,8 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
         "answer": {
             "assistant_preview": _safe_preview(answer, 500),
             "source_count": source_count,
+            "result_count": result_count,
+            "result_count_kind": result_count_kind,
             "citation_ranks_used": citation_ranks,
             "citation_valid": citation_valid,
         },
@@ -1433,6 +1448,8 @@ def build_message_trace_summary(
             if answer.get("source_count") is not None
             else retrieval.get("source_count")
         ),
+        "result_count": answer.get("result_count"),
+        "result_count_kind": answer.get("result_count_kind"),
         "prior_scope_file_count": (detail.get("state_transitions") or {}).get("input", {}).get("prior_search_scope_file_count"),
         "search_scope_file_count": (detail.get("state_transitions") or {}).get("after_search_scope", {}).get("search_scope_file_count"),
         "citation_valid": answer.get("citation_valid"),
@@ -1611,6 +1628,78 @@ def _compact_trace_message(message: dict[str, Any] | None) -> dict[str, Any] | N
     }
 
 
+def _build_issue_turn_trace(
+    messages: list[dict[str, Any]],
+    selected_message_id: Any,
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Keep bounded question/state history without copying prior answers."""
+    turns: list[dict[str, Any]] = []
+    latest_question: str | None = None
+    for message in messages:
+        role = message.get("role")
+        if role == "user":
+            latest_question = str(message.get("content") or "")
+            continue
+        if role != "assistant":
+            continue
+
+        metadata = _message_metadata(message)
+        detail = build_message_trace_detail(
+            message,
+            user_question=latest_question,
+        )
+        query_rewrite = detail.get("query_rewrite") or {}
+        state_transitions = detail.get("state_transitions") or {}
+        state_input = state_transitions.get("input") or {}
+        prior_scope = state_input.get("prior_search_scope") or {}
+        after_routing = state_transitions.get("after_routing") or {}
+        routing_context = after_routing.get("routing_context") or {}
+        scope_decision = query_rewrite.get("scope_decision") or {}
+        selected_files = _ordered_file_names(
+            _metadata_selected_sources(metadata)
+        )
+        turns.append(
+            {
+                "turn_index": len(turns) + 1,
+                "question": str(latest_question or ""),
+                "rewritten_query": query_rewrite.get("rewritten_query"),
+                "route": (detail.get("routing") or {}).get("route"),
+                "status": metadata.get("status"),
+                "followup_scope_intent": query_rewrite.get(
+                    "followup_scope_intent"
+                ),
+                "scope_source": query_rewrite.get("scope_source"),
+                "scope_reason": scope_decision.get("reason"),
+                "matched_document_rank": scope_decision.get(
+                    "matched_document_rank"
+                ),
+                "route_hint": routing_context.get("route_hint"),
+                "has_vector_intent": routing_context.get(
+                    "has_vector_intent"
+                ),
+                "search_filters": (detail.get("scope") or {}).get(
+                    "search_filters"
+                ) or {},
+                "prior_search_filters": prior_scope.get("search_filters")
+                or {},
+                "prior_file_names": list(prior_scope.get("file_names") or []),
+                "selected_file_names": selected_files,
+                "result_count": (detail.get("answer") or {}).get(
+                    "result_count"
+                ),
+                "result_count_kind": (detail.get("answer") or {}).get(
+                    "result_count_kind"
+                ),
+            }
+        )
+        if str(message.get("id")) == str(selected_message_id):
+            break
+
+    return turns[-limit:]
+
+
 def build_chat_trace_issue_context(
     thread: dict[str, Any],
     messages: list[dict[str, Any]],
@@ -1632,6 +1721,10 @@ def build_chat_trace_issue_context(
     trace_detail = build_message_trace_detail(
         selected or {},
         user_question=selected_question,
+    )
+    turn_trace = _build_issue_turn_trace(
+        messages,
+        selected_message_id,
     )
     state_input = (
         (trace_detail.get("state_transitions") or {}).get("input")
@@ -1660,6 +1753,7 @@ def build_chat_trace_issue_context(
         "reproduction_input": reproduction_input,
         "selected_message": _compact_trace_message(selected),
         "previous_message": _compact_trace_message(previous),
+        "turn_trace": turn_trace,
         "trace_detail": trace_detail,
         "diff": build_response_diff(selected or {}, previous),
         "debug_hints": build_chat_trace_debug_hints(selected or {}, previous, user_question=selected_question),

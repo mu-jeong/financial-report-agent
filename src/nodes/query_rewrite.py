@@ -2,7 +2,7 @@ import re
 
 from src.configs.config import get_logger
 from src.configs.prompts import HISTORY_USAGE_DECISION_PROMPT, QUERY_REWRITE_PROMPT
-from src.core.followup_scope import is_section_deep_dive_followup
+from src.core.followup_scope import is_section_deep_dive_followup, parse_ordinal_reference
 from src.core.metadata_filters import resolve_temporal_context
 from src.graphs.state import State
 from src.llms.factory import build_chat_model
@@ -150,6 +150,8 @@ def has_explicit_search_topic(question: str) -> bool:
 def is_scope_followup(question: str) -> bool:
     """후속 질문이 이전 범위를 가리키는지 반환합니다."""
     normalized = re.sub(r"\s+", "", str(question or ""))
+    if parse_ordinal_reference(normalized) is not None:
+        return True
     if any(re.sub(r"\s+", "", keyword) in normalized for keyword in DEICTIC_SCOPE_MARKERS):
         return True
     if is_section_deep_dive_followup(question):

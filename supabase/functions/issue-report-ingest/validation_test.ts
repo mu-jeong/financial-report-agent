@@ -138,10 +138,45 @@ Deno.test("rejects selected content without matching consent", () => {
   expectCode(report, "consent_mismatch");
 });
 
-Deno.test("rejects previous turns in phase 1", () => {
+Deno.test("accepts a consented bounded turn trace", () => {
+  const report = valid();
+  report.report.consent.include_selected_question = true;
+  report.report.consent.include_previous_turns = true;
+  const observed = report.report.observed as Record<string, unknown>;
+  observed.selected_question = "첫번째 리포트를 다시 확인해줘";
+  observed.result_count_kind = "row";
+  observed.turn_trace = [
+    {
+      turn_index: 1,
+      question: "지난주 리포트를 정리해줘",
+      rewritten_query: "지난주 리포트 정리",
+      route: "vectordb",
+      status: "succeeded",
+      followup_scope_intent: false,
+      scope_source: null,
+      scope_reason: null,
+      matched_document_rank: null,
+      route_hint: null,
+      has_vector_intent: true,
+      search_filters: {
+        report_date: "2026-08-01",
+        report_type: "industry",
+      },
+      prior_search_filters: {},
+      prior_file_names: [],
+      selected_file_names: ["safe-report.pdf"],
+      result_count: 1,
+      result_count_kind: "document",
+    },
+  ];
+
+  validateEnvelope(report, now);
+});
+
+Deno.test("rejects previous-turn consent without a turn trace", () => {
   const report = valid();
   report.report.consent.include_previous_turns = true;
-  expectCode(report, "previous_turns_disabled");
+  expectCode(report, "consent_mismatch");
 });
 
 Deno.test("rejects stale and future timestamps", () => {

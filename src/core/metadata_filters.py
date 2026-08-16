@@ -42,6 +42,12 @@ PLAIN_REPORT_TYPE_KEYWORDS = {
     for report_type, keywords in REPORT_TYPE_KEYWORDS.items()
 }
 
+UNSAFE_DERIVED_TARGET_ALIASES = frozenset(
+    keyword.casefold().replace(" ", "")
+    for keywords in REPORT_TYPE_KEYWORDS.values()
+    for keyword in keywords
+)
+
 
 def _normalize_text(value: Any) -> str:
     return str(value or "").casefold().replace(" ", "")
@@ -78,7 +84,7 @@ def _safe_target_aliases(target: str) -> set[str]:
     # arbitrary substrings of a company name.
     for match in re.finditer(r"\s+(\S.*)$", canonical):
         alias = _normalize_text(match.group(1))
-        if len(alias) >= 2:
+        if len(alias) >= 2 and alias not in UNSAFE_DERIVED_TARGET_ALIASES:
             aliases.add(alias)
     for index in range(1, len(normalized)):
         if (
@@ -87,7 +93,7 @@ def _safe_target_aliases(target: str) -> set[str]:
             and not normalized[index].isascii()
         ):
             alias = normalized[index:]
-            if len(alias) >= 2:
+            if len(alias) >= 2 and alias not in UNSAFE_DERIVED_TARGET_ALIASES:
                 aliases.add(alias)
     return aliases
 

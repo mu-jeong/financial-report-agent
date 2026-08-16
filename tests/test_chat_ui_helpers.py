@@ -4,6 +4,7 @@ from src.core.chat_ui_helpers import (
     build_clipboard_copy_html,
     build_no_result_suggestions,
     build_scope_notice,
+    escape_numeric_tildes_for_markdown,
 )
 
 
@@ -55,6 +56,37 @@ def test_build_clipboard_copy_html_escapes_text_and_invokes_clipboard_api():
     assert "navigator.clipboard.writeText" in html
     assert "issue <report> & details" not in html
     assert "Copy issue report" in html
+
+
+def test_escape_numeric_tildes_for_markdown_preserves_financial_range_text():
+    text = "5~10위권 고객사 매출 비중이 과거 1%에서 ~23%로 상승"
+
+    assert escape_numeric_tildes_for_markdown(text) == (
+        "5\\~10위권 고객사 매출 비중이 과거 1%에서 \\~23%로 상승"
+    )
+
+
+def test_escape_numeric_tildes_for_markdown_leaves_code_and_explicit_strikethrough():
+    text = (
+        "~~23% 제외~~와 `5~10` 구간\n"
+        "```text\n5~10\n```\n"
+        "~~~text\n~23%\n~~~\n"
+        "본문 5~10, 이미 \\~23%"
+    )
+
+    assert escape_numeric_tildes_for_markdown(text) == (
+        "~~23% 제외~~와 `5~10` 구간\n"
+        "```text\n5~10\n```\n"
+        "~~~text\n~23%\n~~~\n"
+        "본문 5\\~10, 이미 \\~23%"
+    )
+
+
+def test_chat_view_escapes_numeric_tildes_at_markdown_render_boundary():
+    chat_source = Path("apps/gui/chat_views.py").read_text(encoding="utf-8-sig")
+
+    assert "escape_numeric_tildes_for_markdown(linked_content)" in chat_source
+
 
 def test_build_scope_notice_distinguishes_reused_prior_date_scope_from_new_date_reset():
     notice = build_scope_notice(

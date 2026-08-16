@@ -1,5 +1,5 @@
 export const MAX_BODY_BYTES = 128 * 1024;
-const MAX_DEPTH = 6;
+const MAX_DEPTH = 7;
 const MAX_ARRAY_ITEMS = 16;
 const MAX_OBJECT_FIELDS = 24;
 const MAX_STRING_BYTES = 32 * 1024;
@@ -59,7 +59,7 @@ const CONSENT_FIELDS = new Set([
   "include_selected_answer",
   "include_previous_turns",
 ]);
-const OBSERVED_FIELDS = new Set([
+const REQUIRED_OBSERVED_FIELDS = [
   "route",
   "status",
   "latency_ms",
@@ -67,6 +67,44 @@ const OBSERVED_FIELDS = new Set([
   "citation_count",
   "selected_question",
   "selected_answer",
+] as const;
+const OBSERVED_FIELDS = new Set([
+  ...REQUIRED_OBSERVED_FIELDS,
+  "result_count_kind",
+  "turn_trace",
+]);
+const RESULT_COUNT_KINDS = new Set(["document", "row", "source"]);
+const TURN_TRACE_FIELDS = new Set([
+  "turn_index",
+  "question",
+  "rewritten_query",
+  "route",
+  "status",
+  "followup_scope_intent",
+  "scope_source",
+  "scope_reason",
+  "matched_document_rank",
+  "route_hint",
+  "has_vector_intent",
+  "search_filters",
+  "prior_search_filters",
+  "prior_file_names",
+  "selected_file_names",
+  "result_count",
+  "result_count_kind",
+]);
+const FILTER_FIELDS = new Set([
+  "broker",
+  "brokers",
+  "file_names",
+  "report_date",
+  "report_date_end",
+  "report_date_start",
+  "report_month",
+  "report_type",
+  "report_types",
+  "target_name",
+  "target_names",
 ]);
 const DIAGNOSTIC_FIELDS = new Set([
   "stable_error_code",
@@ -246,6 +284,72 @@ function nullableCount(value: unknown, name: string, maximum: number): void {
   }
 }
 
+function nullableBoolean(value: unknown, name: string): void {
+  if (value !== null && typeof value !== "boolean") {
+    fail("invalid_boolean", `${name} must be a boolean or null`);
+  }
+}
+
+function boundedStringList(value: unknown, name: string): void {
+  if (!Array.isArray(value) || value.length > 8) {
+    fail("invalid_list", `${name} must contain at most 8 strings`);
+  }
+  for (const [index, item] of value.entries()) {
+    boundedString(item, `${name}[${index}]`, 256, true);
+  }
+}
+
+function validateFilters(value: unknown, name: string): void {
+  if (!isRecord(value)) fail("invalid_filters", `${name} must be an object`);
+  exactFields(value, FILTER_FIELDS, [], name);
+  for (const [key, item] of Object.entries(value)) {
+    if (Array.isArray(item)) {
+      boundedStringList(item, `${name}.${key}`);
+    } else {
+      boundedString(item, `${name}.${key}`, 256, true);
+    }
+  }
+}
+
+function validateTurnTrace(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value) || value.length > 8) {
+    fail("invalid_turn_trace", "report.observed.turn_trace must contain at most 8 turns");
+  }
+  for (const [index, rawTurn] of value.entries()) {
+    if (!isRecord(rawTurn)) {
+      fail("invalid_turn_trace", `report.observed.turn_trace[${index}] must be an object`);
+    }
+    const name = `report.observed.turn_trace[${index}]`;
+    exactFields(rawTurn, TURN_TRACE_FIELDS, [...TURN_TRACE_FIELDS], name);
+    nullableCount(rawTurn.turn_index, `${name}.turn_index`, 1_000_000);
+    if (rawTurn.turn_index === 0 || rawTurn.turn_index === null) {
+      fail("invalid_turn_trace", `${name}.turn_index must be positive`);
+    }
+    boundedString(rawTurn.question, `${name}.question`, 2048);
+    if (rawTurn.rewritten_query !== null) {
+      boundedString(rawTurn.rewritten_query, `${name}.rewritten_query`, 2048, true);
+    }
+    for (const field of ["route", "status", "scope_source", "scope_reason", "route_hint"]) {
+      nullableToken(rawTurn[field], `${name}.${field}`);
+    }
+    nullableBoolean(rawTurn.followup_scope_intent, `${name}.followup_scope_intent`);
+    nullableBoolean(rawTurn.has_vector_intent, `${name}.has_vector_intent`);
+    nullableCount(rawTurn.matched_document_rank, `${name}.matched_document_rank`, 1_000_000);
+    validateFilters(rawTurn.search_filters, `${name}.search_filters`);
+    validateFilters(rawTurn.prior_search_filters, `${name}.prior_search_filters`);
+    boundedStringList(rawTurn.prior_file_names, `${name}.prior_file_names`);
+    boundedStringList(rawTurn.selected_file_names, `${name}.selected_file_names`);
+    nullableCount(rawTurn.result_count, `${name}.result_count`, 1_000_000);
+    if (
+      rawTurn.result_count_kind !== null &&
+      !RESULT_COUNT_KINDS.has(String(rawTurn.result_count_kind))
+    ) {
+      fail("invalid_result_count_kind", `${name}.result_count_kind is invalid`);
+    }
+  }
+  return value as Array<Record<string, unknown>>;
+}
+
 export function validateEnvelope(
   value: unknown,
   nowMs = Date.now(),
@@ -333,12 +437,6 @@ export function validateEnvelope(
       fail("invalid_consent", `report.consent.${name} must be boolean`);
     }
   }
-  if (consent.include_previous_turns !== false) {
-    fail(
-      "previous_turns_disabled",
-      "previous turns are not accepted in phase 1",
-    );
-  }
   if (consent.include_comment !== (report.comment !== "")) {
     fail(
       "consent_mismatch",
@@ -350,7 +448,7 @@ export function validateEnvelope(
   exactFields(
     observed,
     OBSERVED_FIELDS,
-    [...OBSERVED_FIELDS],
+    [...REQUIRED_OBSERVED_FIELDS],
     "report.observed",
   );
   nullableToken(observed.route, "report.observed.route");
@@ -361,6 +459,18 @@ export function validateEnvelope(
     "report.observed.result_count",
     1_000_000,
   );
+  if (
+    "result_count_kind" in observed && observed.result_count_kind !== null &&
+    !RESULT_COUNT_KINDS.has(String(observed.result_count_kind))
+  ) {
+    fail(
+      "invalid_result_count_kind",
+      "report.observed.result_count_kind is invalid",
+    );
+  }
+  const turnTrace = "turn_trace" in observed
+    ? validateTurnTrace(observed.turn_trace)
+    : [];
   nullableCount(
     observed.citation_count,
     "report.observed.citation_count",
@@ -396,6 +506,18 @@ export function validateEnvelope(
     fail(
       "consent_mismatch",
       "include_selected_answer must match selected_answer presence",
+    );
+  }
+  if (consent.include_previous_turns !== (turnTrace.length > 0)) {
+    fail(
+      "consent_mismatch",
+      "include_previous_turns must match turn_trace presence",
+    );
+  }
+  if (consent.include_previous_turns && !consent.include_selected_question) {
+    fail(
+      "consent_mismatch",
+      "previous turn trace requires selected-question consent",
     );
   }
 

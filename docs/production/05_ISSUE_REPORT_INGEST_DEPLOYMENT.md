@@ -20,7 +20,7 @@ supabase secrets set ISSUE_IP_HMAC_SECRET=<at-least-32-random-bytes>
 supabase functions deploy issue-report-ingest --use-api
 ```
 
-Apply `supabase db push` and deploy the updated Edge Function before releasing a desktop client that omits the deprecated local-only report fields. The updated Function remains compatible with already queued legacy envelopes and drops those fields before storage.
+Deploy the updated Edge Function before releasing the desktop client. The receiver uses an exact-field contract, so the Function that accepts optional `result_count_kind` and consented `turn_trace` must be active before a client can send those fields. Run `supabase db push` separately only when the target project has unapplied migrations; these JSON contract fields do not require a database migration. The updated Function remains compatible with older queued envelopes that omit them and still drops deprecated local-only identifiers before storage.
 
 The platform supplies `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEYS`, and `SUPABASE_SECRET_KEYS`; do not copy their values into the repository. Confirm `SUPABASE_PUBLISHABLE_KEYS` contains the `desktop_ingest` name in the hosted Function environment before traffic is enabled.
 
