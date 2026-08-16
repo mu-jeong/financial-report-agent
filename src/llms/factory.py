@@ -21,7 +21,7 @@ DEFAULT_CHAT_REQUEST_TIMEOUT_MS = 60_000
 DEFAULT_CHAT_MAX_RETRIES = 0
 
 
-def build_chat_model(temperature: float = 0.2, **kwargs: Any):
+def build_chat_model(temperature: float = 0.1, **kwargs: Any):
     """Build the OpenRouter-backed LangChain chat model."""
     if not OPENROUTER_API_KEY:
         raise ValueError(
