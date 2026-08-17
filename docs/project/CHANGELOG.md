@@ -4,11 +4,14 @@
 
 ## Unreleased
 
+## v0.6.0 - 2026-08-17
+
 ### Added
 
 - Native V2 업데이트가 성공한 문서를 작은 불변 단위로 즉시 검색에 반영하고, 재시작 후에도 이미 반영된 진행 상태를 이어받도록 했습니다.
 - Base snapshot과 진행 중 업데이트를 한 요청 revision으로 고정해 검색하는 composite reader와 delta-aware SQL/status projection을 추가했습니다.
 - 검색에서 제외된 임시 vector 파일의 정리 대기 수·용량·최장 보존 시간을 CLI 상태와 Monitoring 화면에 추가했습니다.
+- 사용자 동의가 있을 때 제한된 다중 turn 질문·검색 범위를 이슈 재현 정보로 전송하고, durable outbox 기록 이후에만 접수 완료를 표시하도록 했습니다.
 
 ### Changed
 
@@ -23,6 +26,9 @@
 - 변경 문서 파싱이 실패하면 이전 검색 가능 버전을 유지하며, GUI는 업데이트 중에도 검색 사용 가능 여부와 처리 완료 문서의 순차 반영을 안내합니다.
 - 임시 vector 파일 정리를 공용 snapshot GC에 통합해 소유 base GC 직후, 모든 snapshot 게시 후, 정상 시작 시 자동 재시도합니다.
 - GC는 immutable hash/size를 확인한 quarantine 파일만 삭제하며, fast startup에서도 정리를 재조정합니다. 게시 후 정리 오류는 게시 실패 대신 `cleanup_pending`으로 반환합니다.
+- 업종 질의와 순번 기반 후속 질문이 의도한 리포트 범위를 유지하고, 유효하지 않은 순번은 범위를 넓히지 않도록 보강했습니다.
+- 복수 기업 답변의 실행 범위·근거·성능 정보를 더 일관되게 기록하도록 개선했습니다.
+- 기본 chat model 생성 temperature를 `0.1`로 조정했습니다.
 
 ## v0.5.1 - 2026-07-25
 
