@@ -98,6 +98,13 @@ class DeltaReportAction:
 
 
 @dataclass(frozen=True)
+class SelectedSourceSnapshot:
+    canonical_relative_path: str
+    physical_name: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class DeltaSegmentPlan:
     base_snapshot_id: str
     base_publication_generation: int
@@ -112,7 +119,7 @@ class DeltaSegmentPlan:
     actions: tuple[DeltaReportAction, ...]
     source_root: Path
     canonical_source_prefix: str
-    selected_sources: tuple[SourceFileSnapshot, ...]
+    selected_sources: tuple[SelectedSourceSnapshot, ...]
     attempted_report_uids: tuple[str, ...]
     failed_report_uids: tuple[str, ...]
     deferred_report_count: int
@@ -374,7 +381,11 @@ def materialize_and_activate_delta(
                 writer_lease=owned_lease,
             )
     assert_writer_lease_owned(writer_lease, root)
-    _validate_selected_sources(plan)
+    _validate_selected_sources(
+        plan.source_root,
+        plan.canonical_source_prefix,
+        plan.selected_sources,
+    )
 
     descriptor = SnapshotDescriptor(
         sha256='',
@@ -682,6 +693,19 @@ def _prepare_delta_segment(
     *,
     deferred_report_count: int,
 ) -> DeltaSegmentPlan:
+    selected_sources = tuple(
+        SelectedSourceSnapshot(
+            canonical_relative_path=str(record['canonical_relative_path']),
+            physical_name=Path(record['path']).name,
+            sha256=str(record['source_sha256']),
+        )
+        for record in selected_records
+    )
+    _validate_selected_sources(
+        context.source_root,
+        context.canonical_source_prefix,
+        selected_sources,
+    )
     extracted, failed_uids = _extract_source_records(
         selected_records,
         extractor_name=context.extractor_name,
@@ -837,13 +861,6 @@ def _prepare_delta_segment(
         ],
         [chunk.chunk_uid for chunk in sorted(chunks, key=lambda item: item.physical_id)],
         vector_payload_sha256,
-    )
-    selected_sources = tuple(
-        SourceFileSnapshot(
-            canonical_relative_path=str(record['canonical_relative_path']),
-            sha256=str(record['source_sha256']),
-        )
-        for record in selected_records
     )
     reports = tuple(
         sorted(
@@ -1340,9 +1357,13 @@ def _ready_delta_count(selection: RuntimeSelection) -> int:
         connection.close()
 
 
-def _validate_selected_sources(plan: DeltaSegmentPlan) -> None:
-    prefix = PurePosixPath(plan.canonical_source_prefix)
-    for expected in plan.selected_sources:
+def _validate_selected_sources(
+    source_root: Path,
+    canonical_source_prefix: str,
+    selected_sources: Sequence[SelectedSourceSnapshot],
+) -> None:
+    prefix = PurePosixPath(canonical_source_prefix)
+    for expected in selected_sources:
         canonical = PurePosixPath(expected.canonical_relative_path)
         try:
             relative = canonical.relative_to(prefix)
@@ -1350,7 +1371,21 @@ def _validate_selected_sources(plan: DeltaSegmentPlan) -> None:
             raise NativeBuildError('delta source path is outside the source prefix') from exc
         if len(relative.parts) != 1:
             raise NativeBuildError('delta source path is not a direct source file')
-        path = plan.source_root / relative.name
+        if (
+            not expected.physical_name
+            or expected.physical_name in {'.', '..'}
+            or '/' in expected.physical_name
+            or '\\' in expected.physical_name
+        ):
+            raise NativeBuildError('delta physical source name is invalid')
+        physical_canonical_path = normalize_relative_path(
+            f'{canonical_source_prefix}/{expected.physical_name}'
+        )
+        if physical_canonical_path != expected.canonical_relative_path:
+            raise NativeBuildError(
+                'delta physical source does not match its canonical path'
+            )
+        path = source_root / expected.physical_name
         if path.is_symlink() or not path.is_file():
             raise NativeBuildError('delta source file is no longer available')
         if _sha256_file(path) != expected.sha256:

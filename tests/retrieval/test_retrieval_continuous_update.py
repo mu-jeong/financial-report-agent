@@ -165,6 +165,77 @@ def test_continuous_update_publishes_batches_then_compacts_once(tmp_path: Path) 
     assert published <= visible
 
 
+def test_continuous_update_keeps_physical_filename_separate_from_canonical_identity(
+    tmp_path: Path,
+) -> None:
+    data_root, sources = _seed(tmp_path)
+    physical_name = "compatibility-\uf967.pdf"
+    canonical_path = "downloaded/compatibility-\u4e0d.pdf"
+    (sources / physical_name).write_bytes(b"compatibility-name")
+
+    result = execute_continuous_update(
+        data_root,
+        sources,
+        **_options(DeterministicEmbeddings()),
+    )
+
+    assert result is not None
+    active = _active_report_uids(data_root)
+    assert canonical_path in active
+    assert f"downloaded/{physical_name}" not in active
+    assert (sources / physical_name).is_file()
+
+
+def test_continuous_update_rechecks_sources_before_batch_embedding(tmp_path: Path) -> None:
+    data_root, sources = _seed(tmp_path)
+    removed = sources / "c.pdf"
+    removed.write_bytes(b"new-c")
+
+    class RemoveAfterCanary(DeterministicEmbeddings):
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            vectors = super().embed_documents(texts)
+            if len(self.calls) == 1:
+                removed.unlink()
+            return vectors
+
+    embeddings = RemoveAfterCanary()
+
+    with pytest.raises(NativeBuildError, match="source file is no longer available"):
+        execute_continuous_update(
+            data_root,
+            sources,
+            **_options(embeddings),
+        )
+
+    assert len(embeddings.calls) == 1
+
+
+def test_continuous_update_rejects_source_bytes_changed_during_embedding(
+    tmp_path: Path,
+) -> None:
+    data_root, sources = _seed(tmp_path)
+    changed = sources / "c.pdf"
+    changed.write_bytes(b"new-c")
+
+    class ChangeDuringBatchEmbedding(DeterministicEmbeddings):
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            vectors = super().embed_documents(texts)
+            if len(self.calls) == 2:
+                changed.write_bytes(b"changed-during-embedding")
+            return vectors
+
+    embeddings = ChangeDuringBatchEmbedding()
+
+    with pytest.raises(NativeBuildError, match="source bytes changed before activation"):
+        execute_continuous_update(
+            data_root,
+            sources,
+            **_options(embeddings),
+        )
+
+    assert len(embeddings.calls) == 2
+
+
 @pytest.mark.slow
 def test_failure_is_durable_retains_old_version_and_is_not_retried(
     tmp_path: Path,

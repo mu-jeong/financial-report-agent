@@ -30,6 +30,17 @@ _SAFE_EMBEDDING_FAILURE_HINTS = (
         "committed floor checkpoint hash does not match",
         "retrieval checkpoint metadata is out of sync",
     ),
+    ("engine is currently overloaded", "embedding provider is overloaded"),
+    (
+        "delta source file is no longer available",
+        "source PDF became unavailable during embedding",
+    ),
+    (
+        "delta source bytes changed before activation",
+        "source PDF changed during embedding",
+    ),
+    ("request failed: 429", "provider rate limit or capacity reached"),
+    ("http 429", "provider rate limit or capacity reached"),
     ("provider unavailable", "provider unavailable"),
     ("insufficient credit", "insufficient provider credits"),
     ("rate limit", "provider rate limit reached"),

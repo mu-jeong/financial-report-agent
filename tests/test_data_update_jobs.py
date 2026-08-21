@@ -139,6 +139,42 @@ def test_embedding_failure_message_surfaces_checkpoint_metadata_mismatch():
     )
 
 
+def test_embedding_failure_message_surfaces_provider_overload():
+    output = (
+        "Native V2 incremental update failed: NativeBuildError: "
+        "OpenRouter embeddings request failed: 429 "
+        '{"error":{"message":"The engine is currently overloaded."}}'
+    )
+
+    message = data_update_jobs.embedding_failure_message(1, output)
+
+    assert message == (
+        "embedding failed with exit code 1: embedding provider is overloaded"
+    )
+
+
+@pytest.mark.parametrize(
+    ("output", "detail"),
+    [
+        (
+            "NativeBuildError: delta source file is no longer available",
+            "source PDF became unavailable during embedding",
+        ),
+        (
+            "NativeBuildError: delta source bytes changed before activation",
+            "source PDF changed during embedding",
+        ),
+    ],
+)
+def test_embedding_failure_message_surfaces_source_stability_failures(
+    output: str,
+    detail: str,
+):
+    assert data_update_jobs.embedding_failure_message(1, output) == (
+        f"embedding failed with exit code 1: {detail}"
+    )
+
+
 def test_embedding_failure_message_redacts_credentials_from_subprocess_output():
     output = (
         "2026-07-25 [ERROR] request failed: "
