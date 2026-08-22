@@ -208,16 +208,9 @@ remote_db_migration_revision: id
 
 profile이 바뀌면 기존 vector를 재사용 가능한 것으로 가정하지 않는다. 새 build/snapshot/local runtime revision을 생성하고 reference data에서 평가한 뒤 software qualification과 별도로 기록한다.
 
-### 현재 확인된 정합성 문제
+### 현재 overlap 계약
 
-현재 설정에는 `CHUNK_OVERLAP`이 있지만 실제 pipeline/build 경로는 여러 위치에서 10% overlap을 계산한다. 따라서 기획 문서나 Figma에 특정 숫자를 별도 원본으로 복제하면 drift가 생긴다.
-
-production 구현 전 다음 중 하나로 단일화해야 한다.
-
-1. 설정값을 실행 경로의 권위값으로 만들고 exact effective value를 profile hash에 포함한다.
-2. 10% 알고리즘을 코드 계약으로 고정하고 사용되지 않는 설정을 제거한다.
-
-현재는 검토안과 변경 기록으로 남긴다. 운영판에서 채택하면 그 저장소의 ADR로 옮기며, 검증 전에는 `CHUNK_OVERLAP` 환경값이 실제 동작을 바꾼다고 문서화하지 않는다.
+Native V2는 parent·child·single chunk 크기의 10%를 overlap으로 계산합니다. 별도 `CHUNK_OVERLAP` 환경 설정은 제거했으며, 계산된 effective overlap은 embedding profile의 chunk policy에 기록합니다. 이 비율이나 계산 방식을 바꾸면 기존 vector를 재사용하지 않고 검증된 full-corpus successor를 만들어야 합니다.
 
 ## 5. 변경 영향 매트릭스
 

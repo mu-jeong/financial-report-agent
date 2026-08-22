@@ -1,8 +1,8 @@
-﻿# Financial Report Agent
+﻿# Finance Report Agent
 
 > Version: `0.6.0`
 
-Financial Report Agent는 여러 증권사의 기업·산업·경제 리포트를 한곳에 모아 자연어로 검색하고 분석하는 로컬 리서치 도구입니다. 원하는 기간과 기업, 산업, 증권사를 말로 지정하면 관련 리포트의 목록과 통계, 핵심 내용을 대화형 답변으로 확인할 수 있습니다.
+Finance Report Agent는 여러 증권사의 기업·산업·경제 리포트를 한곳에 모아 자연어로 검색하고 분석하는 로컬 리서치 도구입니다. 원하는 기간과 기업, 산업, 증권사를 말로 지정하면 관련 리포트의 목록과 통계, 핵심 내용을 대화형 답변으로 확인할 수 있습니다.
 
 > 이 프로젝트는 투자 조언이나 매수/매도 추천을 제공하지 않습니다. 답변은 수집·색인된 리포트와 공개 데이터 기반의 참고 정보로만 사용하세요.
 
@@ -28,7 +28,7 @@ Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면
 
 Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이전 7일(총 최대 8일)의 리포트를 준비합니다. 자세한 실행 방법과 `RUN_APP.bat` 사용 구분은 [docs/QUICK_START.md](docs/QUICK_START.md)를 참고하세요.
 
-일부 PDF가 PyMuPDF와 OpenDataLoader에서 모두 파싱되지 않아도 실패 파일만 V2 manifest에 제외 상태로 기록하고, 나머지 문서의 파싱·임베딩·snapshot 게시와 앱 실행은 계속합니다. OpenDataLoader가 한 PDF에서 5분 안에 반환하지 않는 경우도 추출 실패로 기록해 전체 작업이 무기한 멈추지 않게 합니다. 기록된 문서는 Monitoring Mode의 `임베딩 누락 문서`에서 명시적으로 다시 시도할 수 있습니다.
+일부 PDF가 PyMuPDF와 OpenDataLoader에서 모두 파싱되지 않아도 실패 파일만 V2 manifest에 제외 상태로 기록하고, 나머지 문서의 파싱·임베딩·snapshot 게시와 앱 실행은 계속합니다. OpenDataLoader가 한 PDF에서 5분 안에 반환하지 않는 경우도 추출 실패로 기록해 전체 작업이 무기한 멈추지 않게 합니다. 기록된 문서는 Monitoring Mode의 `운영 모니터링 → 검색 자료 준비 → DB에는 있지만 임베딩되지 않은 문서`에서 `모든 파싱 실패/미임베딩 문서 다시 처리`를 눌러 명시적으로 다시 시도할 수 있습니다.
 
 ## 주요 기능
 
@@ -60,7 +60,7 @@ Quick Start는 매번 실행하는 날짜를 기준으로 실행일과 그 이�
 
 ### 기존 V1 사용자는 먼저 마이그레이션하세요
 
-V1의 `reports.db`와 `vector_db`를 사용 중인 기존 사용자는 업데이트된 앱을 실행하기 전에 프로젝트 루트의 `MIGRATE_V2.bat`을 실행하세요. 이 작업은 기존 청크와 FAISS 벡터를 그대로 재사용하므로 전체 PDF 재처리나 전체 재임베딩 비용이 발생하지 않습니다. 전환이 정상 완료되면 V1 `reports.db`와 `vector_db`는 삭제되며, 이후 업데이트와 재구축에 필요한 `downloaded` PDF는 유지됩니다. 자세한 내용은 [V1 → Native V2 사용자 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
+V1의 `reports.db`와 `vector_db`를 사용 중인 기존 사용자는 업데이트된 앱을 실행하기 전에 프로젝트 루트의 `MIGRATE_V2.bat`을 실행하세요. 이 작업은 기존 청크와 FAISS 벡터를 그대로 재사용하므로 전체 PDF 재처리나 전체 재임베딩 비용이 발생하지 않습니다. 전환이 정상 완료되면 V1 `reports.db`와 `vector_db`는 삭제되며, 이후 업데이트와 재구축에 필요한 `downloaded` PDF는 유지됩니다. 이 일회성 마이그레이션은 PDF가 `DATA_ROOT/downloaded`에 있는 표준 V1 배치만 지원하며 `SAVE_DIR` override는 적용하지 않습니다. 자세한 내용은 [V1 → Native V2 사용자 마이그레이션](docs/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
 ### `tools\recovery\REBUILD_V2.bat`은 언제 필요한가
 
@@ -71,10 +71,11 @@ V1의 `reports.db`와 `vector_db`를 사용 중인 기존 사용자는 업데이
 | 처음 설치 | `RUN_QUICKSTART.bat` |
 | 기존 V1 데이터를 그대로 전환 | 앱을 모두 닫고 `MIGRATE_V2.bat` |
 | 리포트 추가·변경 | 앱의 일반 데이터 업데이트 — 재구축 불필요 |
-| 파싱 실패 문서만 재시도 | Monitoring Mode의 `임베딩 누락 문서 → 파싱 실패 문서 재시도` |
-| 현재 설정으로 전체 재구축 | 먼저 `tools\recovery\REBUILD_V2.bat --check` |
+| 파싱 실패·미임베딩 문서 재처리 | Monitoring Mode의 `운영 모니터링 → 검색 자료 준비 → DB에는 있지만 임베딩되지 않은 문서 → 모든 파싱 실패/미임베딩 문서 다시 처리` |
+| 추출 정책을 바꿔 전체 재구축 | 먼저 `tools\recovery\REBUILD_V2.bat --check` |
+| 모델·chunk 설정만 바꿔 전체 재구축 | `tools\recovery\REBUILD_V2.bat --force` |
 
-`--check`에서 현재 profile과 요청 profile이 다를 때만 `tools\recovery\REBUILD_V2.bat`을 실행하세요. 전체 PDF를 다시 처리하므로 시간과 API 비용이 발생합니다. 자세한 내용은 [Native V2 전체 재구축](docs/migrations/v2/V2_REBUILD.md)을 참고하세요.
+현재 `--check`가 비교하는 범위는 primary/fallback PDF 추출 정책입니다. 추출 정책이 다르면 `tools\recovery\REBUILD_V2.bat`을 실행하세요. embedding model이나 parent/child chunk 설정만 바뀐 경우에는 추출 정책이 같아 `--check`가 `matches`를 표시할 수 있으므로 `tools\recovery\REBUILD_V2.bat --force`가 필요합니다. 두 명령 모두 전체 PDF를 다시 처리하므로 시간과 API 비용이 발생합니다. 자세한 내용은 [Native V2 전체 재구축](docs/migrations/v2/V2_REBUILD.md)을 참고하세요.
 
 ## 설치
 
@@ -86,11 +87,11 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Python 3.10 이상을 권장합니다.
+Python 3.10 이상이 필요합니다. Quick Start는 3.10 미만에서 실행을 중단합니다.
 
 ## 환경 변수 설정
 
-수정 가능한 설정의 기본값, 타입, 설명은 `src/configs/settings.py`에서 한 번만 관리합니다. `.env.example`은 이 파일에서 자동 생성되는 템플릿이고, `.env`는 실제 실행값만 저장합니다.
+일반 실행에 사용하는 공개 설정의 기본값, 타입, 설명은 `src/configs/settings.py`에서 관리합니다. `.env.example`은 이 파일에서 자동 생성되는 템플릿이고, `.env`는 실제 실행값만 저장합니다. Native V2의 overlap은 별도 환경 변수 없이 parent·child·single chunk 크기의 10%로 계산됩니다. 따라서 chunk 크기를 바꾸면 overlap도 같은 비율로 바뀌며, 기존 `.env`에 남아 있는 `CHUNK_OVERLAP` 값은 읽지 않습니다.
 
 `.env.example`의 **Optional path overrides** 섹션은 모두 선택 사항입니다. 표준 `data/` 구조를 사용하면 비워 두거나 실제 `.env`에서 생략해도 됩니다.
 
@@ -116,10 +117,12 @@ PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader
 UNEMBEDDED_PDF_EXTRACTION_ENGINE=pymupdf
 ```
 
-복수 기업 VectorDB 비교는 기본적으로 LangGraph `Send` fan-out을 사용합니다.
+2~5개 기업의 VectorDB 본문 비교는 LangGraph `Send` fan-out을 사용합니다.
 실제 동시성은 `min(질문의 기업 수, VECTOR_RETRIEVAL_CONCURRENCY)`로 정해지며,
-기본값 5에서는 최대 5개 기업을 동시에 검색합니다. 순차 실행은 운영 설정이 아니라
-Send 결과와의 동등성을 검증하는 내부 회귀 테스트에서만 사용합니다.
+기본값 5에서는 최대 5개 기업을 동시에 검색합니다. 5개를 초과하면 검색이나 주가
+도구를 실행하지 않고 비교 범위를 줄여 달라고 안내합니다. 단일 기업과 비교 의도가
+아닌 질문은 일반 VectorDB 경로를 사용합니다. 순차 실행은 운영 설정이 아니라 Send
+결과와의 동등성을 검증하는 내부 회귀 테스트에서만 사용합니다.
 
 현재 `langgraph==1.0.9`에서는 로컬 프로세스 내부 `MemorySaver`만 사용합니다.
 checkpoint 입력과 실행 프로세스는 신뢰된 로컬 경계여야 하며, 영속 또는 외부 입력을
@@ -127,7 +130,7 @@ checkpoint 입력과 실행 프로세스는 신뢰된 로컬 경계여야 하며
 반드시 `langgraph>=1.0.10`으로 올리고 전체 graph/checkpoint 회귀 테스트를 다시
 통과시켜야 합니다.
 
-배포 템플릿은 일반 문서와 미임베딩 문서를 먼저 `pymupdf`로 추출하고, PyMuPDF가 실패한 문서만 `opendataloader`로 한 번 재시도합니다. fallback 실행에는 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 이 새 키가 없는 기존 `.env`와 빈 값은 fallback을 비활성화하므로, 사용하려면 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하세요.
+배포 템플릿은 일반 문서와 미임베딩 문서를 먼저 `pymupdf`로 추출하고, PyMuPDF가 실패한 문서만 `opendataloader`로 한 번 재시도합니다. fallback 실행에는 Java 11+와 `java` 명령의 `PATH` 등록이 필요하며 Quick Start는 Java를 자동 설치하지 않습니다. 이 새 키가 없는 기존 `.env`와 빈 값은 fallback을 비활성화하므로, 사용하려면 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시하세요.
 
 과거 로컬 측정에서는 약 2,000건의 리포트를 임베딩하는 데 약 **$0.05**가 들었습니다. 이 수치는 재현 가능한 비용 보장이 아니며 문서 길이, 청크 수, 호출량, 모델 가격에 따라 달라집니다.
 
@@ -194,9 +197,9 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 python -m src.core.embed_pipeline
 ```
 
-파이프라인은 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩합니다. 성공한 문서는 작은 불변 업데이트 단위로 즉시 검색에 반영되므로 전체 작업 중에도 기존 검색을 계속 사용할 수 있습니다. 모든 문서 처리가 끝나면 기존 청크와 벡터까지 재사용해 완전한 snapshot을 한 번만 게시합니다. primary와 fallback이 모두 실패한 변경 문서는 이전 검색 가능 버전을 유지한 채 실패 상태로 기록하고 나머지를 계속 처리합니다. 같은 바이트의 기존 실패는 일반 업데이트에서 반복 파싱하지 않으며, Monitoring Mode의 `임베딩 누락 문서`에서 재시도할 때만 다시 처리합니다. 새 변경도 정리할 중간 상태도 없으면 publication을 만들지 않습니다. 자세한 동작과 복구 경계는 [`docs/CONTINUOUS_UPDATES.md`](docs/CONTINUOUS_UPDATES.md)를 참고하세요.
+파이프라인은 전체 PDF 목록의 변경 여부를 검사하며, 새 문서와 변경된 문서만 파싱·임베딩합니다. 성공한 문서는 작은 불변 업데이트 단위로 즉시 검색에 반영되므로 전체 작업 중에도 기존 검색을 계속 사용할 수 있습니다. 모든 문서 처리가 끝나면 기존 청크와 벡터까지 재사용해 완전한 snapshot을 한 번만 게시합니다. primary와 fallback이 모두 실패한 변경 문서는 이전 검색 가능 버전을 유지한 채 실패 상태로 기록하고 나머지를 계속 처리합니다. 같은 바이트의 기존 실패는 일반 업데이트에서 반복 파싱하지 않습니다. Monitoring Mode의 `모든 파싱 실패/미임베딩 문서 다시 처리` 버튼이나 `python -m src.core.embed_pipeline --retry-extraction-failures`를 명시적으로 실행할 때만 다시 처리합니다. 새 변경도 정리할 중간 상태도 없으면 publication을 만들지 않습니다. 자세한 동작과 복구 경계는 [`docs/CONTINUOUS_UPDATES.md`](docs/CONTINUOUS_UPDATES.md)를 참고하세요.
 
-V2 활성 상태에서는 `DATA_ROOT/retrieval/v2`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. 위 표의 추출 정책 변경에 해당할 때만 `tools\recovery\REBUILD_V2.bat --check`로 점검한 뒤 `tools\recovery\REBUILD_V2.bat`으로 검증된 full-corpus successor를 만드세요.
+V2 활성 상태에서는 `DATA_ROOT/retrieval/v2`를 수동으로 삭제하거나 수정하지 마세요. V2 updater는 활성 embedding profile과 현재 모델·추출기·chunk 설정이 다르면 새 snapshot을 게시하기 전에 중단합니다. 추출 정책 변경은 `tools\recovery\REBUILD_V2.bat --check`로 확인한 뒤 `tools\recovery\REBUILD_V2.bat`을 실행하고, 추출 정책은 같지만 모델·chunk 설정이 달라진 경우에는 `tools\recovery\REBUILD_V2.bat --force`로 검증된 full-corpus successor를 만드세요.
 
 PDF 추출 엔진 비교는 [`docs/PDF_EXTRACTION_COMPARISON.md`](docs/PDF_EXTRACTION_COMPARISON.md)를 참고하세요.
 
@@ -241,19 +244,25 @@ GUI 채팅은 성공한 assistant 답변의 검색 범위를 메시지 metadata�
 
 ## 검색 및 답변 흐름
 
-1. `query_rewrite`: 질문을 검색 친화적으로 정리합니다.
-   - 후속 질문 여부를 판단해 `followup_scope_intent`를 상태에 남깁니다.
-   - 직전 답변 섹션을 가리키는 deep-dive 질문은 `src/core/followup_scope.py`의 섹션 alias(`company`, `industry`, `economy`)로 감지합니다.
-2. `search_scope`: 날짜/메타데이터 필터와 직전 답변 scope 재사용 여부를 결정합니다.
-   - `followup_scope_intent`가 켜져 있고 새 날짜 조건이 없으면 직전 VectorDB 답변의 검색 필터, 날짜 범위, 실제 참고 파일명을 `prior_search_scope`로 재사용합니다.
-   - 섹션 follow-up이면 직전 날짜 범위는 유지하고 섹션별 `report_type` 필터를 추가하며, `scope_decision`에 적용 근거를 기록합니다.
-   - 섹션 follow-up은 "top company"류 rewrite가 끼어들어도 단일 기업 선택으로 축소하지 않습니다.
-3. `router`: RDB 질문인지 VectorDB 질문인지 판단합니다.
-4. RDB 검색: LLM이 SQL을 생성하고 guardrail을 통과한 read-only `SELECT`만 실행합니다.
-5. VectorDB 검색: FAISS 후보를 넉넉히 가져온 뒤 날짜/종목/증권사/리포트 유형/파일명 필터와 최신성 가중치를 적용합니다.
-   - 복수 문서 의도, 명시 파일 scope, 섹션 follow-up에서는 특정 PDF chunk에 결과가 쏠리지 않도록 문서 coverage를 적용합니다.
-6. `USE_RERANKER=true`일 때 OpenRouter rerank를 추가로 적용합니다. 기본값은 비용을 고려해 false입니다.
-7. VectorDB 검색 결과가 없으면 해당 대화의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.
+1. `turn_prepare`가 이전 turn의 임시 출력과 도구 메시지를 비우고 이번 turn의 실행 ID를 만듭니다.
+2. 질문 준비를 두 갈래로 병렬 실행합니다.
+   - `query_rewrite`는 질문을 검색 친화적으로 정리하고 `followup_scope_intent`를 판단합니다. 직전 답변 섹션을 가리키는 deep-dive 질문은 `src/core/followup_scope.py`의 섹션 alias(`company`, `industry`, `economy`)로 감지합니다.
+   - `search_scope_prepare → industry_lookup`은 현재 질문의 날짜·메타데이터 조건을 준비하고, 섹터 질문이면 KRX 업종 lookup으로 회사 universe를 계산합니다.
+3. `search_scope_merge`가 두 결과를 합칩니다.
+   - 후속 질문이고 새 날짜 조건이 없으면 직전 VectorDB 답변의 검색 필터, 날짜 범위, 실제 참고 파일명을 `prior_search_scope`로 재사용합니다.
+   - 섹션 follow-up이면 직전 날짜 범위는 유지하고 섹션별 `report_type` 필터를 추가하며 `scope_decision`에 근거를 기록합니다. 이 경로는 "top company"류 rewrite가 끼어들어도 단일 기업으로 축소하지 않습니다.
+   - 회사 후보 중 일부만 골라야 하는 질문은 선택형 `scope_selection`을 거친 뒤 `router`로 이동합니다.
+4. `router`가 RDB와 VectorDB 경로를 고르고, 각 경로의 scope preflight가 실행 가능한 범위를 확정합니다.
+   - RDB는 LLM이 SQL을 생성한 뒤 guardrail을 통과한 read-only `SELECT`만 실행합니다.
+   - VectorDB는 `vector_dispatcher`에서 일반 검색, 2~5개 기업 `Send` 비교, 5개 초과 범위 축소 응답 중 하나를 선택합니다.
+5. Native V2 VectorDB는 metadata scope를 먼저 compile하고 eligible chunk 수에 따라 `DIRECT`, `SELECTOR`, `ADAPTIVE` 전략을 선택합니다.
+   - `DIRECT`는 필터가 없거나 전체가 eligible일 때 바로 검색합니다.
+   - `SELECTOR`는 좁은 scope의 eligible ID만 FAISS에 전달합니다.
+   - `ADAPTIVE`는 넓은 scope에서 FAISS 후보 수를 단계적으로 늘리면서 metadata 조건을 만족하는 결과를 모읍니다.
+   - 검색 후에는 방어적 metadata 재검사, 선택적 rerank, 최신성 가중치와 문서 coverage를 적용합니다. 복수 문서 의도, 명시 파일 scope, 섹션 follow-up에서는 특정 PDF chunk에 결과가 쏠리지 않게 합니다.
+6. `USE_RERANKER=true`이면 `RERANK_PROVIDER`에 따라 OpenRouter 또는 명시적 로컬 FlashRank adapter를 적용합니다. 기본값은 비용을 고려해 false입니다.
+7. 답변 모델이 최신 주가를 요청한 경우에만 `stock_price_tools`를 실행하고 `final_response_node`에서 도구 결과를 합칩니다. 5개 초과 범위 축소 응답에서는 주가 도구를 호출하지 않습니다.
+8. 일반 VectorDB 검색이 무결과이거나 비교 검색이 revision mismatch·전체 retrieval 실패처럼 retryable한 상태면 한 번만 재시도합니다. 재시도는 대화로 확장된 `rewritten_query`를 원질문으로 되돌리지만 날짜·기업·증권사·리포트 유형 같은 확정 metadata 조건은 유지합니다. 비교 대상에서 단순히 근거가 부족한 `insufficient` 결과는 재시도하지 않습니다.
 
 ## PDF 추출 엔진 비교
 

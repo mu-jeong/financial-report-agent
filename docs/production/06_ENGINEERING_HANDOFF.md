@@ -81,7 +81,6 @@ P0를 먼저 하는 이유는 원격 이벤트를 수집해도 software/local ru
 - code fingerprint 범위를 `src/**/*.py`에 한정하지 않고 실제 배포 입력 전체로 확장한다.
 - automatic reproduction manifest 생성 시 `data_revision`과 `index_revision`을 누락하지 않는다.
 - evaluation provenance에 write epoch와 delta generation/segment action chain을 포함하고 delete-only segment의 nullable artifact를 허용한다.
-- `CHUNK_OVERLAP` 설정과 실제 10% 계산 중 하나만 권위로 남긴다.
 
 완료 증거:
 

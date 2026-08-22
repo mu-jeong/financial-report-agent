@@ -328,16 +328,6 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
             ),
         ),
         (
-            "CHUNK_OVERLAP",
-            ConfigSpec(
-                name="CHUNK_OVERLAP",
-                default=150,
-                parser=as_int,
-                description="Fallback/general text splitter overlap size.",
-                section="Embedding",
-            ),
-        ),
-        (
             "PDF_EXTRACTION_ENGINE",
             ConfigSpec(
                 name="PDF_EXTRACTION_ENGINE",

@@ -14,6 +14,11 @@ def test_vector_comparison_execution_mode_is_not_an_environment_setting():
     assert "VECTOR_COMPARISON_EXECUTION_MODE" not in CONFIG_SPECS
 
 
+def test_chunk_overlap_is_not_an_environment_setting():
+    assert "CHUNK_OVERLAP" not in CONFIG_SPECS
+    assert "CHUNK_OVERLAP" not in render_env_example()
+
+
 def test_runtime_config_rejects_invalid_vector_retrieval_concurrency():
     import os
     import subprocess

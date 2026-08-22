@@ -263,7 +263,6 @@ Evidence: run_id, decision record
 
 프레임 `VER-GAPS-03`:
 
-- `CHUNK_OVERLAP` 설정/실행 불일치
 - delta provenance 누락
 - README 기반 app version
 - 부분 code fingerprint
