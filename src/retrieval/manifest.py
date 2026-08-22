@@ -254,19 +254,6 @@ class CorpusManifest:
                 )
 
 
-def build_corpus_manifest(
-    discovered_report_uids: Iterable[str],
-    decisions: Iterable[ManifestDecision],
-    exclusion_policy: ExclusionPolicy,
-) -> CorpusManifest:
-    '''Functional wrapper for callers that do not own domain construction.'''
-    return CorpusManifest.build(
-        discovered_report_uids,
-        decisions,
-        exclusion_policy,
-    )
-
-
 def _normalize_report_uid(value: str) -> str:
     if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
         raise ManifestError('report_uid must be a 64-character SHA-256 hex digest')
@@ -288,5 +275,4 @@ __all__ = [
     'MANIFEST_SCHEMA_VERSION',
     'ManifestDecision',
     'ManifestError',
-    'build_corpus_manifest',
 ]

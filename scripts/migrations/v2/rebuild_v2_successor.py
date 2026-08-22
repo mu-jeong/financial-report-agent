@@ -41,8 +41,6 @@ class RebuildExecution:
     report_count: int
     indexed_report_count: int
     extraction_failure_count: int
-    publication_generation: int
-    write_epoch: int
 
 
 def load_config() -> Any:
@@ -222,8 +220,6 @@ def execute_rebuild(
         report_count=result.report_count,
         indexed_report_count=result.indexed_report_count,
         extraction_failure_count=result.extraction_failure_count,
-        publication_generation=outcome.publication_generation,
-        write_epoch=outcome.write_epoch,
     )
 
 

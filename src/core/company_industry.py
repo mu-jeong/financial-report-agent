@@ -120,28 +120,3 @@ def resolve_report_file_scope_for_companies(
         "file_names": file_names,
         "base_filters": base_filters,
     }
-
-
-def resolve_industry_report_file_scope(
-    term: str,
-    *,
-    base_filters: dict[str, Any] | None = None,
-    data_path: str | Path | None = None,
-) -> dict[str, Any]:
-    base_filters = dict(base_filters or {})
-    lookup = lookup_companies_by_industry(term, data_path=data_path)
-    report_scope = resolve_report_file_scope_for_companies(
-        lookup["company_names"],
-        base_filters=base_filters,
-    )
-    return {
-        "term": term,
-        "matched_company_count": lookup["matched_company_count"],
-        "matched_companies_preview": lookup["company_names"][:20],
-        "matched_report_targets": report_scope["matched_report_targets"],
-        "report_file_count": report_scope["report_file_count"],
-        "file_names": report_scope["file_names"],
-        "base_filters": base_filters,
-        "source_path": lookup["source_path"],
-        "source_url": lookup["source_url"],
-    }

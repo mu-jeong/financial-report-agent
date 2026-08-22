@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from src.configs.settings import BASE_DIR, render_env_example
 
 

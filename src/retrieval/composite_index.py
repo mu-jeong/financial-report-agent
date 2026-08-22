@@ -136,7 +136,6 @@ class CompositeVectorIndex:
 
         merged: list[tuple[float, str, int, int]] = []
         for artifact in self._artifacts:
-            visible = artifact.visible_local_ids
             if explicit is not None:
                 local_allowed = tuple(by_artifact[artifact.artifact_id])
                 if not local_allowed:

@@ -130,15 +130,6 @@ def delete_thread(thread_id: str) -> None:
         conn.commit()
 
 
-def delete_all_threads() -> None:
-    """Delete every persisted conversation thread and message."""
-    init_conversation_db()
-    with get_connection() as conn:
-        conn.execute("DELETE FROM conversation_messages")
-        conn.execute("DELETE FROM conversation_threads")
-        conn.commit()
-
-
 def set_thread_pinned(thread_id: str, pinned: bool) -> None:
     """Pin or unpin a conversation thread in the sidebar ordering."""
     init_conversation_db()

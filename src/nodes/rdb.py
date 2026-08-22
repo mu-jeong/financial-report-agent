@@ -349,7 +349,6 @@ def normalize_multi_company_result(
         raise ValueError("multi-company SQL result must include target_name")
     target_index = columns.index("target_name")
     requested = _ordered_target_names(target_names)
-    position = {target: index for index, target in enumerate(requested)}
     grouped: dict[str, list[tuple]] = {target: [] for target in requested}
     for row in rows:
         if len(row) <= target_index:
@@ -370,14 +369,6 @@ def normalize_multi_company_result(
                 row[count_index] = 0
                 normalized_rows.append(tuple(row))
     else:
-        normalized_rows = sorted(
-            rows,
-            key=lambda row: (
-                position.get(str(row[target_index]), len(position)),
-                str(row[1] if len(row) > 1 else ""),
-                str(row[5] if len(row) > 5 else ""),
-            ),
-        )
         # SQL already orders each target newest-first; preserve that order
         # while moving target groups into caller-requested order.
         normalized_rows = [

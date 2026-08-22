@@ -669,9 +669,4 @@ def render_env_example() -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-# Non-env path constants are kept here too so path defaults live in one module.
-SAVE_DIR_DEFAULT = _default_save_dir
-DATA_ROOT_DEFAULT = _default_data_root
-RERANK_CACHE_DIR_DEFAULT = _default_rerank_cache_dir
-CONVERSATION_DB_PATH_DEFAULT = _default_conversation_db_path
 LOG_FILE_DEFAULT = _default_log_file

@@ -184,37 +184,6 @@ def load_multiturn_evaluation_dataset(
     return json.loads(dataset_path.read_text(encoding="utf-8-sig"))
 
 
-def summarize_evaluation_dataset(dataset: dict[str, Any]) -> dict[str, Any]:
-    """고정 dataset의 Monitoring Mode coverage metric을 반환합니다."""
-    cases = dataset.get("cases") or []
-    case_types = Counter(case.get("type", "unknown") for case in cases)
-    dimensions = Counter(
-        dimension
-        for case in cases
-        for dimension in case.get("monitoring_dimensions", [])
-    )
-    criteria_tags = Counter(
-        tag
-        for case in cases
-        for tag in case.get("criteria_tags", [])
-    )
-    source_count = sum(len(case.get("expected_sources", [])) for case in cases)
-    rdb_case_count = sum(1 for case in cases if case.get("type") == "rdb_aggregate")
-
-    return {
-        "name": dataset.get("name"),
-        "version": dataset.get("version"),
-        "snapshot_date": (dataset.get("generated_from") or {}).get("snapshot_date"),
-        "case_count": len(cases),
-        "case_types": dict(case_types),
-        "monitoring_dimensions": dict(dimensions),
-        "criteria_tags": dict(criteria_tags),
-        "expected_source_count": source_count,
-        "rdb_case_count": rdb_case_count,
-        "stability_policy": dataset.get("stability_policy") or {},
-    }
-
-
 def _message_has_native_v2_provenance(message: Mapping[str, Any]) -> bool:
     metadata = message.get("metadata")
     runtime = (

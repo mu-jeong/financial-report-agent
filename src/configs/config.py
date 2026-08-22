@@ -4,7 +4,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.configs.settings import (
-    BASE_DIR,
     LOG_FILE_DEFAULT,
     get_config_value,
     resolve_retrieval_path_settings,

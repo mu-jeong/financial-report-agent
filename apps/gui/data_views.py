@@ -220,10 +220,6 @@ def render_report_calendar(db_status: dict) -> None:
     )
 
 
-def _is_update_job_active(status: dict | None) -> bool:
-    return data_update_jobs.is_update_job_active(status)
-
-
 def _step_icon(status_phase: str | None, step: str, state: str | None) -> str:
     completed_by_phase = {
         "queued": set(),
@@ -298,10 +294,6 @@ def render_update_progress() -> None:
         _render_update_steps(status)
 
 
-def _iter_weekdays(start_date: date, end_date: date) -> list[date]:
-    return data_update_jobs.iter_weekdays(start_date, end_date)
-
-
 def _default_update_range(db_status: dict) -> tuple[date, date]:
     today = date.today()
     latest = _parse_iso_date(db_status.get("max_report_date"))
@@ -321,7 +313,7 @@ def _update_min_date(db_status: dict) -> date:
 
 def render_data_update_controls(db_status: dict) -> None:
     status = data_update_jobs.read_status()
-    job_active = _is_update_job_active(status)
+    job_active = data_update_jobs.is_update_job_active(status)
     today = date.today()
     latest_range = data_update_jobs.build_update_range(last_date=db_status.get("max_report_date"), today=today)
     date_type_counts = {
@@ -377,7 +369,9 @@ def render_data_update_controls(db_status: dict) -> None:
                 selected_categories,
                 today=today,
             )
-            skipped_count = len(_iter_weekdays(range_start, min(range_end, today))) - len(target_dates)
+            skipped_count = len(
+                data_update_jobs.iter_weekdays(range_start, min(range_end, today))
+            ) - len(target_dates)
             category_label = ", ".join(selected_categories)
             st.caption(
                 f"작업 대상: {category_label} 미완료 평일 {len(target_dates)}일"
@@ -467,7 +461,7 @@ def render_unembedded_reports(status: dict) -> None:
         st.success("현재 미임베딩 문서가 없습니다.")
 
     status_payload = data_update_jobs.read_status()
-    job_active = _is_update_job_active(status_payload)
+    job_active = data_update_jobs.is_update_job_active(status_payload)
     if job_active:
         st.info("이미 데이터 업데이트/임베딩 작업이 실행 중입니다.")
 

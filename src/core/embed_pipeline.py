@@ -11,7 +11,6 @@ Flow:
 import argparse
 import os
 import sys
-import uuid
 from pathlib import Path
 
 # Make the project root importable when the file is executed directly.
@@ -21,26 +20,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-
 from src.configs import config
 from src.retrieval.bootstrap import reconcile_and_inspect_runtime
 from src.retrieval.runtime_guard import guard_before_retrieval_write
 from src.retrieval.update_lock import RetrievalUpdateLock
 
 logger = config.get_logger(__name__)
-
-
-class PdfExtractionError(ValueError):
-    """Raised when the declared primary and fallback PDF extractors fail."""
-
-
-def extract_pdf_text(*args, **kwargs):
-    """Load the extractor only after the central runtime guard has run."""
-
-    from src.core.pdf_extraction import extract_pdf_text as implementation
-
-    return implementation(*args, **kwargs)
 
 
 def build_embeddings_model(*args, **kwargs):
@@ -61,185 +46,6 @@ def extraction_fallback_engine() -> str:
     """Return the fallback used only after the primary PDF extractor fails."""
 
     return str(getattr(config, "EXTRACTION_FALLBACK_ENGINE", "") or "").strip()
-
-
-def _validate_extraction_policy(
-    primary_engine: str,
-    fallback_engine: str,
-    *,
-    allow_fallback: bool,
-) -> None:
-    """Reject invalid global extractor configuration before parsing a PDF."""
-
-    from src.core.pdf_extraction import normalize_engine
-
-    normalize_engine(primary_engine)
-    if allow_fallback and fallback_engine:
-        normalize_engine(fallback_engine)
-
-
-def sync_report_pdf_dir_env(pdf_dir: str | os.PathLike = config.SAVE_DIR) -> None:
-    """Write the absolute PDF directory to .env for GUI open-file support."""
-    env_path = config.BASE_DIR / ".env"
-    report_pdf_dir = Path(pdf_dir).resolve().as_posix()
-    env_line = f"REPORT_PDF_DIR={report_pdf_dir}"
-
-    if env_path.exists():
-        content = env_path.read_text(encoding="utf-8-sig")
-        lines = content.splitlines()
-        updated = False
-        for index, line in enumerate(lines):
-            if line.strip().startswith("REPORT_PDF_DIR="):
-                lines[index] = env_line
-                updated = True
-                break
-        if not updated:
-            if lines and lines[-1].strip():
-                lines.append("")
-            lines.append(env_line)
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    else:
-        env_path.write_text(env_line + "\n", encoding="utf-8")
-
-    os.environ["REPORT_PDF_DIR"] = report_pdf_dir
-
-
-def node_extract_pdf(state: dict) -> dict:
-    """Extract text from a PDF and attach it to the graph state."""
-    file_name = state["file_name"]
-    pdf_path = os.path.join(config.SAVE_DIR, file_name)
-    extraction_engine = state.get("extraction_engine") or unembedded_extraction_engine()
-    fallback_engine = extraction_fallback_engine()
-
-    allow_fallback = extraction_engine == config.EXTRACTION_ENGINE
-    _validate_extraction_policy(
-        extraction_engine,
-        fallback_engine,
-        allow_fallback=allow_fallback,
-    )
-    try:
-        result = extract_pdf_text(
-            pdf_path,
-            extraction_engine,
-            clean=True,
-            allow_fallback=allow_fallback,
-            fallback_engine=fallback_engine,
-        )
-    except Exception as exc:
-        logger.error(f"  PDF extraction failed: {exc}")
-        raise PdfExtractionError(
-            f"Could not extract text from PDF {file_name}: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    raw_text = result.text
-    if result.used_engine != result.requested_engine:
-        logger.info(f"  Extraction fallback used: {result.used_engine}")
-
-    if not raw_text.strip():
-        raise ValueError(f"Extracted text is empty: {file_name}")
-
-    logger.info(f"  [1/3] Extracted {len(raw_text):,} characters")
-    return {**state, "raw_text": raw_text, "extraction_engine": extraction_engine}
-
-
-def node_split_documents(state: dict) -> dict:
-    """Split extracted Markdown/text into retrieval chunks."""
-    headers_to_split_on = [
-        ("#", "Header 1"),
-        ("##", "Header 2"),
-        ("###", "Header 3"),
-    ]
-
-    markdown_splitter = MarkdownHeaderTextSplitter(
-        headers_to_split_on=headers_to_split_on,
-        strip_headers=False,
-    )
-    header_splits = markdown_splitter.split_text(state["raw_text"])
-
-    parent_docs = []
-    child_docs = []
-
-    if config.USE_PARENT_CHILD:
-        logger.info("  [2/3] Splitting with parent-child chunking...")
-
-        parent_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config.PARENT_CHUNK_SIZE,
-            chunk_overlap=int(config.PARENT_CHUNK_SIZE * 0.1),
-            separators=["\n\n", "\n", ". ", " ", ""],
-        )
-        child_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config.CHILD_CHUNK_SIZE,
-            chunk_overlap=int(config.CHILD_CHUNK_SIZE * 0.1),
-            separators=["\n\n", "\n", ". ", " ", ""],
-        )
-
-        parents = parent_splitter.split_documents(header_splits)
-
-        for p_doc in parents:
-            p_id = str(uuid.uuid4())
-            p_doc.metadata.update(
-                {
-                    "parent_id": p_id,
-                    "file_name": state["file_name"],
-                    "target_name": state["target_name"],
-                    "title": state["title"],
-                    "report_date": state["report_date"],
-                    "report_type": state.get("report_type", "company"),
-                    "broker": state.get("broker", "unknown"),
-                }
-            )
-            parent_docs.append(p_doc)
-
-            children = child_splitter.split_documents([p_doc])
-            for c_idx, c_doc in enumerate(children):
-                c_doc.metadata.update(
-                    {
-                        "parent_id": p_id,
-                        "child_index": c_idx,
-                        "file_name": state["file_name"],
-                        "target_name": state["target_name"],
-                        "title": state["title"],
-                        "report_date": state["report_date"],
-                        "report_type": state.get("report_type", "company"),
-                        "broker": state.get("broker", "unknown"),
-                    }
-                )
-                header_context = f"[Company: {state['target_name']}, Title: {state['title']}]\n"
-                c_doc.page_content = header_context + c_doc.page_content
-                child_docs.append(c_doc)
-
-        logger.info(
-            f"  [2/3] Created {len(parent_docs)} parent chunks and "
-            f"{len(child_docs)} child chunks"
-        )
-        return {**state, "documents": child_docs, "parent_documents": parent_docs}
-
-    chunk_overlap = int(config.CHUNK_SIZE * 0.1)
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=config.CHUNK_SIZE,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""],
-    )
-
-    docs = text_splitter.split_documents(header_splits)
-
-    for i, doc in enumerate(docs):
-        doc.metadata.update(
-            {
-                "file_name": state["file_name"],
-                "target_name": state["target_name"],
-                "title": state["title"],
-                "report_date": state["report_date"],
-                "report_type": state.get("report_type", "company"),
-                "broker": state.get("broker", "unknown"),
-                "chunk_index": i,
-            }
-        )
-        header_context = f"[Company: {state['target_name']}, Title: {state['title']}]\n"
-        doc.page_content = header_context + doc.page_content
-
-    logger.info(f"  [2/3] Created {len(docs)} chunks")
-    return {**state, "documents": docs}
 
 
 def build_embeddings_fn():

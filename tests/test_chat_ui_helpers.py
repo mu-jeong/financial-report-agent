@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from src.core.chat_ui_helpers import (
-    build_clipboard_copy_html,
     build_no_result_suggestions,
     build_scope_notice,
     escape_numeric_tildes_for_markdown,
@@ -48,14 +47,6 @@ def test_build_no_result_suggestions_returns_actionable_retry_queries():
     )
 
     assert suggestions == [{"label": "날짜 조건 없이 다시 검색", "query": "NAVER 리포트 요약해줘"}]
-
-
-def test_build_clipboard_copy_html_escapes_text_and_invokes_clipboard_api():
-    html = build_clipboard_copy_html("issue <report> & details")
-
-    assert "navigator.clipboard.writeText" in html
-    assert "issue <report> & details" not in html
-    assert "Copy issue report" in html
 
 
 def test_escape_numeric_tildes_for_markdown_preserves_financial_range_text():

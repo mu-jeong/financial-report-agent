@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import html
-import json
-import base64
 import re
 from typing import Any
 
@@ -111,31 +108,3 @@ def build_no_result_suggestions(question: str, search_filters: dict[str, Any] | 
             seen_labels.add(suggestion["label"])
             deduped.append(suggestion)
     return deduped
-
-
-def build_clipboard_copy_html(text: str, *, button_label: str = "Copy issue report") -> str:
-    """Return a small HTML copy button for Streamlit components."""
-    payload = json.dumps(base64.b64encode(text.encode("utf-8")).decode("ascii"))
-    safe_label = html.escape(button_label)
-    return f"""
-<button type="button" id="copy-issue-report" style="padding:0.35rem 0.6rem;border-radius:0.45rem;border:1px solid #cbd5e1;background:#f8fafc;cursor:pointer;font-size:0.82rem;">
-  {safe_label}
-</button>
-<span id="copy-issue-report-status" style="margin-left:0.5rem;color:#64748b;font-size:0.78rem;"></span>
-<script>
-const button = document.getElementById('copy-issue-report');
-const status = document.getElementById('copy-issue-report-status');
-button.addEventListener('click', async () => {{
-  try {{
-    const encoded = {payload};
-    const binary = atob(encoded);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    const text = new TextDecoder('utf-8').decode(bytes);
-    await navigator.clipboard.writeText(text);
-    status.textContent = 'Copied';
-  }} catch (error) {{
-    status.textContent = 'Copy failed';
-  }}
-}});
-</script>
-""".strip()

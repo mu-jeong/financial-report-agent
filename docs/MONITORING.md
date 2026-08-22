@@ -2,7 +2,7 @@
 
 Monitoring Mode는 전체 운영 상태와 개별 대화 turn을 서로 다른 깊이로 확인하는 개발자용 화면이다. `.env`의 `MONITORING_MODE=true`일 때만 노출된다.
 
-활성 화면과 새 산출물은 Native V2만 기준으로 삼는다. 스키마가 유효하지 않은 평가 run·신고·회귀 후보는 활성 화면에서 제외한다.
+활성 화면과 새 평가 산출물은 Native V2만 기준으로 삼는다. 스키마와 hash가 유효하지 않은 평가 run은 활성 화면에서 제외한다.
 
 ## 1. 화면 원칙
 
@@ -15,7 +15,7 @@ Monitoring Mode는 전체 운영 상태와 개별 대화 turn을 서로 다른 �
 
 속도 표본이나 승인된 V2 평가 run이 없으면 `측정 전`으로 표시한다. 데이터가 없다는 사실을 0초나 정확도 0%로 오해하지 않게 하기 위한 계약이다.
 
-나머지 정보는 기본 지표 아래의 용도별 가로 내비게이션에서 하나씩 선택한다. `운영 모니터링`과 `성능 개선 실험`을 먼저 분리하고, 선택한 그룹 안에서 세부 화면을 다시 고른다. 선택하지 않은 route, source, snapshot, parser 비교, 신고 목록은 렌더링하지 않는다.
+나머지 정보는 기본 지표 아래의 용도별 가로 내비게이션에서 하나씩 선택한다. `운영 모니터링`과 `성능 개선 실험`을 먼저 분리하고, 선택한 그룹 안에서 세부 화면을 다시 고른다. 선택하지 않은 route, source, snapshot, parser 비교는 렌더링하지 않는다.
 
 ```text
 Monitoring
@@ -28,11 +28,10 @@ Monitoring
    │  └─ 검색 자료 준비
    └─ 성능 개선 실험
       ├─ 정확도 평가
-      ├─ 문서 읽기 품질 비교
-      └─ 신고·수정 확인
+      └─ 문서 읽기 품질 비교
 ```
 
-그룹 내부 ID는 `operations`, `experiments`로 고정한다. 세부 영역의 내부 ID는 각각 `summary`, `response`, `search_data`, `evaluation`, `parsing`, `issues`로 유지한다. 화면 문구가 바뀌어도 widget state와 테스트가 흔들리지 않게 하기 위해서다. Streamlit `st.tabs`는 숨은 panel까지 모두 계산하므로, 이 화면은 선택한 panel만 계산하는 `st.segmented_control`을 탭형 내비게이션으로 사용한다.
+그룹 내부 ID는 `operations`, `experiments`로 고정한다. 세부 영역의 내부 ID는 각각 `summary`, `response`, `search_data`, `evaluation`, `parsing`으로 유지한다. 화면 문구가 바뀌어도 widget state와 테스트가 흔들리지 않게 하기 위해서다. Streamlit `st.tabs`는 숨은 panel까지 모두 계산하므로, 이 화면은 선택한 panel만 계산하는 `st.segmented_control`을 탭형 내비게이션으로 사용한다.
 
 각 그룹은 마지막으로 선택한 세부 화면을 따로 기억한다. `현재 문제`의 경고 행은 상태 이름만 표시하지 않고 실제 집계 세부값과 다음 확인 경로를 함께 제공한다.
 
@@ -187,23 +186,9 @@ raw snapshot ID, generation, epoch 같은 값은 `기술 세부정보` expander 
 
 PDF 추출 엔진 비교는 문제 문서가 의심될 때만 연다. 파일별 성공/실패, 추출량, 실행 시간과 결과 경로를 확인한다. 이 결과는 기본 정확도 수치에 자동 합산하지 않는다.
 
-### 신고·수정 확인
+### 문제 신고 경계
 
-이 화면은 사용자 신고를 회귀 후보로 승격하고 수정 전 재현과 수정 후 검증을 관리한다. `verified` 또는 `closed` 후보만 이후 새 평가 사례의 입력으로 사용할 수 있으며, 새로 고정한 데이터 기준에서 기대 조건과 출처를 다시 검토해야 한다.
-
-활성 화면은 다음 V2 계약만 자동 발견한다.
-
-| 산출물 | 활성 계약 |
-| --- | --- |
-| Issue report | `schema_version=2`, `report_contract_version=2` |
-| Regression candidate | `schema_version=2`, `contract_schema_version=2` |
-| Evaluation run | `schema_version=2`, 유효한 `run_hash`, 검증된 successor Native V2 provenance |
-
-계약이 유효하지 않은 파일은 활성 목록에서 제외한다. 새 issue report와 이메일 text import는 V2 계약으로 저장한다.
-
-회귀 후보의 baseline·verification은 Native V2 revision이 기록되고 검증된 실행 결과만 증거로 연결한다. 검증 계획은 판정 기준이고 재현 매니페스트는 환경 지문이므로 둘만으로 실행 자료를 복원하지 않는다. 단순 후보 초안 진단 실행은 현재 Native V2 backend를 사용하지만 정식 lifecycle 증거로 자동 승격하지 않는다.
-
-기대 결과 작성 단계에서는 운영자가 계약 JSON을 직접 입력하지 않는다. `LLM으로 최소 조건 제안`을 명시적으로 눌렀을 때만 선택 turn의 질문·답변·신고 사유와 제한된 출처 메타데이터를 현재 생성 모델에 보내며, 모델은 1~5개의 자연어 최소 조건과 대상 별칭만 구조화해 제안한다. 제안은 후보를 변경하거나 승인하지 않고 운영자가 화면에서 수정한 뒤 별도로 저장·승인한다. VectorDB 답변 조건은 기본적으로 `답변에 대상 표현 존재`, `선택 출처 메타데이터에 같은 대상 존재`, `그 출처 순위 인용`을 모두 만족해야 통과하므로, 예를 들어 “SK하이닉스 자료가 없다”는 문장에 이름만 등장해도 하이닉스 출처와 인용이 없으면 실패한다. 모델 호출·구조화 검증 실패 시 기존 후보 계약은 그대로 유지한다. 품질 프로파일, 성능 예산, 재현 입력과 매니페스트는 고급 내부 설정으로 기존 값을 자동 유지하며 수동 UI 검사가 필요한 경우에만 한 줄짜리 확인 조건을 추가한다.
+Monitoring은 신고 목록이나 회귀 후보 lifecycle을 렌더링하지 않는다. 문제 신고는 Chat 화면에서 사용자가 동의한 항목만 redaction한 뒤 별도 SQLite outbox에 기록하고 Supabase 수신함으로 비동기 전송한다. 과거 로컬 issue artifact와 candidate API는 호환·연구용 backend로 남아 있지만 활성 Monitoring 화면의 discovery 대상은 아니다.
 
 ## 5. V2 데이터 경계
 
@@ -212,8 +197,8 @@ PDF 추출 엔진 비교는 문제 문서가 의심될 때만 연다. 파일별 
 1. 검색 상태는 `catalog.sqlite3`, active base snapshot과 ready delta segment를 기준으로 계산한다.
 2. 무결성 검사는 V2 snapshot, membership, manifest, runtime, cleanup backlog만 본다.
 3. 정확도는 스키마·hash·실제 runtime provenance가 모두 검증된 Native V2 run만 집계한다.
-4. 신고와 회귀 후보 discovery도 V2 계약만 사용한다.
-5. 계약이 유효하지 않은 산출물은 현재 지표로 집계하지 않는다.
+4. 신고와 회귀 후보는 활성 Monitoring 화면에서 discovery하지 않는다.
+5. 계약이 유효하지 않은 평가 산출물은 현재 지표로 집계하지 않는다.
 
 ## 6. 주요 구현 파일
 
@@ -222,7 +207,7 @@ PDF 추출 엔진 비교는 문제 문서가 의심될 때만 연다. 파일별 
 | Streamlit 진입 및 page 선택 | `apps/gui/app.py`, `apps/gui/sidebar_views.py` |
 | Monitoring 화면 | `apps/gui/monitoring_views.py` |
 | 시간·정확도·trace·V2 무결성 집계 | `src/core/monitoring.py` |
-| V2 issue report 저장과 discovery | `src/core/issue_report_store.py` |
+| Chat 문제 신고 payload와 outbox | `src/core/issue_report_store.py`, `src/core/issue_report_outbox.py` |
 | Native V2 상태 | `src/core/status.py` |
 | 응답 metadata 생성 | `src/graphs/state.py`, `src/nodes/*` |
 
@@ -239,7 +224,7 @@ streamlit run apps/gui/app.py
 핵심 회귀 테스트:
 
 ```bash
-python -m pytest -q tests/test_monitoring.py tests/test_gui_view_contracts.py tests/test_feedback_loop.py
+python -m pytest -q tests/test_monitoring.py tests/test_gui_view_contracts.py
 ```
 
 검증 계약은 다음을 포함한다.
@@ -258,16 +243,15 @@ python -m pytest -q tests/test_monitoring.py tests/test_gui_view_contracts.py te
 - 평가 자료가 없을 때 `측정 전`
 - 기본 화면의 두 지표와 용도별 상단 내비게이션
 - 활성 UI는 Native V2 catalog/snapshot만 사용
-- 스키마 없는 report/candidate/run의 활성 discovery 제외
+- 스키마·hash가 유효하지 않은 evaluation run의 집계 제외
 - Native V2 무결성 및 cleanup backlog 표시
 - Native V2가 없을 때 다른 DB/vector 상태를 읽거나 렌더하지 않음
-- issue report와 candidate lifecycle의 V2 계약 경계
 
 ## 8. 현재 한계
 
 - 승인된 정식 V2 evaluation fixture가 준비되기 전에는 정확도를 수치로 확정할 수 없다.
 - 자동 debug hint는 규칙 기반이므로 조사 시작점으로만 사용한다.
 - 적은 평가 표본만으로 품질 우열이나 배포 여부를 자동 결정하지 않는다.
-- issue report에는 재현에 필요한 대화 metadata가 포함될 수 있으므로 외부 전달 전에 내용을 확인한다.
+- Chat 문제 신고는 제출 전 redaction preview를 제공하지만, 사용자가 명시적으로 동의한 대화 metadata는 원격 전송될 수 있다.
 - LLM 생성·query rewrite의 독립 latency는 아직 계측하지 않으며 전체 응답시간에만 포함된다.
 - 일반 대화 observability는 conversation DB 보존 정책을 따르며 정식 평가 증거로 취급하지 않는다.

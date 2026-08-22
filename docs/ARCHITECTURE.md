@@ -12,7 +12,7 @@ Finance LLM은 증권사 PDF 리포트를 수집, 추출, 색인하고 질문에
 | 리포트/검색 메타데이터 | SQLite `DATA_ROOT/retrieval/v2/catalog.sqlite3` |
 | 대화 저장 | SQLite `data/conversations.db` |
 | 임베딩 색인 | Immutable `DATA_ROOT/retrieval/v2/snapshots/<snapshot_id>.faiss` + catalog membership |
-| 문제 신고 저장 | `debug/issue_report_*.txt`와 같은 stem의 구조화 `.json` sidecar |
+| 문제 신고 전송 | 별도 SQLite outbox에 기록 후 Supabase 수신함으로 비동기 전송 |
 | 생성 모델 | OpenRouter `deepseek/deepseek-v4-flash` |
 | 임베딩 모델 | OpenRouter `baai/bge-m3` |
 | Rerank | 기본 비활성화, 필요 시 OpenRouter `cohere/rerank-v3.5` |
@@ -55,6 +55,10 @@ Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 �
 Profile 변경은 incremental writer가 거부합니다. `tools\recovery\REBUILD_V2.bat --check`로 상태를 확인한 뒤 검증된 full native successor를 준비·게시해야 합니다.
 
 ## 5. 검색 계층
+
+![현재 LangGraph 실행 구조](./langgraph_diagram.png)
+
+이 다이어그램은 compiled main graph를 `xray=True`로 펼쳐 회사 비교 subgraph까지 포함한 현재 실행 구조입니다. 점선은 조건부 전이입니다.
 
 LangGraph는 대략 다음 노드로 구성됩니다.
 
@@ -123,11 +127,11 @@ RERANK_MODEL=cohere/rerank-v3.5
 
 ## 9. 문제 신고
 
-`src/core/issue_report_store.py`는 GUI의 `⚠ 신고` 버튼에서 제출된 문제를 사람이 읽는 `.txt`와 모니터링·회귀 후보 승격용 구조화 `.json` sidecar로 함께 저장합니다. 기본 저장 위치는 `debug/`이며 두 파일은 같은 `issue_report_*` stem을 사용합니다.
+GUI의 `신고` 버튼은 `src/core/issue_report_store.py`에서 메모리 payload를 구성하고 `src/core/issue_report_outbox.py`를 통해 별도 SQLite outbox에 기록합니다. durable enqueue가 끝나면 사용자에게 접수 완료를 표시하고, HTTP 전송과 제한된 재시도는 백그라운드 worker가 담당합니다.
 
-- 신고 내용에는 문제 유형, 사용자가 작성한 설명, thread 정보, 선택 시 대화 전문과 축약된 metadata가 포함됩니다.
-- `debug/*`는 Git에 포함하지 않고 `debug/.gitkeep`만 폴더 유지용으로 추적합니다.
-- 두 파일 모두 로컬 디버깅 산출물이며 사용자가 내용을 확인한 뒤 전달해야 합니다.
+- 설명·선택 질문·응답·turn trace는 각각 별도 동의를 받아 포함하고, 전송 전에 민감정보와 로컬 경로를 redaction합니다.
+- 현재 GUI는 로컬 `.txt`/`.json` 신고 파일을 만들지 않으며 원격 접수가 비활성화되면 제출도 비활성화합니다.
+- 과거 로컬 issue artifact API는 호환·연구용으로 남아 있지만 활성 Monitoring 화면에서는 노출하지 않습니다.
 
 ### Chat Monitoring trace viewer
 

@@ -188,7 +188,7 @@ DB 접근은 서로 배타적인 두 안 중 하나를 ADR로 선택한다.
 | Event | 권장 연결 지점 | 원칙 |
 | --- | --- | --- |
 | interaction success/failure | [`apps/gui/chat_jobs.py`](../../apps/gui/chat_jobs.py) `conversation_store.update_message` 성공 후 | local message 상태가 먼저 확정 |
-| issue submitted | [`src/core/issue_report_store.py`](../../src/core/issue_report_store.py) `create_issue_report` artifact write 성공 후 | consent/redaction 결과만 enqueue |
+| issue submitted | [`apps/gui/chat_views.py`](../../apps/gui/chat_views.py) `issue_report_outbox.queue_report`의 durable enqueue 성공 후 | 메모리에서 구성·redaction한 동의 범위만 전송 |
 | candidate changed | [`src/core/monitoring.py`](../../src/core/monitoring.py) `_persist_candidate` 성공 후 | public issue와 operator candidate 구분 |
 | evaluation observed | 같은 파일 `_persist_evaluation_run` 성공 후 | public event는 non-qualifying; authenticated canonical 등록과 분리 |
 | candidate run attached | 같은 파일 `record_candidate_run` 성공 후 | 관계 성공 후 emit |

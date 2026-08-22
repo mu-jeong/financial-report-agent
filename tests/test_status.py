@@ -7,8 +7,6 @@ from types import SimpleNamespace
 from src.core import issue_report_store, status as status_module
 from src.core.data_update_jobs import build_crawler_env, missing_update_dates_by_category
 from src.core.status import (
-    assess_readiness,
-    format_readiness_text,
     format_duration,
     get_data_status,
     get_native_v2_data_status,
@@ -503,67 +501,6 @@ def test_list_unembedded_reports_maps_native_manifest_failure_to_management_row(
             "embedding_last_attempt_at": "2026-07-25T08:30:00.000Z",
         }
     ]
-
-
-def test_assess_readiness_blocks_when_index_is_missing():
-    status = {
-        "downloaded_pdfs": 0,
-        "db": {
-            "exists": True,
-            "error": None,
-            "total_reports": 2,
-            "embedded_reports": 0,
-            "pending_reports": 2,
-            "min_report_date": "2026-06-01",
-            "max_report_date": "2026-06-02",
-        },
-        "vector_db": {
-            "exists": False,
-            "has_faiss_index": False,
-            "file_count": 0,
-            "total_size_bytes": 0,
-        },
-        "search_coverage_ratio": 0.0,
-        "config": {},
-        "paths": {},
-    }
-
-    readiness = assess_readiness(status)
-
-    assert readiness["level"] == "blocked"
-    assert readiness["label"] == "준비 필요"
-    assert any("FAISS 검색 인덱스" in message for message in readiness["messages"])
-    assert "Quick Start 준비 상태: 준비 필요" in format_readiness_text(status)
-
-
-def test_assess_readiness_warns_for_partial_native_embedding():
-    status = {
-        "downloaded_pdfs": 2,
-        "db": {
-            "exists": True,
-            "error": None,
-            "total_reports": 2,
-            "embedded_reports": 1,
-            "pending_reports": 1,
-            "min_report_date": "2026-06-01",
-            "max_report_date": "2026-06-02",
-        },
-        "vector_db": {
-            "exists": True,
-            "has_faiss_index": True,
-            "file_count": 2,
-            "total_size_bytes": 16,
-        },
-        "search_coverage_ratio": 0.5,
-        "config": {},
-        "paths": {},
-    }
-
-    readiness = assess_readiness(status)
-
-    assert readiness["level"] == "warning"
-    assert readiness["label"] == "주의 필요"
-    assert any("임베딩되지 않은 리포트" in message for message in readiness["messages"])
 
 
 def test_build_crawler_env_passes_selected_categories():

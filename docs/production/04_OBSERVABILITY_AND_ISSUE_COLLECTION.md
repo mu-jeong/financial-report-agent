@@ -90,7 +90,7 @@ publishable key는 공개 application component와 project를 식별하는 API k
 | `interaction_failed` | local failure 저장 후 | stage, stable error code, exception type/hash | High |
 | `retrieval_no_result` | 검색 결과 0건 | scope, profile/composite revision | Normal |
 | `runtime_validation_failed` | schema/artifact/profile 검증 실패 | stable validation code | High |
-| `issue_submitted` | local issue 저장 + 사용자 확인 후 | issue ID, category, consent flags | High |
+| `issue_submitted` | redaction된 신고의 SQLite outbox durable enqueue 성공 후 | issue ID, category, consent flags | High |
 | `evaluation_run_observed` | 공개 설치본의 local run artifact 확정 후 | claimed suite/software/local runtime, verdict | Normal / 절대 qualifying 아님 |
 | `software_release_observed` | 설치본에서 새 software manifest 최초 확인 | current/previous software manifest | Low |
 | `outbox_health` | 주기적 집계 | queued/retry count, oldest age | Normal / bounded |

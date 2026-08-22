@@ -37,7 +37,6 @@ from src.core.monitoring import (
     summarize_chat_messages,
     summarize_chat_latency_metrics,
     summarize_evaluation_accuracy,
-    summarize_evaluation_dataset,
     summarize_issue_reports,
     summarize_v2_data_integrity,
 )
@@ -66,36 +65,6 @@ def _attested_native_v2_run(results: list[dict]) -> dict:
     run["run_hash"] = compute_evaluation_run_hash(run)
     run["integrity_status"] = "valid"
     return run
-
-
-def test_summarize_evaluation_dataset_counts_monitoring_dimensions():
-    dataset = {
-        "name": "finance_llm_local_eval_dataset",
-        "version": 2,
-        "generated_from": {"snapshot_date": "2026-06-19"},
-        "stability_policy": {"policy": "fixed_baseline_until_change_reason"},
-        "cases": [
-            {
-                "type": "vectordb_retrieval",
-                "monitoring_dimensions": ["retrieval", "rerank"],
-                "criteria_tags": ["local_reproducibility"],
-                "expected_sources": [{"file_name": "a.pdf"}],
-            },
-            {
-                "type": "rdb_aggregate",
-                "monitoring_dimensions": ["rdb"],
-                "criteria_tags": ["route_coverage"],
-            },
-        ],
-    }
-
-    summary = summarize_evaluation_dataset(dataset)
-
-    assert summary["case_count"] == 2
-    assert summary["case_types"] == {"vectordb_retrieval": 1, "rdb_aggregate": 1}
-    assert summary["monitoring_dimensions"] == {"retrieval": 1, "rerank": 1, "rdb": 1}
-    assert summary["expected_source_count"] == 1
-    assert summary["stability_policy"]["policy"] == "fixed_baseline_until_change_reason"
 
 
 def test_chat_monitoring_summary_and_rows_are_safe_metadata_only():

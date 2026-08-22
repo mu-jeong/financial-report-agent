@@ -24,14 +24,6 @@ from tests.migrations.v2.fixtures_factory.v1 import build_v1_fixture
 from tests.retrieval.native_build_fixtures import _native_seed
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _settings(data_root: Path) -> UserMigrationSettings:
     return UserMigrationSettings(
         data_root=data_root,

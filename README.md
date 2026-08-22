@@ -8,6 +8,13 @@ Financial Report Agent는 여러 증권사의 기업·산업·경제 리포트�
 
 ---
 
+## 화면 예시
+
+### Chat
+
+![현재 Chat 화면](examples/example1.png)
+
+
 ## Quick Start: 간편하게 실행하기
 
 Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면 설치, OpenRouter API 키 설정, 실행일 포함 이전 7일 범위(총 최대 8일)의 리포트 수집, 임베딩 생성, 웹 화면 실행까지 자동으로 진행됩니다.
@@ -294,12 +301,12 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 선택한 turn의 총시간, 실제 검색 실행 방식, 요청 대상별 근거 확보, 인용 연결을 먼저 보여줍니다. 복수 기업 비교는 저장된 실측 동시성에 따라 `Send 병렬 실행 (동시성 N)` 또는 `Send 직렬 실행 (동시성 1)`로 표시하고 대상별 후보·검색·대기시간을 함께 보여줍니다. 사용 문서는 기본 화면에서 확인하고, 현재 대화 평균·RDB/Vector DB 평균은 접힌 속도 추이에서, 검색 k·compact state·prompt chunk는 `기술 세부정보`를 선택했을 때 확인합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여줍니다. 상세 화면은 상단의 `운영 모니터링`과 `성능 개선 실험`으로 나뉩니다. 운영 모니터링에는 현재 문제·전역 응답 trace·검색 자료 상태를, 성능 개선 실험에는 정확도 평가·parsing 비교·issue report와 회귀 후보를 둡니다. 회귀 후보의 최소 기대 조건은 운영자가 JSON을 작성하는 대신 LLM 제안을 자연어로 검토·수정해 저장하며, 제안만으로 자동 승인되지는 않습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 선택한 turn의 총시간, 실제 검색 실행 방식, 요청 대상별 근거 확보, 인용 연결을 먼저 보여줍니다. 복수 기업 비교는 저장된 실측 동시성에 따라 `Send 병렬 실행 (동시성 N)` 또는 `Send 직렬 실행 (동시성 1)`로 표시하고 대상별 후보·검색·대기시간을 함께 보여줍니다. 사용 문서는 기본 화면에서 확인하고, 현재 대화 평균·RDB/Vector DB 평균은 접힌 속도 추이에서, 검색 k·compact state·prompt chunk는 `기술 세부정보`를 선택했을 때 확인합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여줍니다. 상세 화면은 상단의 `운영 모니터링`과 `성능 개선 실험`으로 나뉩니다. 운영 모니터링에는 현재 문제·전역 응답 trace·검색 자료 상태를, 성능 개선 실험에는 정확도 평가와 parsing 비교를 둡니다. 문제 신고는 Chat의 redaction·원격 outbox 경로에서만 제출하며 Monitoring에는 신고·회귀 후보 관리 화면이 없습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
 
 ### 테스트 방법
 
 ```bash
-python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_gui_view_contracts.py tests/test_feedback_loop.py -q
+python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_gui_view_contracts.py -q
 python -m pytest -q
 ```
 
@@ -310,13 +317,13 @@ python -m pytest -q
 - 정확도는 snapshot/build/profile/generation과 hash가 검증된 Native V2 평가 run의 correctness 검사만 집계하며 latency는 제외합니다.
 - 평가 자료가 없으면 0%가 아니라 `측정 전`으로 표시합니다.
 - Native V2 상태가 없을 때 과거 지표로 우회하지 않습니다.
-- 스키마가 유효하지 않은 report·candidate·run은 활성 화면에서 제외합니다.
+- 스키마와 hash가 유효하지 않은 evaluation run은 활성 화면에서 제외합니다.
 - 개별 turn의 근거 연결 상태는 의미 정확도 점수가 아니며, 청크/PDF 본문이나 provider 원문 응답은 monitoring metadata에 복제하지 않습니다.
 
 ### 용도별 상세 영역
 
 - 운영 모니터링: 현재 문제, 응답 원인 확인, 검색 자료 준비
-- 성능 개선 실험: 정확도 평가, 문서 읽기 품질 비교, 신고·수정 확인
+- 성능 개선 실험: 정확도 평가, 문서 읽기 품질 비교
 
 ### TODO
 
@@ -326,6 +333,7 @@ python -m pytest -q
 - [x] 기존 active V2 profile에 다른 추출 정책을 자동으로 섞지 않고, 정책 변경을 검증된 full-corpus successor 경계로 제한합니다.
 - [x] PyMuPDF가 실패한 문서를 OpenDataLoader로 즉시 한 번 재시도하고 V2 profile에 fallback 정책을 기록합니다.
 - [x] 두 추출기가 모두 실패한 V2 문서를 manifest 제외 상태로 기록하고 나머지 문서의 snapshot 게시를 계속합니다.
+- [ ] 미래에셋 이미지형 PDF 실패군에서 OpenRouter `mistral-ocr`와 `qwen/qwen3-vl-32b-instruct`를 동일한 페이지 표본으로 비교하고, 한글 CER·숫자 exact-match·표 cell F1·누락/환각률·페이지당 비용·latency를 기준으로 OCR fallback 채택 여부와 임계값을 결정합니다. 이후 실험을 통과한 OCR 경로를 PyMuPDF·OpenDataLoader 이후의 조건부 fallback으로 추가합니다.
 - [ ] 상세 parser 오류·시도 횟수와 fallback 사용 추이를 별도 진단 이력으로 관측할 수 있게 합니다.
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
 - [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.

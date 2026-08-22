@@ -58,11 +58,9 @@ DATA_VIEW_FUNCTIONS = {
     "_report_calendar_table_html",
     "_set_calendar_month",
     "render_report_calendar",
-    "_is_update_job_active",
     "_step_icon",
     "_render_update_steps",
     "render_update_progress",
-    "_iter_weekdays",
     "_default_update_range",
     "_update_min_date",
     "render_data_update_controls",
@@ -82,10 +80,6 @@ MONITORING_VIEW_FUNCTIONS = {
     "_render_answer_metrics",
     "_render_global_monitoring",
     "_render_v2_data_diagnostics",
-    "_rerun_candidate_action",
-    "_write_and_record_candidate_handoff",
-    "_render_candidate_lifecycle",
-    "_render_issue_report_monitoring",
     "_chat_execution_label",
     "_chat_target_coverage_label",
     "_chat_grounding_label",
@@ -131,8 +125,6 @@ EXPLICIT_WIDGET_KEYS = {
     "'update_categories'",
     "'update_date_range'",
     "'update_selected_range'",
-    "'email_issue_report_import_text'",
-    "'feedback_loop_candidate_selector'",
     "'issue_report_control'",
     "'retry_search_engine_warmup'",
     "'sidebar_data_status_bottom'",
@@ -150,41 +142,6 @@ EXPLICIT_WIDGET_KEYS = {
     "f\"issue_report_include_remote_comment_{current_thread['id']}\"",
     "f\"issue_report_include_remote_content_{current_thread['id']}\"",
     "f\"issue_report_include_remote_turn_trace_{current_thread['id']}\"",
-    "f\"candidate_approve_{candidate['id']}\"",
-    "f\"candidate_attach_handoff_{item['handoff_id']}\"",
-    "f\"candidate_attach_run_{run['run_id']}\"",
-    "f\"candidate_close_action_{candidate['id']}\"",
-    "f\"candidate_edit_contract_reason_{candidate['id']}\"",
-    "f\"candidate_edit_contract_{candidate['id']}\"",
-    "f\"candidate_fixing_{candidate['id']}\"",
-    "f\"candidate_handoff_baseline_{candidate['id']}\"",
-    "f\"candidate_handoff_confirm_{candidate['id']}\"",
-    "f\"candidate_handoff_reason_{candidate['id']}\"",
-    "f\"candidate_handoff_save_{candidate['id']}\"",
-    "f\"candidate_manual_check_{status}_{candidate['id']}_{assertion_id}\"",
-    "f\"candidate_manual_confirm_{status}_{candidate['id']}\"",
-    "f\"candidate_manual_note_{status}_{candidate['id']}\"",
-    "f\"candidate_manual_reason_{status}_{candidate['id']}\"",
-    "f\"candidate_record_manual_{status}_{candidate['id']}\"",
-    "f\"candidate_mark_reproduced_{candidate['id']}\"",
-    "f\"candidate_mark_triaged_{candidate['id']}\"",
-    "f\"candidate_mark_verified_{candidate['id']}\"",
-    "f\"candidate_needs_expectation_{candidate['id']}\"",
-    "f\"candidate_not_reproduced_reason_{candidate['id']}\"",
-    "f\"candidate_not_reproducible_{candidate['id']}\"",
-    "f\"candidate_ready_{candidate['id']}\"",
-    "f\"candidate_rejection_reason_{candidate['id']}\"",
-    "f\"candidate_reject_{candidate['id']}\"",
-    "f\"candidate_reopen_reason_{candidate['id']}\"",
-    "f\"candidate_reopen_{candidate['id']}\"",
-    "f\"candidate_repair_handoff_{item['handoff_id']}\"",
-    "f\"candidate_suggest_expectation_{candidate['id']}\"",
-    "f\"candidate_requirement_description_{candidate['id']}_{draft_version}_{index}\"",
-    "f\"candidate_requirement_answer_terms_{candidate['id']}_{draft_version}_{index}\"",
-    "f\"candidate_requirement_source_terms_{candidate['id']}_{draft_version}_{index}\"",
-    "f\"candidate_requirement_citation_{candidate['id']}_{draft_version}_{index}\"",
-    "f\"candidate_manual_assertions_text_{candidate['id']}_{draft_version}\"",
-    "count_key",
     "f\"no_result_suggestion_{message.get('id', index)}_{suggestion['label']}\"",
     "f\"toggle_issue_report_{current_thread['id']}\"",
     "f'cancel_thread_{thread_id}'",
@@ -192,7 +149,6 @@ EXPLICIT_WIDGET_KEYS = {
     "f'edit_thread_{thread_id}'",
     "f'pin_thread_{thread_id}'",
     "f'rename_input_{thread_id}'",
-    "f'repair_issue_report_text_{warning_index}'",
     "f'report_calendar_year_select_{current_value}'",
     "f'report_calendar_month_select_{selected_year}_{current_value}'",
     "f'save_thread_{thread_id}'",
@@ -210,7 +166,6 @@ SESSION_STATE_KEYS = {
     "issue_report_notice",
     "latest_evaluation_run",
     "latest_parsing_evaluation",
-    "latest_regression_candidate_run",
     "pending_scroll_anchor",
     "pending_suggested_query",
     "report_calendar_month",
@@ -1882,92 +1837,3 @@ def test_app_only_composes_extracted_views_and_leaf_modules_do_not_import_app():
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
         ]
         assert not top_level_calls
-
-
-class TestSliceACandidateUi:
-    """Executable gate for the Slice A operator workflow."""
-
-    test_widget_keys_are_explicit = staticmethod(
-        test_gui_widget_and_session_keys_remain_stable_across_module_moves
-    )
-    test_candidate_view_functions_have_one_owner = staticmethod(
-        test_each_extracted_view_function_has_one_owner
-    )
-
-    def test_candidate_lifecycle_exposes_approved_evidence_controls(self):
-        source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
-
-        assert "Native V2 revision을 고정한 실행 결과" in source
-        assert "monitoring.record_candidate_run(" in source
-        assert "monitoring.record_candidate_manual_evidence(" in source
-        assert "form_record_revision" in source
-        assert "form_revision_key=form_revision_key" in source
-        assert '"triaged", "needs_expectation"' in source
-        assert "candidate_triage_followup_" in source
-        assert "추가 정보 반영 후 후보 재분류" in source
-        assert 'to_status="reproduced"' in source
-        assert 'to_status="not_reproducible"' in source
-        assert 'to_status="verified"' in source
-        assert 'to_status="rejected"' in source
-        assert "중복 대상 후보 ID" not in source
-        assert "candidate_duplicate_reason_" not in source
-        assert 'to_status="duplicate"' not in source
-        assert "현재 기대 결과(읽기 전용)" in source
-        assert "승인 여부:" in source
-        assert "재현 매니페스트는 Native V2 환경 지문입니다." in source
-        assert "최종 평가 묶음보다 앞선 단계" in source
-        assert "LLM으로 최소 조건 제안" in source
-        assert "최소 답변 조건" in source
-        assert "재현 입력(JSON)" not in source
-        assert "기대 검색 조건(JSON)" not in source
-        assert "기대 출처(JSON 배열)" not in source
-        assert "기대 상태(JSON)" not in source
-        assert "수동 검사 항목(JSON 배열)" not in source
-
-    def test_candidate_form_conflict_clears_loaded_revision_without_retry(self):
-        class CandidateConflictError(RuntimeError):
-            pass
-
-        class FakeMonitoring:
-            pass
-
-        FakeMonitoring.CandidateConflictError = CandidateConflictError
-
-        class FakeStreamlit:
-            def __init__(self):
-                self.session_state = {"loaded_revision": 7}
-                self.errors: list[str] = []
-                self.rerun_count = 0
-
-            def error(self, message):
-                self.errors.append(message)
-
-            def rerun(self):
-                self.rerun_count += 1
-
-        fake_st = FakeStreamlit()
-        rerun_action = _load_helpers(
-            MONITORING_VIEWS_PATH,
-            "_rerun_candidate_action",
-            extra_namespace={
-                "st": fake_st,
-                "monitoring": FakeMonitoring,
-            },
-        )["_rerun_candidate_action"]
-        calls = 0
-
-        def conflicting_action():
-            nonlocal calls
-            calls += 1
-            raise CandidateConflictError("stale")
-
-        rerun_action(
-            conflicting_action,
-            form_revision_key="loaded_revision",
-        )
-
-        assert calls == 1
-        assert "loaded_revision" not in fake_st.session_state
-        assert fake_st.rerun_count == 0
-        assert len(fake_st.errors) == 1
-        assert "다른 변경이 먼저 저장되었습니다" in fake_st.errors[0]

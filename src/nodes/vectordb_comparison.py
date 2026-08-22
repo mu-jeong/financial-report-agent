@@ -408,7 +408,7 @@ def _stable_identity(meta: dict[str, object], fallback_index: int) -> str:
     ) + f"|{fallback_index}"
 
 
-def _dedupe_identity(doc: object, fallback_index: int) -> str:
+def _dedupe_identity(doc: object) -> str:
     meta = dict(getattr(doc, "metadata", {}) or {})
     for key in ("parent_uid", "physical_id", "chunk_uid", "report_uid"):
         if meta.get(key) is not None:
@@ -515,7 +515,7 @@ def retrieve_company(branch: CompanyBranchInput | dict) -> dict[str, BranchResul
             deduped_docs: list[tuple[object, object]] = []
             seen_candidates: set[str] = set()
             for index, item in enumerate(docs_with_scores):
-                identity = _dedupe_identity(item[0], index)
+                identity = _dedupe_identity(item[0])
                 if identity in seen_candidates:
                     continue
                 seen_candidates.add(identity)

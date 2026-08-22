@@ -356,7 +356,7 @@ def _cached_status(
             save_dir=save_dir,
             data_root=data_root,
         )
-    return deepcopy(result)
+    return result
 
 
 def _refresh_volatile_fields(

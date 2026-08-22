@@ -153,22 +153,6 @@ def test_conversation_store_delete_thread_clears_messages(tmp_path, monkeypatch)
     assert conversation_store.list_messages(thread_id) == []
 
 
-def test_conversation_store_delete_all_threads(tmp_path, monkeypatch):
-    db_path = tmp_path / "conversations.db"
-    monkeypatch.setattr(conversation_store, "CONVERSATION_DB_PATH", str(db_path))
-
-    first_id = conversation_store.create_thread("첫 대화")
-    second_id = conversation_store.create_thread("둘째 대화")
-    conversation_store.append_message(first_id, "user", "첫 질문")
-    conversation_store.append_message(second_id, "user", "둘째 질문")
-
-    conversation_store.delete_all_threads()
-
-    assert conversation_store.list_threads() == []
-    assert conversation_store.list_messages(first_id) == []
-    assert conversation_store.list_messages(second_id) == []
-
-
 def test_conversation_store_repairs_legacy_question_mark_thread_name(tmp_path, monkeypatch):
     db_path = tmp_path / "conversations.db"
     monkeypatch.setattr(conversation_store, "CONVERSATION_DB_PATH", str(db_path))

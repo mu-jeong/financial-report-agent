@@ -335,13 +335,13 @@ def build_graph():
     for node_name in (
         "vectordb_node",
         "company_comparison",
-        "too_many_targets",
     ):
         workflow.add_conditional_edges(
             node_name,
             after_vectordb,
             vector_result_routes,
         )
+    workflow.add_edge("too_many_targets", "final_response_node")
 
     workflow.add_edge("clear_short_term_memory_retry", "vector_dispatcher")
     workflow.add_edge("stock_price_tools", "final_response_node")

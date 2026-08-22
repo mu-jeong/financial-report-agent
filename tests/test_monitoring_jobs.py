@@ -266,9 +266,9 @@ def test_long_evaluation_buttons_only_enqueue_background_jobs():
 
     assert "from apps.gui import monitoring_jobs" in source
     assert "monitoring.run_evaluation_dataset(" not in source
-    assert source.count("monitoring_jobs.start_evaluation_job(") == 3
-    assert source.count("monitoring_jobs.session_job_key(") == 2
-    assert source.count("monitoring_jobs.render_job_status(") == 2
+    assert source.count("monitoring_jobs.start_evaluation_job(") == 2
+    assert source.count("monitoring_jobs.session_job_key(") == 1
+    assert source.count("monitoring_jobs.render_job_status(") == 1
     job_source = Path("apps/gui/monitoring_jobs.py").read_text(encoding="utf-8-sig")
     assert "@st.fragment(run_every=1)" in job_source
 

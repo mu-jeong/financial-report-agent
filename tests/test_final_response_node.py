@@ -140,6 +140,18 @@ def test_build_graph_uses_memory_checkpointer_for_thread_state():
     assert "company_comparison_sequential" not in app.get_graph().nodes
 
 
+def test_too_many_targets_only_exposes_its_reachable_graph_route():
+    graph = main_graph.build_graph().get_graph(xray=True)
+
+    targets = {
+        edge.target
+        for edge in graph.edges
+        if edge.source == "too_many_targets"
+    }
+
+    assert targets == {"final_response_node"}
+
+
 def test_final_response_node_commits_active_scope_for_next_turn():
     result = main_graph.final_response_node(
         {
