@@ -302,6 +302,8 @@ def _run_chat_response_job(
             "no_vector_results": bool(final_state.get("no_vector_results")),
             "selected_sources": selected_sources,
         }
+        if final_state.get("citation_contract") is not None:
+            metadata["citation_contract"] = final_state["citation_contract"]
         if isinstance(runtime_provenance, dict):
             metadata["retrieval_runtime"] = runtime_provenance
         metadata.update(

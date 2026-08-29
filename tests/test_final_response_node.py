@@ -4,6 +4,23 @@ from langgraph.types import Overwrite
 import src.graphs.main_graph as main_graph
 
 
+def _document_contract_sources():
+    return [
+        {"rank": 1, "passage_rank": 1, "document_rank": 1, "file_name": "first.pdf"},
+        {"rank": 2, "passage_rank": 2, "document_rank": 1, "file_name": "first.pdf"},
+        {"rank": 3, "passage_rank": 3, "document_rank": 2, "file_name": "second.pdf"},
+    ]
+
+
+def _document_contract():
+    return {
+        "version": 2,
+        "rank_kind": "document",
+        "passage_count": 3,
+        "document_count": 2,
+    }
+
+
 class FakeChatModel:
     def __init__(self, *args, **kwargs):
         pass
@@ -108,6 +125,93 @@ def test_final_response_node_uses_existing_generation_without_messages():
     }
 
 
+def test_final_response_uses_validated_document_count_for_v2_cleanup():
+    contract = _document_contract()
+    result = main_graph.final_response_node(
+        {
+            "question": "summarize",
+            "generation": "first [1], second [2], unavailable [3]",
+            "rerank_info": _document_contract_sources(),
+            "citation_contract": contract,
+        }
+    )
+
+    assert result["generation"] == "first [1], second [2], unavailable "
+    assert result["citation_contract"] == contract
+
+
+def test_final_response_removes_future_out_of_range_document_heading():
+    result = main_graph.final_response_node(
+        {
+            "question": "summarize",
+            "generation": "### 문서 7: 보수적 관점 [2]",
+            "rerank_info": _document_contract_sources(),
+            "citation_contract": _document_contract(),
+        }
+    )
+
+    assert result["generation"] == "### 보수적 관점 [2]"
+
+
+def test_final_response_keeps_legacy_document_heading_unchanged():
+    result = main_graph.final_response_node(
+        {
+            "question": "summarize",
+            "generation": "문서 7: historical label [7]",
+            "rerank_info": [
+                {"rank": rank, "file_name": file_name}
+                for rank, file_name in enumerate(
+                    ["1.pdf", "2.pdf", "3.pdf", "4.pdf", "same.pdf", "6.pdf", "same.pdf"],
+                    1,
+                )
+            ],
+        }
+    )
+
+    assert result["generation"] == "문서 7: historical label [7]"
+
+
+def test_final_response_does_not_rewrite_invalid_marked_contract():
+    invalid_contract = {
+        "version": 2,
+        "rank_kind": "document",
+        "passage_count": 99,
+        "document_count": 2,
+    }
+    result = main_graph.final_response_node(
+        {
+            "question": "summarize",
+            "generation": "keep diagnostic citation [3]",
+            "rerank_info": _document_contract_sources(),
+            "citation_contract": invalid_contract,
+        }
+    )
+
+    assert result["generation"] == "keep diagnostic citation [3]"
+    assert result["citation_contract"] == invalid_contract
+
+
+def test_tool_followup_preserves_valid_document_contract(monkeypatch):
+    monkeypatch.setattr(
+        "src.llms.factory.build_chat_model",
+        lambda temperature=0.2, **kwargs: FakeChatModel(),
+    )
+    contract = _document_contract()
+    result = main_graph.final_response_node(
+        {
+            "question": "include price",
+            "messages": [
+                HumanMessage(content="report evidence"),
+                ToolMessage(content="price", tool_call_id="call-1"),
+            ],
+            "rerank_info": _document_contract_sources(),
+            "citation_contract": contract,
+        }
+    )
+
+    assert result["citation_contract"] == contract
+
+
 def test_vectordb_no_result_retries_once_without_memory():
     assert main_graph.should_retry_vectordb_without_memory(
         {"no_vector_results": True, "memory_retry_attempted": False}
@@ -209,6 +313,7 @@ def test_clear_short_term_memory_retry_keeps_metadata_filters():
             "generation": "지정된 조건에 맞는 임베딩 완료 리포트를 찾지 못했습니다.",
             "messages": [HumanMessage(content="stale")],
             "vector_attempt_id": 0,
+            "citation_contract": _document_contract(),
         }
     )
 
@@ -220,6 +325,7 @@ def test_clear_short_term_memory_retry_keeps_metadata_filters():
     assert result["memory_retry_attempted"] is True
     assert result["vector_attempt_id"] == 1
     assert result["messages"] == Overwrite([])
+    assert result["citation_contract"] is None
 
 
 def test_turn_prepare_resets_only_volatile_turn_state(monkeypatch):
@@ -236,6 +342,7 @@ def test_turn_prepare_resets_only_volatile_turn_state(monkeypatch):
             "rdb_sources": [{"file_name": "old.pdf"}],
             "rdb_query_shape": {"type": "count_by_target"},
             "rdb_missing_targets": ["old"],
+            "citation_contract": _document_contract(),
         }
     )
 
@@ -246,6 +353,7 @@ def test_turn_prepare_resets_only_volatile_turn_state(monkeypatch):
     assert result["rdb_sources"] is None
     assert result["rdb_query_shape"] is None
     assert result["rdb_missing_targets"] is None
+    assert result["citation_contract"] is None
     assert result["vector_run_id"] == "run-2"
     assert result["vector_attempt_id"] == 0
     assert "active_scope" not in result
@@ -282,6 +390,7 @@ def test_vector_dispatcher_always_selects_send_and_scope_reduction():
     result = main_graph.too_many_targets_node(too_many)
     assert result["vector_outcome"] == "too_many_targets"
     assert result["vector_retryable"] is False
+    assert result["citation_contract"] is None
     assert "최대 5개" in result["generation"]
 
 

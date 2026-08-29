@@ -694,6 +694,20 @@ def test_vectordb_node_records_prompt_chunk_and_document_identifiers(monkeypatch
         "broker": "Broker",
         "report_type": "company",
     }
+    metadata_same_report = {
+        **metadata,
+        "chunk_uid": "chunk-2",
+        "parent_uid": "parent-2",
+        "child_index": 4,
+    }
+    metadata_second_report = {
+        **metadata,
+        "report_uid": "report-2",
+        "chunk_uid": "chunk-3",
+        "parent_uid": "parent-3",
+        "file_name": "company-2.pdf",
+        "title": "Second outlook",
+    }
     document = Document(page_content="prompt context", metadata=metadata)
     monkeypatch.setattr(
         vectordb,
@@ -721,7 +735,17 @@ def test_vectordb_node_records_prompt_chunk_and_document_identifiers(monkeypatch
                     "text": "prompt context",
                     "score": 0.25,
                     "meta": metadata,
-                }
+                },
+                {
+                    "text": "same report second context",
+                    "score": 0.3,
+                    "meta": metadata_same_report,
+                },
+                {
+                    "text": "second report context",
+                    "score": 0.35,
+                    "meta": metadata_second_report,
+                },
             ],
             {
                 "document_coverage_applied": False,
@@ -730,11 +754,14 @@ def test_vectordb_node_records_prompt_chunk_and_document_identifiers(monkeypatch
         ),
     )
 
+    captured_messages = []
+
     class FakeChatModel:
         def bind_tools(self, _tools):
             return self
 
         def invoke(self, _messages):
+            captured_messages.extend(_messages)
             return AIMessage(content="answer [1]")
 
     monkeypatch.setattr(vectordb, "build_chat_model", lambda **_kwargs: FakeChatModel())
@@ -757,6 +784,18 @@ def test_vectordb_node_records_prompt_chunk_and_document_identifiers(monkeypatch
     assert source["physical_id"] == 9
     assert source["snapshot_id"] == "snapshot-1"
     assert source["publication_generation"] == 4
+    assert [item["passage_rank"] for item in result["rerank_info"]] == [1, 2, 3]
+    assert [item["document_rank"] for item in result["rerank_info"]] == [1, 1, 2]
+    assert result["citation_contract"] == {
+        "version": 2,
+        "rank_kind": "document",
+        "passage_count": 3,
+        "document_count": 2,
+    }
+    prompt_content = captured_messages[0].content
+    assert prompt_content.count("--- 문서 1 ---") == 2
+    assert prompt_content.count("--- 문서 2 ---") == 1
+    assert "--- 문서 3 ---" not in prompt_content
     assert "text" not in source
     assert "page_content" not in source
     assert result["monitoring_metrics"]["generation"]["call_count"] == 1

@@ -59,6 +59,7 @@ def turn_prepare_node(_state: State) -> dict:
         "messages": Overwrite([]),
         "generation": None,
         "rerank_info": None,
+        "citation_contract": None,
         "monitoring_metrics": None,
         "no_vector_results": False,
         "memory_retry_attempted": False,
@@ -104,6 +105,7 @@ def clear_short_term_memory_retry_node(state: State) -> dict:
         "rewritten_query": state["question"],
         "generation": None,
         "rerank_info": None,
+        "citation_contract": None,
         "messages": Overwrite([]),
         "monitoring_metrics": None,
         "no_vector_results": False,
@@ -151,6 +153,7 @@ def too_many_targets_node(state: State) -> dict:
         ),
         "messages": [],
         "rerank_info": [],
+        "citation_contract": None,
         "no_vector_results": False,
         "vector_outcome": "too_many_targets",
         "vector_retryable": False,
@@ -171,7 +174,13 @@ def final_response_node(state: State) -> dict:
         invoke_chat_with_observability,
         merge_generation_metrics,
     )
-    from src.utils.citations import remove_unavailable_citations
+    from src.utils.citations import (
+        CITATION_CONTRACT_LEGACY,
+        CITATION_CONTRACT_VALID,
+        remove_unavailable_citations,
+        remove_unavailable_document_references,
+        validate_citation_contract,
+    )
 
     def append_missing_target_notice(value: object) -> str:
         text = str(value)
@@ -182,16 +191,36 @@ def final_response_node(state: State) -> dict:
             )
         return text
 
+    def clean_citations(value: object) -> str:
+        text = append_missing_target_notice(value)
+        sources = state.get("rerank_info") or []
+        validation = validate_citation_contract(
+            sources,
+            state.get("citation_contract"),
+        )
+        if validation["status"] == CITATION_CONTRACT_VALID:
+            source_count = int(validation["document_count"])
+            return remove_unavailable_document_references(
+                text,
+                source_count=source_count,
+            )
+        elif validation["status"] == CITATION_CONTRACT_LEGACY:
+            source_count = len(sources)
+        else:
+            # A marked contract is authoritative. If it is malformed, keep the
+            # answer intact rather than reinterpreting document citations as
+            # legacy passage citations.
+            return text
+        return remove_unavailable_citations(text, source_count=source_count)
+
     answer = state.get("generation")
     if answer:
-        source_count = len(state.get("rerank_info") or [])
-        answer = remove_unavailable_citations(
-            append_missing_target_notice(answer),
-            source_count=source_count,
-        )
+        answer = clean_citations(answer)
         result = {
             "generation": answer,
         }
+        if state.get("citation_contract") is not None:
+            result["citation_contract"] = state["citation_contract"]
         if active_scope := build_active_scope_from_state(state):
             result["active_scope"] = active_scope
         return result
@@ -216,17 +245,15 @@ def final_response_node(state: State) -> dict:
                 part.get("text", "") if isinstance(part, dict) else str(part)
                 for part in answer
             )
-        source_count = len(state.get("rerank_info") or [])
-        answer = remove_unavailable_citations(
-            append_missing_target_notice(answer),
-            source_count=source_count,
-        )
+        answer = clean_citations(answer)
         if not isinstance(messages[-1], AIMessage):
             message_delta = [response]
 
     result = {
         "generation": answer,
     }
+    if state.get("citation_contract") is not None:
+        result["citation_contract"] = state["citation_contract"]
     if message_delta:
         result["messages"] = message_delta
     if monitoring_metrics is not None:

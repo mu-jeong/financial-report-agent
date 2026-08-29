@@ -34,7 +34,10 @@ from src.retrieval.repository import (
     RepositoryError,
     RetrievedChunk,
 )
-from src.utils.citations import remove_unavailable_citations
+from src.utils.citations import (
+    annotate_document_citation_sources,
+    remove_unavailable_document_references,
+)
 from src.utils.ranker import get_ranker
 
 logger = get_logger(__name__)
@@ -946,17 +949,9 @@ def vectordb_node(state: State) -> dict:
         }
     )
 
-    context_parts = []
     rerank_info = []
     for rank, result in enumerate(top_passages, 1):
         meta = result["meta"]
-        source_info = (
-            f"[{rank}] {meta.get('target_name', '알수없음')} "
-            f"({meta.get('report_date', '날짜없음')}) - {meta.get('title', '제목없음')}"
-        )
-        context_parts.append(
-            f"\n--- 문서 {rank} ---\n[출처: {source_info}]\n{result['text']}\n"
-        )
         rerank_info.append(
             {
                 "rank": rank,
@@ -981,6 +976,22 @@ def vectordb_node(state: State) -> dict:
                 "recency_score": result.get("recency_score"),
                 "final_score": result.get("final_score"),
             }
+        )
+
+    rerank_info, citation_contract = annotate_document_citation_sources(rerank_info)
+    context_parts = []
+    for result, source in zip(top_passages, rerank_info):
+        document_rank = source["document_rank"]
+        passage_rank = source["passage_rank"]
+        source_info = (
+            f"[{document_rank}] {source.get('target_name', '알수없음')} "
+            f"({source.get('report_date', '날짜없음')}) - "
+            f"{source.get('title', '제목없음')}"
+        )
+        context_parts.append(
+            f"\n--- 문서 {document_rank} ---\n"
+            f"[비인용 근거 조각 P{passage_rank} | 출처: {source_info}]\n"
+            f"{result['text']}\n"
         )
 
     context_text = "".join(context_parts)
@@ -1011,6 +1022,7 @@ def vectordb_node(state: State) -> dict:
     if ai_msg.tool_calls:
         return {
             "rerank_info": rerank_info,
+            "citation_contract": citation_contract,
             "search_filters": search_filters,
             "no_vector_results": False,
             "messages": [tool_context_message, ai_msg],
@@ -1026,10 +1038,14 @@ def vectordb_node(state: State) -> dict:
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in answer
         )
-    answer = remove_unavailable_citations(str(answer), source_count=len(rerank_info))
+    answer = remove_unavailable_document_references(
+        str(answer),
+        source_count=citation_contract["document_count"],
+    )
 
     return {
         "rerank_info": rerank_info,
+        "citation_contract": citation_contract,
         "generation": answer,
         "search_filters": search_filters,
         "no_vector_results": False,

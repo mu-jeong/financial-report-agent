@@ -666,6 +666,72 @@ def test_message_trace_tracks_cited_chunk_when_one_document_supplies_multiple_ch
     assert detail["used_documents"][0]["cited_chunk_count"] == 1
 
 
+def test_message_trace_uses_document_rank_for_new_vector_answers():
+    sources = [
+        {
+            "rank": 1,
+            "passage_rank": 1,
+            "document_rank": 1,
+            "report_uid": "report-a",
+            "file_name": "a.pdf",
+        },
+        {
+            "rank": 2,
+            "passage_rank": 2,
+            "document_rank": 1,
+            "report_uid": "report-a",
+            "file_name": "a.pdf",
+        },
+        {
+            "rank": 3,
+            "passage_rank": 3,
+            "document_rank": 2,
+            "report_uid": "report-b",
+            "file_name": "b.pdf",
+        },
+    ]
+    message = {
+        "role": "assistant",
+        "content": "first document [1]",
+        "metadata": {
+            "status": "succeeded",
+            "route": "vectordb",
+            "selected_sources": sources,
+            "citation_contract": {
+                "version": 2,
+                "rank_kind": "document",
+                "passage_count": 3,
+                "document_count": 2,
+            },
+        },
+    }
+
+    detail = build_message_trace_detail(message)
+
+    assert detail["answer"]["citation_valid"] is True
+    assert [row["cited"] for row in detail["used_chunks"]] == [None, None, None]
+    assert [row["document_cited"] for row in detail["used_chunks"]] == [True, True, False]
+    assert [row["cited_chunk_count"] for row in detail["used_documents"]] == [0, 0]
+    assert [row["document_cited"] for row in detail["used_documents"]] == [True, False]
+
+
+def test_message_trace_rejects_invalid_marked_contract_without_sources():
+    detail = build_message_trace_detail(
+        {
+            "role": "assistant",
+            "content": "uncited answer",
+            "metadata": {
+                "status": "succeeded",
+                "route": "vectordb",
+                "selected_sources": [],
+                "citation_contract": {"version": 999},
+            },
+        }
+    )
+
+    assert detail["answer"]["citation_valid"] is False
+
+
 def test_message_trace_summary_flattens_common_debug_fields():
     detail = {
         "query_rewrite": {

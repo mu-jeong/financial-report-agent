@@ -392,16 +392,33 @@ def _render_sources(
     *,
     key_prefix: str,
     anchor_prefix: str,
+    citation_contract: dict | None = None,
     used_ranks: set[int] | None = None,
     expanded: bool = False,
 ) -> None:
     if not rerank_info:
         return
-    grouped_sources = citations.group_sources_by_document(rerank_info)
-    indexed_sources = [
-        {**source_group, "display_rank": display_rank}
-        for display_rank, source_group in enumerate(grouped_sources, 1)
-    ]
+    contract_validation = citations.validate_citation_contract(
+        rerank_info,
+        citation_contract,
+    )
+    if contract_validation["status"] == citations.CITATION_CONTRACT_VALID:
+        grouped_sources = citations.group_sources_by_persisted_document_rank(
+            rerank_info,
+            citation_contract,
+        )
+        indexed_sources = [
+            {**source_group, "display_rank": source_group["document_rank"]}
+            for source_group in grouped_sources
+        ]
+    elif contract_validation["status"] == citations.CITATION_CONTRACT_LEGACY:
+        grouped_sources = citations.group_sources_by_document(rerank_info)
+        indexed_sources = [
+            {**source_group, "display_rank": display_rank}
+            for display_rank, source_group in enumerate(grouped_sources, 1)
+        ]
+    else:
+        return
     if used_ranks is not None:
         indexed_sources = [
             source_group
@@ -489,35 +506,60 @@ def _render_message(message: dict, *, index: int) -> None:
             selected_sources = (
                 metadata.get("selected_sources") or metadata.get("rerank_info") or []
             )
-            source_count = len(citations.group_sources_by_document(selected_sources))
-            display_content = citations.remove_unavailable_citations(
-                message["content"],
-                source_count=len(selected_sources),
+            citation_contract = metadata.get("citation_contract")
+            contract_validation = citations.validate_citation_contract(
+                selected_sources,
+                citation_contract,
             )
-            display_content = citations.normalize_citation_ranks(
-                display_content,
-                citations.document_rank_aliases(selected_sources),
-            )
-            display_content = citations.remove_unavailable_citations(
-                display_content,
-                source_count=source_count,
-            )
-            used_ranks = citations.extract_citation_ranks(
-                display_content,
-                source_count=source_count,
-            )
-            source_filter_ranks = used_ranks or None
+            contract_status = contract_validation["status"]
+            if contract_status == citations.CITATION_CONTRACT_VALID:
+                source_count = contract_validation["document_count"]
+                display_content = citations.remove_unavailable_document_references(
+                    message["content"],
+                    source_count=source_count,
+                )
+            elif contract_status == citations.CITATION_CONTRACT_LEGACY:
+                source_count = len(citations.group_sources_by_document(selected_sources))
+                display_content = citations.remove_unavailable_citations(
+                    message["content"],
+                    source_count=len(selected_sources),
+                )
+                display_content = citations.normalize_citation_ranks(
+                    display_content,
+                    citations.document_rank_aliases(selected_sources),
+                )
+                display_content = citations.remove_unavailable_citations(
+                    display_content,
+                    source_count=source_count,
+                )
+            else:
+                source_count = 0
+                display_content = message["content"]
+
+            if source_count:
+                used_ranks = citations.extract_citation_ranks(
+                    display_content,
+                    source_count=source_count,
+                )
+                source_filter_ranks = used_ranks or None
+            else:
+                source_filter_ranks = None
             anchor_prefix = f"message_{index}"
-            linked_content = citations.link_citations_to_sources(
-                display_content,
-                anchor_prefix=anchor_prefix,
-                source_count=source_count,
+            linked_content = (
+                citations.link_citations_to_sources(
+                    display_content,
+                    anchor_prefix=anchor_prefix,
+                    source_count=source_count,
+                )
+                if source_count
+                else display_content
             )
             st.markdown(escape_numeric_tildes_for_markdown(linked_content))
             _render_sources(
                 selected_sources,
                 key_prefix=f"message_{index}",
                 anchor_prefix=anchor_prefix,
+                citation_contract=citation_contract,
                 used_ranks=source_filter_ranks,
                 expanded=False,
             )

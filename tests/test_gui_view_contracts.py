@@ -644,6 +644,144 @@ def test_reference_document_buttons_rerun_only_the_sources_fragment():
     ]
 
 
+def test_valid_v2_message_does_not_apply_legacy_alias_collision(monkeypatch):
+    from contextlib import nullcontext
+
+    from apps.gui import chat_views
+
+    rendered: list[str] = []
+    rendered_sources: list[dict] = []
+    monkeypatch.setattr(chat_views.st, "markdown", lambda value, **_kwargs: rendered.append(value))
+    monkeypatch.setattr(chat_views.st, "chat_message", lambda _role: nullcontext())
+    monkeypatch.setattr(chat_views, "escape_numeric_tildes_for_markdown", lambda value: value)
+    monkeypatch.setattr(
+        chat_views,
+        "_render_sources",
+        lambda _sources, **kwargs: rendered_sources.append(kwargs),
+    )
+    monkeypatch.setattr(chat_views, "_render_no_result_actions", lambda *_args, **_kwargs: None)
+
+    sources = [
+        {"rank": 1, "passage_rank": 1, "document_rank": 1, "file_name": "same.pdf"},
+        {"rank": 2, "passage_rank": 2, "document_rank": 1, "file_name": "same.pdf"},
+        {"rank": 3, "passage_rank": 3, "document_rank": 2, "file_name": "other.pdf"},
+    ]
+    contract = {
+        "version": 2,
+        "rank_kind": "document",
+        "passage_count": 3,
+        "document_count": 2,
+    }
+
+    chat_views._render_message(
+        {
+            "role": "assistant",
+            "content": "문서 3: second document [2]",
+            "metadata": {
+                "status": "succeeded",
+                "selected_sources": sources,
+                "citation_contract": contract,
+            },
+        },
+        index=4,
+    )
+
+    assert "문서 3:" not in rendered[-1]
+    assert "second document" in rendered[-1]
+    assert "message_4-source-2" in rendered[-1]
+    assert "message_4-source-1" not in rendered[-1]
+    assert rendered_sources == [
+        {
+            "key_prefix": "message_4",
+            "anchor_prefix": "message_4",
+            "citation_contract": contract,
+            "used_ranks": {2},
+            "expanded": False,
+        }
+    ]
+
+
+def test_historical_message_without_contract_preserves_legacy_heading_behavior(monkeypatch):
+    from contextlib import nullcontext
+
+    from apps.gui import chat_views
+
+    rendered: list[str] = []
+    monkeypatch.setattr(chat_views.st, "markdown", lambda value, **_kwargs: rendered.append(value))
+    monkeypatch.setattr(chat_views.st, "chat_message", lambda _role: nullcontext())
+    monkeypatch.setattr(chat_views, "escape_numeric_tildes_for_markdown", lambda value: value)
+    monkeypatch.setattr(chat_views, "_render_sources", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chat_views, "_render_no_result_actions", lambda *_args, **_kwargs: None)
+    sources = [
+        {"rank": rank, "file_name": file_name}
+        for rank, file_name in enumerate(
+            ["1.pdf", "2.pdf", "3.pdf", "4.pdf", "same.pdf", "6.pdf", "same.pdf"],
+            1,
+        )
+    ]
+
+    chat_views._render_message(
+        {
+            "role": "assistant",
+            "content": "문서 7: historical label [7]",
+            "metadata": {"status": "succeeded", "selected_sources": sources},
+        },
+        index=1,
+    )
+
+    assert "문서 7: historical label" in rendered[-1]
+    assert "message_1-source-5" in rendered[-1]
+    assert "source-7" not in rendered[-1]
+
+
+def test_invalid_marked_contract_preserves_body_without_linking(monkeypatch):
+    from contextlib import nullcontext
+
+    from apps.gui import chat_views
+
+    rendered: list[str] = []
+    monkeypatch.setattr(chat_views.st, "markdown", lambda value, **_kwargs: rendered.append(value))
+    monkeypatch.setattr(chat_views.st, "chat_message", lambda _role: nullcontext())
+    monkeypatch.setattr(chat_views, "escape_numeric_tildes_for_markdown", lambda value: value)
+    monkeypatch.setattr(chat_views, "_render_sources", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chat_views, "_render_no_result_actions", lambda *_args, **_kwargs: None)
+
+    chat_views._render_message(
+        {
+            "role": "assistant",
+            "content": "keep [9] exactly",
+            "metadata": {
+                "status": "succeeded",
+                "selected_sources": [{"rank": 1, "file_name": "one.pdf"}],
+                "citation_contract": {"version": 999},
+            },
+        },
+        index=2,
+    )
+
+    assert rendered[-1] == "keep [9] exactly"
+
+
+def test_invalid_marked_contract_does_not_render_legacy_source_numbers(monkeypatch):
+    from apps.gui import chat_views
+
+    def fail_if_legacy_grouping_runs(_sources):
+        raise AssertionError("invalid v2 contract fell back to legacy grouping")
+
+    monkeypatch.setattr(
+        chat_views.citations,
+        "group_sources_by_document",
+        fail_if_legacy_grouping_runs,
+    )
+
+    chat_views._render_sources(
+        [{"rank": 1, "file_name": "one.pdf"}],
+        key_prefix="invalid",
+        anchor_prefix="invalid",
+        citation_contract={"version": 999},
+    )
+
+
 def test_each_session_reruns_when_the_process_queue_becomes_available():
     class FakeStreamlit:
         def __init__(self):
@@ -1380,6 +1518,12 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
             return {
                 "generation": "완료된 답변",
                 "route": "vectordb",
+                "citation_contract": {
+                    "version": 2,
+                    "rank_kind": "document",
+                    "passage_count": 1,
+                    "document_count": 1,
+                },
                 "rerank_info": [
                     {
                         "file_name": "report.pdf",
@@ -1477,6 +1621,12 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
     assert persisted["latency_seconds"] == 1.25
     assert persisted["selected_sources"][0]["chunk_uid"] == "chunk-1"
     assert persisted["selected_sources"][0]["report_uid"] == "report-1"
+    assert persisted["citation_contract"] == {
+        "version": 2,
+        "rank_kind": "document",
+        "passage_count": 1,
+        "document_count": 1,
+    }
     assert persisted["monitoring"]["timing"]["total_seconds"] == 1.25
     assert persisted["monitoring"]["retrieval"]["search_top_k"] == 20
     assert persisted["monitoring"]["retrieval"]["requested_k"] == 160

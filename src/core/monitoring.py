@@ -13,7 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from src.utils.citations import extract_citation_ranks, group_sources_by_document
+from src.utils.citations import (
+    CITATION_CONTRACT_VALID,
+    extract_citation_ranks,
+    group_sources_by_document,
+    validate_citation_contract,
+)
 
 from src.configs.settings import BASE_DIR
 from src.core import artifact_io
@@ -389,7 +394,12 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
         source_names = _ordered_file_names(selected_sources)
         vector_sources = selected_sources if route == "vectordb" else []
         rdb_sources = selected_sources if route == "rdb" else []
-        used_chunks = _build_used_chunk_rows(vector_sources, [])
+        citation_contract = metadata.get("citation_contract")
+        used_chunks = _build_used_chunk_rows(
+            vector_sources,
+            [],
+            citation_contract=citation_contract,
+        )
         used_documents = _build_used_document_rows(used_chunks)
         rdb_evidence = _build_rdb_evidence_rows(rdb_sources)
         source_count = len(used_documents) + len(rdb_evidence)
@@ -400,7 +410,11 @@ def build_message_monitoring_rows(messages: list[dict[str, Any]]) -> list[dict[s
             else []
         )
         citation_valid = (
-            _citation_valid(answer, vector_sources)
+            _citation_valid(
+                answer,
+                vector_sources,
+                citation_contract=citation_contract,
+            )
             if route == "vectordb"
             else None
         )
@@ -916,39 +930,59 @@ def _build_retrieval_k_trace(metadata: dict[str, Any]) -> dict[str, Any]:
 def _build_used_chunk_rows(
     selected_sources: list[dict[str, Any]],
     citation_ranks: list[int],
+    *,
+    citation_contract: Any = None,
 ) -> list[dict[str, Any]]:
     cited = set(citation_ranks)
+    contract_status = validate_citation_contract(
+        selected_sources,
+        citation_contract,
+    )["status"]
     rows: list[dict[str, Any]] = []
     for fallback_rank, raw_source in enumerate(selected_sources, 1):
         source = raw_source if isinstance(raw_source, dict) else {}
         rank = _first_measured_int(source.get("rank"), fallback_rank)
+        if contract_status == CITATION_CONTRACT_VALID:
+            source_cited = None
+            document_rank = source.get("document_rank")
+            document_cited = document_rank in cited
+        elif citation_contract is None:
+            source_cited = rank in cited
+            document_rank = None
+            document_cited = None
+        else:
+            source_cited = None
+            document_rank = None
+            document_cited = None
         chunk_uid = _stable_identity_value(source.get("chunk_uid"))
         report_uid = _stable_identity_value(source.get("report_uid"))
-        rows.append(
-            {
-                "rank": rank,
-                "identity_status": (
-                    "measured" if chunk_uid and report_uid else "not_measured"
-                ),
-                "chunk_uid": chunk_uid,
-                "parent_uid": source.get("parent_uid"),
-                "report_uid": report_uid,
-                "file_name": source.get("file_name"),
-                "target_name": source.get("target_name"),
-                "report_date": source.get("report_date"),
-                "title": source.get("title"),
-                "broker": source.get("broker"),
-                "report_type": source.get("report_type"),
-                "child_index": _nonnegative_int(source.get("child_index")),
-                "span_start": _nonnegative_int(source.get("span_start")),
-                "span_end": _nonnegative_int(source.get("span_end")),
-                "score": source.get("score"),
-                "rerank_score": source.get("rerank_score"),
-                "recency_score": source.get("recency_score"),
-                "final_score": source.get("final_score"),
-                "cited": rank in cited,
-            }
-        )
+        row = {
+            "rank": rank,
+            "identity_status": (
+                "measured" if chunk_uid and report_uid else "not_measured"
+            ),
+            "chunk_uid": chunk_uid,
+            "parent_uid": source.get("parent_uid"),
+            "report_uid": report_uid,
+            "file_name": source.get("file_name"),
+            "target_name": source.get("target_name"),
+            "report_date": source.get("report_date"),
+            "title": source.get("title"),
+            "broker": source.get("broker"),
+            "report_type": source.get("report_type"),
+            "child_index": _nonnegative_int(source.get("child_index")),
+            "span_start": _nonnegative_int(source.get("span_start")),
+            "span_end": _nonnegative_int(source.get("span_end")),
+            "score": source.get("score"),
+            "rerank_score": source.get("rerank_score"),
+            "recency_score": source.get("recency_score"),
+            "final_score": source.get("final_score"),
+            "cited": source_cited,
+        }
+        if contract_status == CITATION_CONTRACT_VALID:
+            row["document_rank"] = document_rank
+            row["document_cited"] = document_cited
+        rows.append(row)
     return rows
 
 
@@ -980,10 +1014,16 @@ def _build_used_document_rows(
                 "chunk_count": 0,
                 "cited_chunk_count": 0,
             }
+            if "document_cited" in chunk:
+                row["document_cited"] = bool(chunk.get("document_cited"))
             documents[grouping_key] = row
         row["chunk_count"] += 1
         if chunk.get("cited"):
             row["cited_chunk_count"] += 1
+        if "document_cited" in chunk:
+            row["document_cited"] = bool(
+                row.get("document_cited") or chunk.get("document_cited")
+            )
         rank = _nonnegative_int(chunk.get("rank"))
         best_rank = _nonnegative_int(row.get("best_rank"))
         if rank is not None and (best_rank is None or rank < best_rank):
@@ -1313,9 +1353,19 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
         else []
     )
     citation_valid = (
-        _citation_valid(answer, vector_sources) if route == "vectordb" else None
+        _citation_valid(
+            answer,
+            vector_sources,
+            citation_contract=metadata.get("citation_contract"),
+        )
+        if route == "vectordb"
+        else None
     )
-    used_chunks = _build_used_chunk_rows(vector_sources, citation_ranks)
+    used_chunks = _build_used_chunk_rows(
+        vector_sources,
+        citation_ranks,
+        citation_contract=metadata.get("citation_contract"),
+    )
     used_documents = _build_used_document_rows(used_chunks)
     rdb_evidence = _build_rdb_evidence_rows(rdb_sources)
     return {
@@ -1977,10 +2027,23 @@ def _filters_match(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
     return all(actual.get(key) == value for key, value in (expected or {}).items())
 
 
-def _citation_valid(answer: str, sources: list[dict[str, Any]]) -> bool:
+def _citation_valid(
+    answer: str,
+    sources: list[dict[str, Any]],
+    *,
+    citation_contract: Any = None,
+) -> bool:
+    validation = validate_citation_contract(sources, citation_contract)
+    if (
+        citation_contract is not None
+        and validation["status"] != CITATION_CONTRACT_VALID
+    ):
+        return False
     cited = extract_citation_ranks(answer or "", source_count=None)
     if not cited:
         return len(sources) == 0
+    if validation["status"] == CITATION_CONTRACT_VALID:
+        return cited.issubset(range(1, int(validation["document_count"]) + 1))
     available_ranks: set[int] = set()
     for fallback_rank, source in enumerate(sources, 1):
         try:
@@ -2005,7 +2068,11 @@ def evaluate_dataset_case_result(
     route_pass = final_state.get("route") == case.get("expected_route")
     filter_pass = _filters_match(case.get("expected_filters") or {}, final_state.get("search_filters") or {})
     source_hit, hit_at_k = _expected_source_hit(case.get("expected_sources") or [], sources)
-    citation_valid = _citation_valid(str(final_state.get("generation") or ""), sources)
+    citation_valid = _citation_valid(
+        str(final_state.get("generation") or ""),
+        sources,
+        citation_contract=final_state.get("citation_contract"),
+    )
     latency_pass = latency_seconds <= latency_threshold_seconds
     no_result = bool(final_state.get("no_vector_results"))
     no_result_absent = not no_result

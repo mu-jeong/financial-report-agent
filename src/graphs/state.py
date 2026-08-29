@@ -33,6 +33,7 @@ class State(TypedDict):
     rerank_info: Optional[list]     # 재정렬된 문서/검색된 문서 정보 로깅용 (VectorDB 경로)
     monitoring_metrics: Optional[dict]  # Monitoring Mode에서 쓰는 단계별 compact 지표
     generation: Optional[str]       # 최종 답변 (예외 발생 시 등)
+    citation_contract: Optional[dict]
     no_vector_results: Optional[bool]
     memory_retry_attempted: Optional[bool]
     vector_run_id: Optional[str]       # 한 turn 안에서 comparison retry를 묶는 식별자
