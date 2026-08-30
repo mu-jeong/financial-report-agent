@@ -100,6 +100,7 @@ def test_remote_report_is_exact_bounded_and_redacted():
         "report_target_type",
         "source",
         "app_version",
+        "reported_release_id",
         "category",
         "comment",
         "consent",
@@ -127,6 +128,9 @@ def test_remote_report_is_exact_bounded_and_redacted():
     assert remote["observed"]["turn_trace"] == []
     assert remote["diagnostics"]["stack_hash"] == "a" * 64
     assert remote["app_version"] == "1.2.3"
+    assert remote["reported_release_id"] == "release-v1.2.3"
+    assert remote["schema_version"] == 3
+    assert remote["report_contract_version"] == 3
     assert {
         "id",
         "created_at",
@@ -169,6 +173,7 @@ def test_remote_content_consent_is_explicit_and_fail_closed():
         assert remote["observed"]["selected_answer"] is None
         assert remote["observed"]["turn_trace"] == []
         assert remote["consent"]["include_comment"] is False
+        assert "case_diagnostics" not in remote
 
 
 def test_remote_report_uses_rdb_row_count_instead_of_source_count():

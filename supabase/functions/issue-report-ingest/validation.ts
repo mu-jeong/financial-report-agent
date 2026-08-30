@@ -1,9 +1,11 @@
 export const MAX_BODY_BYTES = 128 * 1024;
 const MAX_DEPTH = 7;
-const MAX_ARRAY_ITEMS = 16;
+const MAX_ARRAY_ITEMS = 20;
 const MAX_OBJECT_FIELDS = 24;
 const MAX_STRING_BYTES = 32 * 1024;
 const MAX_COMMENT_BYTES = 4 * 1024;
+const MAX_PRIOR_TURNS = 8;
+const MAX_RETRIEVAL_OBSERVATIONS = 20;
 const encoder = new TextEncoder();
 
 const UUID_RE =
@@ -16,7 +18,7 @@ const TOP_LEVEL_FIELDS = new Set([
   "queued_at",
   "report",
 ]);
-const REPORT_FIELDS = new Set([
+const REPORT_FIELDS_V2 = new Set([
   "schema_version",
   "report_contract_version",
   "kind",
@@ -30,16 +32,17 @@ const REPORT_FIELDS = new Set([
   "diagnostics",
   "privacy",
 ]);
+const REPORT_FIELDS_V3 = new Set([
+  ...REPORT_FIELDS_V2,
+  "reported_release_id",
+  "case_diagnostics",
+]);
 const LEGACY_LOCAL_REPORT_FIELDS = new Set([
   "id",
   "created_at",
   "thread_id",
   "message_id",
   "job_id",
-]);
-const ACCEPTED_REPORT_FIELDS = new Set([
-  ...REPORT_FIELDS,
-  ...LEGACY_LOCAL_REPORT_FIELDS,
 ]);
 const KINDS = new Set(["user_feedback", "system_error"]);
 const TARGET_TYPES = new Set(["response", "ui_or_system"]);
@@ -113,8 +116,36 @@ const DIAGNOSTIC_FIELDS = new Set([
   "debug_hints",
 ]);
 const PRIVACY_FIELDS = new Set(["redaction_version", "removed_fields"]);
+const CASE_DIAGNOSTIC_FIELDS = new Set([
+  "schema_version",
+  "truncated",
+  "prior_turns",
+  "route_observations",
+  "retrieval_observations",
+  "evidence_refs",
+]);
+const PRIOR_TURN_FIELDS = new Set(["role", "content"]);
+const ROUTE_OBSERVATION_FIELDS = new Set([
+  "rewritten_query",
+  "selected_route",
+  "filters",
+  "fallback_reason",
+]);
+const RETRIEVAL_OBSERVATION_FIELDS = new Set([
+  "role",
+  "source_uid",
+  "source_sha256",
+  "chunk_uid",
+  "chunk_sha256",
+  "rank",
+]);
+const EVIDENCE_ROLES = new Set(["OBSERVED_RESULT", "CONTEXT_USED", "CITED"]);
 const TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$/;
+const DIAGNOSTIC_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
+const UNSAFE_DIAGNOSTIC_FILE_RE = /(?:^|[\\/])[^\\/]+\.(?:db|sqlite|sqlite3|faiss|zip|tar|tgz|gz|7z|rar)$/i;
+const ABSOLUTE_POSIX_PATH_RE = /^(?:\/[A-Za-z0-9._-]+){1,}(?:\/[^\s]*)?$/;
+const BASE64_BINARY_RE = /^(?:[A-Za-z0-9+/]{4}){32,}={0,2}$/;
 const SENSITIVE_PATTERNS = [
   /(?:^|[^A-Za-z0-9_])(?:[A-Za-z][A-Za-z0-9_-]*[_-])?(?:api[_-]?keys?|access[_-]?keys?|access[_-]?tokens?|auth[_-]?tokens?|tokens?|credentials?|client[_-]?secrets?|private[_-]?keys?|signing[_-]?keys?|encryption[_-]?keys?|passwords?|passwd|secrets?|cookies?|sessions?|webhook[_-]?urls?|database[_-]?urls?|connection[_-]?strings?|dsn)\s*[:=]\s*[^\s&#]+/i,
   /\bsb_secret_[A-Za-z0-9._-]{16,}\b/i,
@@ -139,8 +170,8 @@ export type ValidEnvelope = {
   installation_id: string;
   queued_at: string;
   report: Record<string, unknown> & {
-    schema_version: 2;
-    report_contract_version: 2;
+    schema_version: 2 | 3;
+    report_contract_version: 2 | 3;
     category: string;
   };
 };
@@ -350,6 +381,168 @@ function validateTurnTrace(value: unknown): Array<Record<string, unknown>> {
   return value as Array<Record<string, unknown>>;
 }
 
+function diagnosticString(
+  value: unknown,
+  name: string,
+  maximum: number,
+  allowEmpty = false,
+): string {
+  const text = boundedString(value, name, maximum, allowEmpty);
+  const stripped = text.trim();
+  if (
+    UNSAFE_DIAGNOSTIC_FILE_RE.test(stripped) ||
+    ABSOLUTE_POSIX_PATH_RE.test(stripped) ||
+    BASE64_BINARY_RE.test(stripped) ||
+    stripped.toLowerCase().startsWith("data:")
+  ) {
+    fail(
+      "unsafe_diagnostic_content",
+      `${name} contains a forbidden database, .sqlite, .faiss, .zip, archive, absolute path, or base64 binary value`,
+    );
+  }
+  return text;
+}
+
+function diagnosticToken(value: unknown, name: string): string {
+  const token = diagnosticString(value, name, 128);
+  if (!DIAGNOSTIC_TOKEN_RE.test(token)) {
+    fail("invalid_diagnostic_token", `${name} must be a bounded opaque token`);
+  }
+  return token;
+}
+
+function validateCaseDiagnosticFilters(value: unknown, name: string): void {
+  if (!isRecord(value)) fail("invalid_diagnostic_filters", `${name} must be an object`);
+  if (Object.keys(value).length > 16) {
+    fail("invalid_diagnostic_filters", `${name} must contain at most 16 fields`);
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (!/^[a-z][a-z0-9_]{0,63}$/.test(key)) {
+      fail("unknown_field", `${name}.${key} is not an allowlisted filter key shape`);
+    }
+    if (item === null || typeof item === "boolean") continue;
+    if (typeof item === "number" && Number.isFinite(item)) continue;
+    if (typeof item === "string") {
+      diagnosticString(item, `${name}.${key}`, 256, true);
+      continue;
+    }
+    if (Array.isArray(item) && item.length <= 8) {
+      for (const [index, member] of item.entries()) {
+        if (member === null || typeof member === "boolean") continue;
+        if (typeof member === "number" && Number.isFinite(member)) continue;
+        if (typeof member === "string") {
+          diagnosticString(member, `${name}.${key}[${index}]`, 256, true);
+          continue;
+        }
+        fail("invalid_diagnostic_filters", `${name}.${key}[${index}] is invalid`);
+      }
+      continue;
+    }
+    fail("invalid_diagnostic_filters", `${name}.${key} is invalid`);
+  }
+}
+
+function validateCaseDiagnostics(value: unknown): void {
+  const name = "report.case_diagnostics";
+  if (!isRecord(value)) fail("invalid_case_diagnostics", `${name} must be an object`);
+  exactFields(value, CASE_DIAGNOSTIC_FIELDS, [...CASE_DIAGNOSTIC_FIELDS], name);
+  if (value.schema_version !== 1) {
+    fail("unsupported_case_diagnostics", `${name}.schema_version must be 1`);
+  }
+  if (typeof value.truncated !== "boolean") {
+    fail("invalid_case_diagnostics", `${name}.truncated must be boolean`);
+  }
+
+  if (!Array.isArray(value.prior_turns) || value.prior_turns.length > MAX_PRIOR_TURNS) {
+    fail("invalid_case_diagnostics", `${name}.prior_turns must contain at most ${MAX_PRIOR_TURNS} turns`);
+  }
+  for (const [index, rawTurn] of value.prior_turns.entries()) {
+    const turnName = `${name}.prior_turns[${index}]`;
+    if (!isRecord(rawTurn)) fail("invalid_case_diagnostics", `${turnName} must be an object`);
+    exactFields(rawTurn, PRIOR_TURN_FIELDS, [...PRIOR_TURN_FIELDS], turnName);
+    if (rawTurn.role !== "user") {
+      fail("invalid_case_diagnostics", `${turnName}.role is invalid`);
+    }
+    diagnosticString(rawTurn.content, `${turnName}.content`, 4096);
+  }
+
+  if (!Array.isArray(value.route_observations) || value.route_observations.length > MAX_PRIOR_TURNS) {
+    fail("invalid_case_diagnostics", `${name}.route_observations must contain at most ${MAX_PRIOR_TURNS} items`);
+  }
+  for (const [index, rawObservation] of value.route_observations.entries()) {
+    const observationName = `${name}.route_observations[${index}]`;
+    if (!isRecord(rawObservation)) {
+      fail("invalid_case_diagnostics", `${observationName} must be an object`);
+    }
+    exactFields(
+      rawObservation,
+      ROUTE_OBSERVATION_FIELDS,
+      [...ROUTE_OBSERVATION_FIELDS],
+      observationName,
+    );
+    if (rawObservation.rewritten_query !== null) {
+      diagnosticString(rawObservation.rewritten_query, `${observationName}.rewritten_query`, 2048, true);
+    }
+    if (rawObservation.selected_route !== null) {
+      diagnosticToken(rawObservation.selected_route, `${observationName}.selected_route`);
+    }
+    validateCaseDiagnosticFilters(rawObservation.filters, `${observationName}.filters`);
+    if (rawObservation.fallback_reason !== null) {
+      diagnosticString(rawObservation.fallback_reason, `${observationName}.fallback_reason`, 512, true);
+    }
+  }
+
+  if (
+    !Array.isArray(value.retrieval_observations) ||
+    value.retrieval_observations.length > MAX_RETRIEVAL_OBSERVATIONS
+  ) {
+    fail(
+      "invalid_case_diagnostics",
+      `${name}.retrieval_observations must contain at most ${MAX_RETRIEVAL_OBSERVATIONS} items`,
+    );
+  }
+  for (const [index, rawObservation] of value.retrieval_observations.entries()) {
+    const observationName = `${name}.retrieval_observations[${index}]`;
+    if (!isRecord(rawObservation)) {
+      fail("invalid_case_diagnostics", `${observationName} must be an object`);
+    }
+    exactFields(
+      rawObservation,
+      RETRIEVAL_OBSERVATION_FIELDS,
+      ["role", "source_uid", "source_sha256", "rank"],
+      observationName,
+    );
+    if (!EVIDENCE_ROLES.has(String(rawObservation.role))) {
+      fail("invalid_case_diagnostics", `${observationName}.role is invalid`);
+    }
+    diagnosticToken(rawObservation.source_uid, `${observationName}.source_uid`);
+    if (typeof rawObservation.source_sha256 !== "string" || !SHA256_RE.test(rawObservation.source_sha256)) {
+      fail("invalid_case_diagnostics", `${observationName}.source_sha256 is invalid`);
+    }
+    const hasChunkUid = "chunk_uid" in rawObservation;
+    const hasChunkHash = "chunk_sha256" in rawObservation;
+    if (hasChunkUid !== hasChunkHash) {
+      fail("invalid_case_diagnostics", `${observationName} must provide both chunk fields or neither`);
+    }
+    if (hasChunkUid) {
+      diagnosticToken(rawObservation.chunk_uid, `${observationName}.chunk_uid`);
+      if (typeof rawObservation.chunk_sha256 !== "string" || !SHA256_RE.test(rawObservation.chunk_sha256)) {
+        fail("invalid_case_diagnostics", `${observationName}.chunk_sha256 is invalid`);
+      }
+    }
+    if (!Number.isSafeInteger(rawObservation.rank) || Number(rawObservation.rank) < 1 || Number(rawObservation.rank) > 1_000_000) {
+      fail("invalid_case_diagnostics", `${observationName}.rank is invalid`);
+    }
+  }
+
+  if (!Array.isArray(value.evidence_refs) || value.evidence_refs.length > MAX_RETRIEVAL_OBSERVATIONS) {
+    fail("invalid_case_diagnostics", `${name}.evidence_refs must contain at most ${MAX_RETRIEVAL_OBSERVATIONS} strings`);
+  }
+  for (const [index, evidenceRef] of value.evidence_refs.entries()) {
+    diagnosticString(evidenceRef, `${name}.evidence_refs[${index}]`, 256);
+  }
+}
+
 export function validateEnvelope(
   value: unknown,
   nowMs = Date.now(),
@@ -380,12 +573,24 @@ export function validateEnvelope(
     fail("invalid_report", "report must be an object");
   }
   const report = value.report;
-  exactFields(report, ACCEPTED_REPORT_FIELDS, [...REPORT_FIELDS], "report");
-  if (report.schema_version !== 2 || report.report_contract_version !== 2) {
+  const supportedReportV2 = report.schema_version === 2 &&
+    report.report_contract_version === 2;
+  const supportedReportV3 = report.schema_version === 3 &&
+    report.report_contract_version === 3;
+  if (!supportedReportV2 && !supportedReportV3) {
     fail(
       "unsupported_report",
-      "schema_version and report_contract_version must be 2",
+      "schema_version and report_contract_version must be matching version 2 or 3",
     );
+  }
+  const reportFields = supportedReportV3 ? REPORT_FIELDS_V3 : REPORT_FIELDS_V2;
+  const acceptedFields = new Set([
+    ...reportFields,
+    ...LEGACY_LOCAL_REPORT_FIELDS,
+  ]);
+  exactFields(report, acceptedFields, [...REPORT_FIELDS_V2], "report");
+  if (supportedReportV3 && !("reported_release_id" in report)) {
+    fail("missing_field", "report.reported_release_id is required for version 3");
   }
   if ("id" in report) boundedString(report.id, "report.id", 128);
   if (typeof report.kind !== "string" || !KINDS.has(report.kind)) {
@@ -405,6 +610,19 @@ export function validateEnvelope(
     typeof report.app_version !== "string" ||
     !VERSION_RE.test(report.app_version)
   ) fail("invalid_app_version", "app_version is invalid");
+  if (supportedReportV3) {
+    const releaseId = boundedString(
+      report.reported_release_id,
+      "report.reported_release_id",
+      80,
+    );
+    if (!/^release-[0-9A-Za-z][0-9A-Za-z.+_-]{0,71}$/.test(releaseId)) {
+      fail("invalid_reported_release_id", "reported_release_id is invalid");
+    }
+    if ("case_diagnostics" in report) {
+      validateCaseDiagnostics(report.case_diagnostics);
+    }
+  }
   if ("thread_id" in report) identifier(report.thread_id, "report.thread_id");
   if ("message_id" in report) {
     identifier(report.message_id, "report.message_id");
@@ -508,10 +726,15 @@ export function validateEnvelope(
       "include_selected_answer must match selected_answer presence",
     );
   }
-  if (consent.include_previous_turns !== (turnTrace.length > 0)) {
+  const hasCaseDiagnostics = report.schema_version === 3 &&
+    "case_diagnostics" in report;
+  if (
+    consent.include_previous_turns !==
+      (turnTrace.length > 0 || hasCaseDiagnostics)
+  ) {
     fail(
       "consent_mismatch",
-      "include_previous_turns must match turn_trace presence",
+      "include_previous_turns must match turn_trace or case_diagnostics presence",
     );
   }
   if (consent.include_previous_turns && !consent.include_selected_question) {
@@ -594,7 +817,7 @@ export function validateEnvelope(
     seen.add(normalized);
   }
   const minimizedReport = Object.fromEntries(
-    Object.entries(report).filter(([field]) => REPORT_FIELDS.has(field)),
+    Object.entries(report).filter(([field]) => reportFields.has(field)),
   );
   return { ...value, report: minimizedReport } as ValidEnvelope;
 }

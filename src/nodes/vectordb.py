@@ -962,6 +962,7 @@ def vectordb_node(state: State) -> dict:
                 "report_type": meta.get("report_type", "-"),
                 "file_name": meta.get("file_name", "-"),
                 "report_uid": meta.get("report_uid"),
+                "source_sha256": meta.get("source_sha256"),
                 "chunk_uid": meta.get("chunk_uid"),
                 "parent_uid": meta.get("parent_uid"),
                 "profile_id": meta.get("profile_id"),

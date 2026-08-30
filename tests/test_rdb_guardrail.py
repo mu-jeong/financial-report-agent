@@ -238,7 +238,17 @@ def test_rdb_execute_node_records_answer_generation_metrics(monkeypatch):
     assert generation["calls"][0]["phase"] == "rdb_answer"
 
 
-def test_extract_sources_from_rdb_result_uses_file_name_rows():
+def test_extract_sources_from_rdb_result_uses_file_name_rows(monkeypatch):
+    monkeypatch.setattr(
+        rdb,
+        "_report_identities_by_file_name",
+        lambda _names: {
+            "a.pdf": {
+                "source_uid": "a" * 64,
+                "source_sha256": "b" * 64,
+            }
+        },
+    )
     result = {
         "columns": [
             "report_type",
@@ -259,6 +269,45 @@ def test_extract_sources_from_rdb_result_uses_file_name_rows():
     assert [source["file_name"] for source in sources] == ["a.pdf", "b.pdf"]
     assert [source["rank"] for source in sources] == [1, 2]
     assert sources[0]["broker"] == "Broker A"
+    assert sources[0]["source_uid"] == "a" * 64
+    assert sources[0]["source_sha256"] == "b" * 64
+    assert "source_uid" not in sources[1]
+
+
+def test_report_identities_omit_ambiguous_file_names(monkeypatch):
+    class FakeCursor:
+        @staticmethod
+        def fetchall():
+            return [
+                {
+                    "file_name": "shared.pdf",
+                    "report_uid": "a" * 64,
+                    "source_sha256": "b" * 64,
+                },
+                {
+                    "file_name": "shared.pdf",
+                    "report_uid": "c" * 64,
+                    "source_sha256": "d" * 64,
+                },
+            ]
+
+    class FakeConnection:
+        closed = False
+
+        @staticmethod
+        def execute(_query, _parameters):
+            return FakeCursor()
+
+        def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+    monkeypatch.setattr(rdb, "get_connection", lambda **_kwargs: connection)
+
+    identities = rdb._report_identities_by_file_name(["shared.pdf"])
+
+    assert identities == {}
+    assert connection.closed is True
 
 
 def test_extract_sources_from_rdb_result_ignores_rows_without_file_name():
