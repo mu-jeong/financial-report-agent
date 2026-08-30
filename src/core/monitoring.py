@@ -35,6 +35,7 @@ from src.core.answer_requirements import (
     evaluate_answer_requirements,
 )
 from src.core.followup_scope import build_answer_scope_index
+from src.core.graph_observability import GRAPH_SCHEMA_VERSION, GRAPH_TRACE_STATE_KEY
 
 EVALUATION_DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "evaluation_dataset.json"
 MULTITURN_EVALUATION_DATASET_PATH = BASE_DIR / "tests" / "fixtures" / "multiturn_evaluation_dataset.json"
@@ -1368,7 +1369,26 @@ def build_message_trace_detail(message: dict[str, Any], *, user_question: str | 
     )
     used_documents = _build_used_document_rows(used_chunks)
     rdb_evidence = _build_rdb_evidence_rows(rdb_sources)
+    graph_schema_version = monitoring.get("graph_schema_version")
+    graph_manifest = monitoring.get("graph_manifest")
+    node_runs = monitoring.get("node_runs")
     return {
+        "graph_trace_present": any(
+            key in monitoring
+            for key in ("graph_schema_version", "graph_manifest", "node_runs")
+        ),
+        "graph_schema_version": (
+            graph_schema_version
+            if isinstance(graph_schema_version, int)
+            and not isinstance(graph_schema_version, bool)
+            else None
+        ),
+        "graph_manifest": graph_manifest if isinstance(graph_manifest, dict) else {},
+        "node_runs": (
+            [dict(run) for run in node_runs if isinstance(run, dict)]
+            if isinstance(node_runs, list)
+            else []
+        ),
         "query_rewrite": {
             "original_question": user_question or metadata.get("question"),
             "rewritten_query": query_rewrite.get("rewritten_query"),
@@ -1494,6 +1514,418 @@ def build_message_trace_summary(
         "rdb_evidence_count": len(detail.get("rdb_evidence") or []),
         "debug_hint_count": len(hints or []),
         "diff_available": bool(diff),
+    }
+
+
+def _build_legacy_chat_monitoring_graph(detail: dict[str, Any]) -> dict[str, Any]:
+    """Project persisted Chat trace evidence into a stable six-stage graph."""
+
+    state_status = detail.get("state_status") or {}
+    stages = state_status.get("stages") or {}
+    timing = detail.get("timing") or {}
+    query_rewrite = detail.get("query_rewrite") or {}
+    scope = detail.get("scope") or {}
+    routing = detail.get("routing") or {}
+    retrieval_k = detail.get("retrieval_k") or {}
+    grounding = detail.get("grounding") or {}
+    answer = detail.get("answer") or {}
+    route = routing.get("route")
+
+    valid_statuses = {
+        "completed",
+        "partial",
+        "failed",
+        "running",
+        "no_results",
+        "not_applicable",
+        "not_measured",
+    }
+
+    def stage_status(stage_id: str) -> str:
+        value = str(stages.get(stage_id) or "not_measured")
+        return value if value in valid_statuses else "not_measured"
+
+    route_labels = {"rdb": "RDB", "vectordb": "Vector DB"}
+    retrieval_label = {
+        "rdb": "RDB 조회",
+        "vectordb": "Vector DB 검색",
+    }.get(route, "검색")
+    retrieval_duration = (
+        timing.get("rdb_query_seconds")
+        if route == "rdb"
+        else timing.get("vector_search_seconds")
+        if route == "vectordb"
+        else None
+    )
+    context_count = _nonnegative_int(retrieval_k.get("context_count"))
+    result_count = _nonnegative_int(answer.get("result_count"))
+    retrieval_summary = (
+        f"context {context_count}개"
+        if context_count is not None
+        else f"결과 {result_count}개"
+        if result_count is not None
+        else "검색 결과 미계측"
+    )
+    grounding_label = {
+        "linked": "근거 연결",
+        "partial": "근거 일부 연결",
+        "unavailable": "근거 없음",
+        "not_applicable": "근거 연결 해당 없음",
+        "not_measured": "근거 미계측",
+    }.get(grounding.get("status"), "근거 미계측")
+    source_count = _nonnegative_int(answer.get("source_count"))
+    answer_summary = (
+        f"{grounding_label} · 문서 {source_count}개"
+        if source_count is not None
+        else grounding_label
+    )
+    search_filters = scope.get("search_filters") or {}
+    scope_summary = (
+        f"검색 조건 {len(search_filters)}개"
+        if isinstance(search_filters, Mapping) and search_filters
+        else "검색 범위 미계측"
+    )
+
+    nodes = [
+        {
+            "id": "input",
+            "label": "질문 입력",
+            "status": stage_status("input"),
+            "duration_seconds": None,
+            "summary": _safe_preview(
+                query_rewrite.get("original_question") or "질문 정보 없음",
+                64,
+            ),
+        },
+        {
+            "id": "query_rewrite",
+            "label": "질문 재작성",
+            "status": stage_status("query_rewrite"),
+            "duration_seconds": None,
+            "summary": _safe_preview(
+                query_rewrite.get("rewritten_query") or "재작성 정보 없음",
+                64,
+            ),
+        },
+        {
+            "id": "search_scope",
+            "label": "검색 범위",
+            "status": stage_status("search_scope"),
+            "duration_seconds": None,
+            "summary": scope_summary,
+        },
+        {
+            "id": "routing",
+            "label": "경로 결정",
+            "status": stage_status("routing"),
+            "duration_seconds": None,
+            "summary": route_labels.get(route, "경로 미계측"),
+        },
+        {
+            "id": "retrieval",
+            "label": retrieval_label,
+            "status": stage_status("retrieval"),
+            "duration_seconds": _duration_seconds(retrieval_duration),
+            "summary": retrieval_summary,
+        },
+        {
+            "id": "answer",
+            "label": "답변 생성",
+            "status": stage_status("answer"),
+            "duration_seconds": _duration_seconds(
+                timing.get("answer_synthesis_seconds")
+            ),
+            "summary": answer_summary,
+        },
+    ]
+    return {
+        "overall_status": state_status.get("overall") or "unknown",
+        "nodes": nodes,
+        "edges": [
+            {"source": "input", "target": "query_rewrite"},
+            {"source": "input", "target": "search_scope"},
+            {"source": "query_rewrite", "target": "routing"},
+            {"source": "search_scope", "target": "routing"},
+            {"source": "routing", "target": "retrieval"},
+            {"source": "retrieval", "target": "answer"},
+        ],
+    }
+
+
+def _graph_node_detail_section(node_id: str) -> str | None:
+    leaf_id = node_id.rsplit(":", 1)[-1]
+    if leaf_id == "turn_prepare":
+        return "input"
+    if leaf_id == "query_rewrite":
+        return "query_rewrite"
+    if leaf_id in {
+        "search_scope_prepare",
+        "industry_lookup",
+        "search_scope_merge",
+        "scope_selection",
+    }:
+        return "search_scope"
+    if leaf_id == "router":
+        return "routing"
+    if leaf_id == "final_response_node":
+        return "answer"
+    if leaf_id in {
+        "rdb_scope_preflight",
+        "vectordb_scope_preflight",
+        "rdb_sql_gen_node",
+        "rdb_execute_node",
+        "vector_dispatcher",
+        "vectordb_node",
+        "comparison_prepare",
+        "retrieve_company",
+        "comparison_fan_in",
+        "too_many_targets",
+        "clear_short_term_memory_retry",
+        "stock_price_tools",
+    }:
+        return "retrieval"
+    return None
+
+
+def _graph_node_run_status(runs: list[dict[str, Any]]) -> str:
+    statuses = {str(run.get("status") or "") for run in runs}
+    if not statuses:
+        return "not_run"
+    if "running" in statuses:
+        return "running"
+    if "failed" in statuses:
+        return "partial" if "completed" in statuses else "failed"
+    if "interrupted" in statuses:
+        return "partial"
+    if statuses == {"completed"}:
+        return "completed"
+    return "not_measured"
+
+
+def _build_persisted_chat_monitoring_graph(
+    detail: dict[str, Any],
+) -> dict[str, Any] | None:
+    schema_version = detail.get("graph_schema_version")
+    manifest = detail.get("graph_manifest")
+    raw_runs = detail.get("node_runs")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != GRAPH_SCHEMA_VERSION
+        or not isinstance(manifest, dict)
+        or not isinstance(manifest.get("nodes"), list)
+        or not isinstance(manifest.get("edges"), list)
+        or not isinstance(raw_runs, list)
+    ):
+        return None
+
+    runs_by_node: dict[str, list[dict[str, Any]]] = {}
+    for raw_run in raw_runs:
+        if not isinstance(raw_run, dict):
+            continue
+        node_id = str(raw_run.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        runs_by_node.setdefault(node_id, []).append(dict(raw_run))
+    for runs in runs_by_node.values():
+        runs.sort(
+            key=lambda run: (
+                int(run.get("sequence") or 0),
+                int(
+                    run.get("invocation_index")
+                    or run.get("attempt")
+                    or 0
+                ),
+            )
+        )
+
+    overall_status = (detail.get("state_status") or {}).get("overall") or "unknown"
+    nodes: list[dict[str, Any]] = []
+    node_ids: set[str] = set()
+    for fallback_order, raw_node in enumerate(manifest["nodes"]):
+        if not isinstance(raw_node, dict):
+            continue
+        node_id = str(raw_node.get("id") or "").strip()
+        if not node_id or node_id in node_ids:
+            continue
+        node_ids.add(node_id)
+        kind = "boundary" if raw_node.get("kind") == "boundary" else "task"
+        runs = runs_by_node.get(node_id, [])
+        status = _graph_node_run_status(runs)
+        if kind == "boundary":
+            if node_id == "__start__" and raw_runs:
+                status = "completed"
+            elif node_id == "__end__" and overall_status == "succeeded":
+                status = "completed"
+            else:
+                status = "not_run"
+        durations = [
+            float(run["duration_seconds"])
+            for run in runs
+            if isinstance(run.get("duration_seconds"), (int, float))
+            and not isinstance(run.get("duration_seconds"), bool)
+        ]
+        start_offsets = [
+            float(run["started_offset_seconds"])
+            for run in runs
+            if isinstance(run.get("started_offset_seconds"), (int, float))
+            and not isinstance(run.get("started_offset_seconds"), bool)
+        ]
+        end_offsets = [
+            float(run["ended_offset_seconds"])
+            for run in runs
+            if isinstance(run.get("ended_offset_seconds"), (int, float))
+            and not isinstance(run.get("ended_offset_seconds"), bool)
+        ]
+        if start_offsets and end_offsets:
+            wall_duration = max(0.0, max(end_offsets) - min(start_offsets))
+        elif durations:
+            # Older v1 rows lack relative offsets. The longest invocation avoids
+            # presenting concurrent work as wall-clock latency.
+            wall_duration = max(durations)
+        else:
+            wall_duration = None
+        result_keys = list(
+            dict.fromkeys(
+                str(key)
+                for run in runs
+                for key in (run.get("result_keys") or [])
+                if str(key).strip()
+            )
+        )[:12]
+        if kind == "boundary":
+            summary = "저장된 그래프 경계"
+        elif not runs:
+            summary = "이 응답에서 실행되지 않은 분기"
+        elif result_keys:
+            summary = f"실행 {len(runs)}회 · 결과 key: {', '.join(result_keys)}"
+        else:
+            summary = f"실행 {len(runs)}회"
+        node = {
+            "id": node_id,
+            "label": str(raw_node.get("label") or node_id),
+            "kind": kind,
+            "order": (
+                raw_node.get("order")
+                if isinstance(raw_node.get("order"), int)
+                else fallback_order
+            ),
+            "status": status,
+            "duration_seconds": (
+                round(wall_duration, 6) if wall_duration is not None else None
+            ),
+            "total_work_seconds": (
+                round(sum(durations), 6) if durations else None
+            ),
+            "summary": summary,
+            "run_count": len(runs),
+            "runs": runs,
+            "detail_section": _graph_node_detail_section(node_id),
+        }
+        if raw_node.get("group"):
+            node["group"] = str(raw_node["group"])
+        if runs:
+            node["first_run_sequence"] = int(runs[0].get("sequence") or 0)
+        nodes.append(node)
+
+    if not nodes:
+        return None
+    edges: list[dict[str, Any]] = []
+    for raw_edge in manifest["edges"]:
+        if not isinstance(raw_edge, dict):
+            continue
+        source = str(raw_edge.get("source") or "").strip()
+        target = str(raw_edge.get("target") or "").strip()
+        if source not in node_ids or target not in node_ids:
+            continue
+        edge = {
+            "source": source,
+            "target": target,
+            "conditional": bool(raw_edge.get("conditional")),
+        }
+        if edge not in edges:
+            edges.append(edge)
+    return {
+        "source": "persisted_manifest",
+        "schema_version": schema_version,
+        "graph_id": manifest.get("graph_id"),
+        "revision": manifest.get("revision"),
+        "overall_status": overall_status,
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def build_chat_monitoring_graph(detail: dict[str, Any]) -> dict[str, Any]:
+    """Build a stored graph, reserving legacy fallback for traces that are absent."""
+
+    trace_present = bool(detail.get("graph_trace_present")) or any(
+        (
+            detail.get("graph_schema_version") is not None,
+            bool(detail.get("graph_manifest")),
+            bool(detail.get("node_runs")),
+        )
+    )
+    if not trace_present:
+        legacy = _build_legacy_chat_monitoring_graph(detail)
+        legacy["source"] = "legacy_projection"
+        return legacy
+
+    schema_version = detail.get("graph_schema_version")
+    if schema_version != GRAPH_SCHEMA_VERSION or isinstance(schema_version, bool):
+        return {
+            "source": "persisted_graph_error",
+            "schema_version": schema_version,
+            "error_code": "unsupported_graph_schema",
+            "error_message": (
+                "지원하지 않는 실행 그래프 스키마입니다. "
+                f"지원 버전: {GRAPH_SCHEMA_VERSION}"
+            ),
+            "overall_status": (detail.get("state_status") or {}).get("overall")
+            or "unknown",
+            "nodes": [],
+            "edges": [],
+        }
+
+    manifest = detail.get("graph_manifest")
+    capture_error = (
+        manifest.get("capture_error") if isinstance(manifest, dict) else None
+    )
+    if isinstance(capture_error, dict):
+        capture_error_code = str(
+            capture_error.get("code") or "graph_observability_failed"
+        )
+        capture_error_type = str(capture_error.get("error_type") or "UnknownError")
+        return {
+            "source": "persisted_graph_error",
+            "schema_version": schema_version,
+            "error_code": capture_error_code,
+            "error_type": capture_error_type,
+            "error_message": (
+                "실행 그래프 계측을 수집하지 못했습니다. "
+                "답변은 저장되었지만 이 응답의 그래프를 추정해 표시하지 않습니다."
+            ),
+            "overall_status": (detail.get("state_status") or {}).get("overall")
+            or "unknown",
+            "nodes": [],
+            "edges": [],
+        }
+
+    persisted = _build_persisted_chat_monitoring_graph(detail)
+    if persisted is not None:
+        return persisted
+    return {
+        "source": "persisted_graph_error",
+        "schema_version": schema_version,
+        "error_code": "invalid_graph_trace",
+        "error_message": (
+            "저장된 실행 그래프가 손상되어 렌더링할 수 없습니다. "
+            "원본 기술 세부정보를 확인하세요."
+        ),
+        "overall_status": (detail.get("state_status") or {}).get("overall")
+        or "unknown",
+        "nodes": [],
+        "edges": [],
     }
 
 
@@ -6251,9 +6683,15 @@ def summarize_v2_data_integrity(
     }
 
 
-def build_monitoring_page_labels() -> list[str]:
-    """Monitoring Mode가 켜졌을 때 보여줄 top-level page를 반환합니다."""
-    return ["Chat", "Monitoring"]
+def build_monitoring_page_labels(
+    *, operator_monitoring_enabled: bool = False
+) -> list[str]:
+    """Return local diagnostics plus the privileged operator route when allowed."""
+    labels = ["Chat"]
+    if operator_monitoring_enabled:
+        labels.append("Monitoring")
+    labels.append("개선 실험")
+    return labels
 
 
 def _compact_retrieval_plan(plan: Any) -> dict[str, Any] | None:
@@ -6324,7 +6762,11 @@ def compact_graph_monitoring_metadata(
                 "score_summary": _score_summary(rerank_info),
             },
             "state_snapshot": {
-                "available_keys": sorted(str(key) for key in final_state),
+                "available_keys": sorted(
+                    str(key)
+                    for key in final_state
+                    if str(key) != GRAPH_TRACE_STATE_KEY
+                ),
                 "route": route,
                 "search_filters": final_state.get("search_filters") or {},
                 "scope_source": final_state.get("scope_source"),
@@ -6338,6 +6780,26 @@ def compact_graph_monitoring_metadata(
             },
         },
     }
+    graph_trace = final_state.get(GRAPH_TRACE_STATE_KEY)
+    if isinstance(graph_trace, Mapping):
+        graph_schema_version = graph_trace.get("graph_schema_version")
+        graph_manifest = graph_trace.get("graph_manifest")
+        node_runs = graph_trace.get("node_runs")
+        if (
+            isinstance(graph_schema_version, int)
+            and not isinstance(graph_schema_version, bool)
+            and isinstance(graph_manifest, Mapping)
+            and isinstance(node_runs, list)
+        ):
+            metadata["monitoring"].update(
+                {
+                    "graph_schema_version": graph_schema_version,
+                    "graph_manifest": dict(graph_manifest),
+                    "node_runs": [
+                        dict(run) for run in node_runs if isinstance(run, Mapping)
+                    ],
+                }
+            )
     for section, values in (final_state.get("monitoring_metrics") or {}).items():
         if isinstance(values, dict):
             metadata["monitoring"].setdefault(section, {}).update(values)

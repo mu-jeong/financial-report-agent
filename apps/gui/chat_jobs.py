@@ -1,5 +1,6 @@
 """Background chat execution and cross-rerun job state."""
 
+import copy
 import queue
 import threading
 import time
@@ -12,6 +13,11 @@ from src.core import conversation_store
 from src.core import monitoring
 from src.core.chat_ui_helpers import build_scope_notice
 from src.core.followup_scope import build_answer_scope_index
+from src.core.graph_observability import (
+    NodeRunCollector,
+    build_graph_manifest,
+    invoke_graph_with_observability,
+)
 
 
 append_pending_exchange = conversation_store.append_pending_exchange
@@ -29,9 +35,29 @@ CHAT_RESPONSE_TIMEOUT_SECONDS = 180.0
 class _LazyGraphApp:
     """Preserve the graph_app seam while moving its import off the UI thread."""
 
+    name = "finance_chat"
+
     @staticmethod
     def prepare():
         return search_engine.wait_for_search_engine(retry_failed=True)
+
+    @classmethod
+    def get_graph(cls, *, xray: bool = False):
+        """Expose the prepared graph topology to the monitoring adapter."""
+        prepared_graph = cls.prepare()
+        get_graph = getattr(prepared_graph, "get_graph", None)
+        if not callable(get_graph):
+            raise TypeError("Prepared graph does not expose get_graph().")
+        return get_graph(xray=xray)
+
+    @classmethod
+    def stream(cls, graph_input: dict, *, config: dict, **kwargs):
+        """Delegate observable streaming to the prepared compiled graph."""
+        prepared_graph = cls.prepare()
+        stream = getattr(prepared_graph, "stream", None)
+        if not callable(stream):
+            raise TypeError("Prepared graph does not expose stream().")
+        return stream(graph_input, config=config, **kwargs)
 
     @staticmethod
     def invoke(graph_input: dict, *, config: dict) -> dict:
@@ -51,6 +77,55 @@ class PendingSearchEngineQuestionError(RuntimeError):
 
 class ChatResponseTimeout(TimeoutError):
     """Raised when a graph invocation exceeds the user-visible answer deadline."""
+
+
+class _GraphTraceHandle:
+    """Capture a sealable snapshot of graph events observed before a timeout."""
+
+    def __init__(self, target_graph: object) -> None:
+        manifest = build_graph_manifest(target_graph)
+        self._collector = NodeRunCollector(manifest) if manifest else None
+        self._lock = threading.Lock()
+        self._sealed = False
+
+    def observe(self, event: object) -> None:
+        with self._lock:
+            if not self._sealed and self._collector is not None:
+                self._collector.observe(event)
+
+    def interrupt(self) -> dict:
+        """Seal collection and return an independent timeout-time snapshot."""
+        with self._lock:
+            self._sealed = True
+            if self._collector is None:
+                return {}
+            return copy.deepcopy(
+                self._collector.snapshot(overall_status="interrupted")
+            )
+
+
+class _TraceStreamingGraph:
+    """Forward graph calls while copying stream events into a timeout handle."""
+
+    def __init__(self, target_graph: object, trace_handle: _GraphTraceHandle) -> None:
+        self._target_graph = target_graph
+        self._trace_handle = trace_handle
+        self.name = getattr(target_graph, "name", "finance_chat")
+
+    def get_graph(self, *, xray: bool = False):
+        return self._target_graph.get_graph(xray=xray)
+
+    def invoke(self, graph_input: dict, *, config: dict) -> dict:
+        return self._target_graph.invoke(graph_input, config=config)
+
+    def stream(self, graph_input: dict, *, config: dict, **kwargs):
+        for event in self._target_graph.stream(
+            graph_input,
+            config=config,
+            **kwargs,
+        ):
+            self._trace_handle.observe(event)
+            yield event
 
 
 # This registry is process-local. Deploy a change that moves this cached function
@@ -180,10 +255,28 @@ def _invoke_graph_with_timeout(
     the daemon may finish later, but only this coordinator persists its result.
     """
     outcome: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+    trace_handle = _GraphTraceHandle(graph_app)
+    supports_observable_stream = callable(
+        getattr(graph_app, "get_graph", None)
+    ) and callable(getattr(graph_app, "stream", None))
+    observable_graph = (
+        _TraceStreamingGraph(graph_app, trace_handle)
+        if supports_observable_stream
+        else graph_app
+    )
 
     def invoke() -> None:
         try:
-            outcome.put(("result", graph_app.invoke(graph_input, config=config)))
+            outcome.put(
+                (
+                    "result",
+                    invoke_graph_with_observability(
+                        observable_graph,
+                        graph_input,
+                        config=config,
+                    ),
+                )
+            )
         except Exception as exc:
             outcome.put(("error", exc))
 
@@ -195,9 +288,13 @@ def _invoke_graph_with_timeout(
     try:
         outcome_type, value = outcome.get(timeout=max(0.0, timeout_seconds))
     except queue.Empty as exc:
-        raise ChatResponseTimeout(
+        timeout_error = ChatResponseTimeout(
             f"Chat response timed out after {timeout_seconds:g} seconds."
-        ) from exc
+        )
+        graph_trace = trace_handle.interrupt()
+        if graph_trace:
+            timeout_error.graph_trace = graph_trace
+        raise timeout_error from exc
     if outcome_type == "error":
         if not isinstance(value, BaseException):
             raise TypeError("Chat graph returned an invalid error result.")
@@ -340,6 +437,17 @@ def _run_chat_response_job(
             "error": str(exc),
             "latency_seconds": round(time.perf_counter() - started_at, 3),
         }
+        graph_trace = getattr(exc, "graph_trace", None)
+        if isinstance(graph_trace, dict):
+            failure_metadata["monitoring"] = {
+                key: graph_trace[key]
+                for key in (
+                    "graph_schema_version",
+                    "graph_manifest",
+                    "node_runs",
+                )
+                if key in graph_trace
+            }
         if isinstance(runtime_provenance, dict):
             failure_metadata["retrieval_runtime"] = runtime_provenance
         update_message(

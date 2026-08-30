@@ -152,15 +152,29 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
         _delete_thread_and_select_next(thread_id)
 
 
-def render_sidebar(current_id: str) -> dict:
+def render_sidebar(
+    current_id: str,
+    *,
+    monitoring_enabled: bool = False,
+    operator_monitoring_enabled: bool = False,
+) -> dict:
     threads = load_threads()
 
     st.title("Finance Report Agent")
-    if config_module.MONITORING_MODE:
-        st.caption("Monitoring Mode ON")
+    if monitoring_enabled:
+        labels = monitoring.build_monitoring_page_labels(
+            operator_monitoring_enabled=operator_monitoring_enabled
+        )
+        if st.session_state.get("active_monitoring_page") not in labels:
+            st.session_state["active_monitoring_page"] = "Chat"
+        st.caption(
+            "운영자 Monitoring"
+            if operator_monitoring_enabled
+            else "Monitoring Mode ON"
+        )
         st.radio(
             "화면",
-            monitoring.build_monitoring_page_labels(),
+            labels,
             key="active_monitoring_page",
             label_visibility="collapsed",
         )

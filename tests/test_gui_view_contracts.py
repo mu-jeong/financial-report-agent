@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import ast
 import calendar
+import copy
 import queue
 import threading
 from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
+
+import pytest
 
 
 GUI_DIR = Path("apps/gui")
@@ -17,6 +20,7 @@ CHAT_JOBS_PATH = GUI_DIR / "chat_jobs.py"
 CHAT_VIEWS_PATH = GUI_DIR / "chat_views.py"
 DATA_VIEWS_PATH = GUI_DIR / "data_views.py"
 MONITORING_VIEWS_PATH = GUI_DIR / "monitoring_views.py"
+OPERATOR_MONITORING_VIEWS_PATH = GUI_DIR / "operator_monitoring_views.py"
 SEARCH_ENGINE_PATH = GUI_DIR / "search_engine.py"
 SIDEBAR_VIEWS_PATH = GUI_DIR / "sidebar_views.py"
 
@@ -87,6 +91,13 @@ MONITORING_VIEW_FUNCTIONS = {
     "_chat_scope_caption",
     "_chat_performance_timing_rows",
     "_chat_technical_sections",
+    "_chat_monitoring_node_status_label",
+    "_chat_monitoring_node_button_label",
+    "_chat_monitoring_graph_dot",
+    "_render_chat_graph_connector",
+    "_render_chat_monitoring_graph",
+    "_render_chat_monitoring_node_detail",
+    "_render_chat_monitoring_workspace",
     "_render_chat_answer_performance",
     "_render_global_chat_diagnostics",
     "_format_chat_token_count",
@@ -94,6 +105,7 @@ MONITORING_VIEW_FUNCTIONS = {
     "_render_chat_latency_table",
     "_render_global_monitoring_area",
     "render_chat_monitoring_page",
+    "render_improvement_experiments_page",
     "render_global_monitoring_page",
 }
 
@@ -134,6 +146,26 @@ EXPLICIT_WIDGET_KEYS = {
     "'monitoring_operations_area'",
     "'monitoring_experiments_area'",
     "'monitoring_diagnostic_thread'",
+    "'monitoring_login_email'",
+    "'monitoring_login_password'",
+    "'monitoring_recovery_no_active_process'",
+    "_ISSUE_SELECTOR_KEY",
+    "_WORKSPACE_KEY",
+    'f"baseline_release_{local_issue[\'issue_id\']}"',
+    'f"candidate_release_{local_issue[\'issue_id\']}"',
+    'f"case_ready_{case[\'case_revision_id\']}"',
+    'f"case_revise_{case[\'case_revision_id\']}"',
+    'f"case_select_{local_issue[\'issue_id\']}_{len(revisions)}"',
+    'f"fixture_ready_{fixture[\'fixture_revision_id\']}"',
+    'f"fixture_revise_{fixture[\'fixture_revision_id\']}"',
+    'f"fixture_select_{local_issue[\'issue_id\']}_{len(revisions)}"',
+    'f"snapshot_create_{local_issue[\'issue_id\']}"',
+    'f"snapshot_id_{local_issue[\'issue_id\']}"',
+    'add_key',
+    'remove_key',
+    "f'{_SNAPSHOT_STATE_PREFIX}search_broker_{issue_id}'",
+    "f'{_SNAPSHOT_STATE_PREFIX}search_query_{issue_id}'",
+    "f'{_SNAPSHOT_STATE_PREFIX}search_type_{issue_id}'",
     "f\"issue_report_category_{current_thread['id']}\"",
     "f\"issue_report_description_{current_thread['id']}\"",
     "f\"issue_report_response_mode_{current_thread['id']}\"",
@@ -155,6 +187,8 @@ EXPLICIT_WIDGET_KEYS = {
     "f'thread_{thread_id}'",
     "f'chat_monitoring_selected_response_{current_id}'",
     "f'chat_monitoring_detail_{current_id}_{selected_message_id}'",
+    "f'chat_monitoring_overview_{current_id}_{selected_message_id}'",
+    "f\"chat_monitoring_node_{current_id}_{selected_message_id}_{node['id']}\"",
     "f'{key_prefix}_open_pdf_{index}'",
 }
 
@@ -409,6 +443,37 @@ def test_monitoring_groups_horizontal_navigation_by_operator_purpose():
     assert source.count("st.segmented_control(") >= 2
 
 
+def test_improvement_experiments_page_only_exposes_pdf_parsing_comparison():
+    source = MONITORING_VIEWS_PATH.read_text(encoding="utf-8-sig")
+    tree = ast.parse(source, filename=str(MONITORING_VIEWS_PATH))
+    render_function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "render_improvement_experiments_page"
+    )
+    calls = {
+        ast.unparse(node.func)
+        for node in ast.walk(render_function)
+        if isinstance(node, ast.Call)
+    }
+
+    assert "_render_parsing_engine_evaluation" in calls
+    assert "_render_experiment_monitoring" not in calls
+    assert "render_global_monitoring_page" not in calls
+
+
+def test_app_routes_improvement_experiments_only_from_the_top_level():
+    source = APP_PATH.read_text(encoding="utf-8-sig")
+
+    route = 'elif active_page == "개선 실험":'
+    render = "monitoring_views.render_improvement_experiments_page()"
+    assert route in source
+    assert render in source
+    assert source.index(route) < source.index(render)
+    assert source.count(render) == 1
+
+
 def test_monitoring_restores_each_groups_last_selected_area():
     class FakeStreamlit:
         def __init__(self):
@@ -482,10 +547,20 @@ def test_chat_monitoring_exposes_turn_observability_and_global_keeps_accuracy():
     assert '"Vector DB 평균 검색시간"' in chat_source
     assert "답변 정확도" not in chat_source
     assert "_latest_v2_accuracy_run" not in chat_source
-    assert "performance_first=True" in chat_source
-    assert "답변별 성능과 근거" in chat_source
+    assert "interactive_graph=True" in chat_source
+    assert "개별 Chat Monitoring" in chat_source
+    assert "응답별 실행 그래프와 근거" in chat_source
     assert "대화 전체 속도 추이" in chat_source
     assert "_render_global_chat_diagnostics" in source
+    assert "_render_chat_monitoring_workspace" in source
+    assert "_render_chat_monitoring_graph" in source
+    assert "_render_chat_monitoring_node_detail" in source
+    assert "monitoring.build_chat_monitoring_graph(detail)" in source
+    assert "st.graphviz_chart(" in source
+    assert 'graph.get("source") == "persisted_manifest"' in source
+    assert "[0.34, 0.66]" in source
+    assert 'vertical_alignment="top"' in source
+    assert 'st.subheader("전체 지표")' in source
     assert "Send 병렬 실행" in source
     assert "Send 직렬 실행" in source
     assert "선택 답변 총시간" in source
@@ -513,6 +588,53 @@ def test_chat_monitoring_exposes_turn_observability_and_global_keeps_accuracy():
     assert "detail[\"used_documents\"]" in source
     assert "_render_chat_latency_table" in chat_source
     assert "_render_answer_metrics" in global_source
+
+
+def test_chat_monitoring_dot_is_data_driven_and_marks_conditional_edges():
+    build_dot = _load_helpers(
+        MONITORING_VIEWS_PATH,
+        "_chat_monitoring_graph_dot",
+    )["_chat_monitoring_graph_dot"]
+
+    dot = build_dot(
+        {
+            "nodes": [
+                {
+                    "id": "router",
+                    "label": '경로 "결정"',
+                    "status": "completed",
+                    "duration_seconds": 0.125,
+                },
+                {
+                    "id": "vectordb_node",
+                    "label": "Vector DB 검색",
+                    "status": "not_run",
+                },
+            ],
+            "edges": [
+                {
+                    "source": "router",
+                    "target": "vectordb_node",
+                    "conditional": True,
+                }
+            ],
+        }
+    )
+
+    assert dot.startswith("digraph chat_monitoring")
+    assert '경로 \\"결정\\"' in dot
+    assert '"router" -> "vectordb_node"' in dot
+    assert 'style="dashed"' in dot
+    assert 'color="#A0AEC0"' in dot
+    assert "observed" not in dot
+
+
+def test_app_labels_individual_chat_monitoring_with_its_original_name():
+    source = APP_PATH.read_text(encoding="utf-8-sig")
+
+    assert '["Chat", "개별 Chat Monitoring"]' in source
+    assert '["Chat", "개별 Chat Monitoring", "개선 실험"]' not in source
+    assert '"현재 대화 진단"' not in source
 
 
 def test_chat_generation_formatters_keep_missing_values_explicit():
@@ -1282,6 +1404,9 @@ def test_warmup_queue_slot_releases_before_graph_answering():
 
 
 def test_timed_out_graph_invocation_does_not_serialize_later_questions():
+    from apps.gui.chat_jobs import _GraphTraceHandle, _TraceStreamingGraph
+    from src.core.graph_observability import invoke_graph_with_observability
+
     first_invocation_started = threading.Event()
     release_first_invocation = threading.Event()
 
@@ -1304,6 +1429,9 @@ def test_timed_out_graph_invocation_does_not_serialize_later_questions():
             "queue": queue,
             "threading": threading,
             "graph_app": ConcurrentGraph(),
+            "_GraphTraceHandle": _GraphTraceHandle,
+            "_TraceStreamingGraph": _TraceStreamingGraph,
+            "invoke_graph_with_observability": invoke_graph_with_observability,
             "ChatResponseTimeout": TimeoutError,
             "CHAT_RESPONSE_TIMEOUT_SECONDS": 180.0,
         },
@@ -1351,6 +1479,161 @@ def test_timed_out_graph_invocation_does_not_serialize_later_questions():
     run_source = CHAT_JOBS_PATH.read_text(encoding="utf-8-sig")
     assert 'registry["graph_lock"]' not in run_source
     assert "_invoke_graph_with_timeout(" in run_source
+
+
+def test_timed_out_graph_invocation_seals_an_interrupted_trace(monkeypatch):
+    from apps.gui import chat_jobs
+
+    started = threading.Event()
+    release = threading.Event()
+    worker_completed = threading.Event()
+
+    class Node:
+        def __init__(self, name):
+            self.name = name
+
+    class Edge:
+        def __init__(self, source, target):
+            self.source = source
+            self.target = target
+            self.conditional = False
+
+    class Drawable:
+        nodes = {
+            "__start__": Node("__start__"),
+            "slow_node": Node("slow_node"),
+            "__end__": Node("__end__"),
+        }
+        edges = [Edge("__start__", "slow_node"), Edge("slow_node", "__end__")]
+
+    class BlockingGraph:
+        name = "timeout_fixture"
+
+        @staticmethod
+        def get_graph(*, xray=False):
+            assert xray is True
+            return Drawable()
+
+        @staticmethod
+        def stream(graph_input, *, config, **kwargs):
+            yield (
+                (),
+                "tasks",
+                {"id": "run-1", "name": "slow_node", "input": graph_input},
+            )
+            started.set()
+            release.wait(timeout=2)
+            yield (
+                (),
+                "tasks",
+                {"id": "run-1", "name": "slow_node", "result": {"done": True}},
+            )
+            yield ((), "values", {"generation": "late"})
+            worker_completed.set()
+
+    monkeypatch.setattr(chat_jobs, "graph_app", BlockingGraph())
+
+    with pytest.raises(chat_jobs.ChatResponseTimeout) as exc_info:
+        chat_jobs._invoke_graph_with_timeout(
+            {"question": "stuck"},
+            config={
+                "configurable": {
+                    "thread_id": "thread-timeout",
+                    "checkpoint_ns": "job-timeout",
+                }
+            },
+            job_id="job-timeout",
+            timeout_seconds=0.05,
+        )
+
+    assert started.is_set()
+    graph_trace = exc_info.value.graph_trace
+    frozen_trace = copy.deepcopy(graph_trace)
+    assert graph_trace["graph_schema_version"] == 1
+    assert graph_trace["graph_manifest"]["graph_id"] == "timeout_fixture"
+    assert len(graph_trace["node_runs"]) == 1
+    interrupted_run = graph_trace["node_runs"][0]
+    assert interrupted_run["run_id"] == "run-1"
+    assert interrupted_run["node_id"] == "slow_node"
+    assert interrupted_run["sequence"] == 1
+    assert interrupted_run["invocation_index"] == 1
+    assert interrupted_run["status"] == "interrupted"
+    assert interrupted_run["duration_seconds"] >= 0
+    assert (
+        interrupted_run["ended_offset_seconds"]
+        >= interrupted_run["started_offset_seconds"]
+    )
+    assert interrupted_run["result_keys"] == []
+
+    release.set()
+    assert worker_completed.wait(timeout=1)
+    assert graph_trace == frozen_trace
+
+
+def test_chat_job_persists_timeout_graph_trace_in_failure_metadata():
+    timeout_error = TimeoutError("graph timed out")
+    timeout_error.graph_trace = {
+        "graph_schema_version": 1,
+        "graph_manifest": {
+            "graph_id": "finance_chat",
+            "revision": "timeout-revision",
+            "nodes": [{"id": "slow_node", "label": "slow node"}],
+            "edges": [],
+        },
+        "node_runs": [
+            {
+                "run_id": "run-1",
+                "node_id": "slow_node",
+                "sequence": 1,
+                "invocation_index": 1,
+                "started_offset_seconds": 0.0,
+                "ended_offset_seconds": 0.05,
+                "status": "interrupted",
+                "duration_seconds": 0.05,
+                "result_keys": [],
+            }
+        ],
+    }
+    updates: list[tuple] = []
+    registry = {
+        "running_job_ids": {"job-timeout"},
+        "events": [],
+        "lock": threading.Lock(),
+    }
+    clock_values = iter([10.0, 10.05])
+    namespace = _load_helpers(
+        CHAT_JOBS_PATH,
+        "_run_chat_response_job",
+        extra_namespace={
+            "time": type(
+                "Clock",
+                (),
+                {"perf_counter": staticmethod(lambda: next(clock_values))},
+            ),
+            "graph_app": object(),
+            "_invoke_graph_with_timeout": (
+                lambda *args, **kwargs: (_ for _ in ()).throw(timeout_error)
+            ),
+            "update_message": lambda *args: updates.append(args),
+            "_record_chat_job_event": lambda *args, **kwargs: None,
+        },
+    )
+
+    namespace["_run_chat_response_job"](
+        job_id="job-timeout",
+        thread_id="thread-timeout",
+        thread_name="timeout thread",
+        assistant_message_id=17,
+        user_query="slow question",
+        chat_history=[],
+        prior_search_scope=None,
+        registry=registry,
+    )
+
+    assert updates[0][2]["status"] == "failed"
+    assert updates[0][2]["monitoring"] == timeout_error.graph_trace
+    assert updates[0][2]["monitoring"]["node_runs"][0]["status"] == "interrupted"
+    assert registry["running_job_ids"] == set()
 
 
 def test_warmup_queue_release_survives_progress_update_failure():
@@ -1890,6 +2173,7 @@ def test_app_imports_or_reloads_gui_modules_once_per_run():
         "chat_views",
         "data_views",
         "monitoring_views",
+        "operator_monitoring_views",
         "sidebar_views",
     ):
         assert (
@@ -1935,7 +2219,8 @@ def test_app_only_composes_extracted_views_and_leaf_modules_do_not_import_app():
         "chat_jobs.show_queued_chat_job_toasts",
         "chat_views.render_chat",
         "monitoring_views.render_chat_monitoring_page",
-        "monitoring_views.render_global_monitoring_page",
+        "monitoring_views.render_improvement_experiments_page",
+        "operator_monitoring_views.render_operator_monitoring_page",
         "sidebar_views.ensure_current_thread",
         "sidebar_views.load_threads",
         "sidebar_views.render_sidebar",
@@ -1945,6 +2230,7 @@ def test_app_only_composes_extracted_views_and_leaf_modules_do_not_import_app():
         "chat_views",
         "data_views",
         "monitoring_views",
+        "operator_monitoring_views",
         "sidebar_views",
     ):
         assert (

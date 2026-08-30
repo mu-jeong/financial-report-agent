@@ -39,6 +39,13 @@ def _import_or_reload(module_name: str):
 
 config_module = _import_or_reload("src.configs.config")
 MONITORING_MODE = config_module.MONITORING_MODE
+monitoring_admin_client = importlib.import_module("src.core.monitoring_admin_client")
+_operator_api_config = monitoring_admin_client.load_operator_api_config()
+OPERATOR_MONITORING_ENABLED = monitoring_admin_client.production_monitoring_enabled(
+    deployment_environment=config_module.DEPLOYMENT_ENVIRONMENT,
+    monitoring_mode=MONITORING_MODE,
+    config=_operator_api_config,
+)
 
 if _RUNTIME_SMOKE_REQUESTED:
     from src.retrieval.bootstrap import reconcile_and_inspect_runtime
@@ -103,6 +110,8 @@ chat_views = _import_or_reload("apps.gui.chat_views")
 sidebar_views = _import_or_reload("apps.gui.sidebar_views")
 if MONITORING_MODE:
     monitoring_views = _import_or_reload("apps.gui.monitoring_views")
+if OPERATOR_MONITORING_ENABLED:
+    operator_monitoring_views = _import_or_reload("apps.gui.operator_monitoring_views")
 
 
 def _inject_ui_styles() -> None:
@@ -171,14 +180,22 @@ chat_jobs.show_queued_chat_job_toasts()
 chat_jobs.render_chat_job_notifications(current_id)
 
 with st.sidebar:
-    sidebar_status = sidebar_views.render_sidebar(current_id)
+    sidebar_status = sidebar_views.render_sidebar(
+        current_id,
+        monitoring_enabled=MONITORING_MODE,
+        operator_monitoring_enabled=OPERATOR_MONITORING_ENABLED,
+    )
 
 if MONITORING_MODE:
     active_page = st.session_state.get("active_monitoring_page", "Chat")
-    if active_page == "Monitoring":
-        monitoring_views.render_global_monitoring_page(sidebar_status)
+    if active_page == "Monitoring" and OPERATOR_MONITORING_ENABLED:
+        operator_monitoring_views.render_operator_monitoring_page()
+    elif active_page == "개선 실험":
+        monitoring_views.render_improvement_experiments_page()
     else:
-        chat_tab, chat_monitoring_tab = st.tabs(["Chat", "답변 모니터링"])
+        chat_tab, chat_monitoring_tab = st.tabs(
+            ["Chat", "개별 Chat Monitoring"]
+        )
         with chat_tab:
             chat_views.render_chat(current_id, current_thread)
         with chat_monitoring_tab:
