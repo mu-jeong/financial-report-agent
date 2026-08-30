@@ -108,6 +108,11 @@ def _strip_temporal_phrases(text: str) -> str:
         "익월",
         "지난달",
         "전월",
+        "지난해",
+        "작년",
+        "올해",
+        "금년",
+        "내년",
     ):
         stripped = stripped.replace(phrase, "")
     return stripped

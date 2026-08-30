@@ -43,6 +43,8 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
     monkeypatch.setenv("USE_RERANKER", "yes")
     monkeypatch.setenv("RERANK_TIMEOUT", "12.5")
     monkeypatch.setenv("MONITORING_MODE", "on")
+    monkeypatch.setenv("DEPLOYMENT_ENVIRONMENT", "production")
+    monkeypatch.setenv("MONITORING_ARTIFACT_ROOT", "/tmp/monitoring-artifacts")
     monkeypatch.setenv("ISSUE_REPORT_REMOTE_ENABLED", "off")
     monkeypatch.setenv("ISSUE_REPORT_INGEST_URL", "https://example.supabase.co/functions/v1/issue-report-ingest")
     monkeypatch.setenv("DATA_ROOT", "/tmp/eval")
@@ -54,6 +56,8 @@ def test_get_config_value_parses_typed_environment(monkeypatch):
     assert get_config_value("USE_RERANKER") is True
     assert get_config_value("RERANK_TIMEOUT") == 12.5
     assert get_config_value("MONITORING_MODE") is True
+    assert get_config_value("DEPLOYMENT_ENVIRONMENT") == "production"
+    assert get_config_value("MONITORING_ARTIFACT_ROOT") == "/tmp/monitoring-artifacts"
     assert get_config_value("ISSUE_REPORT_REMOTE_ENABLED") is False
     assert get_config_value("ISSUE_REPORT_INGEST_URL") == "https://example.supabase.co/functions/v1/issue-report-ingest"
     assert get_config_value("DATA_ROOT") == "/tmp/eval"
@@ -90,6 +94,7 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     monkeypatch.delenv("PDF_EXTRACTION_FALLBACK_ENGINE", raising=False)
     monkeypatch.delenv("UNEMBEDDED_PDF_EXTRACTION_ENGINE", raising=False)
     monkeypatch.delenv("MONITORING_MODE", raising=False)
+    monkeypatch.delenv("DEPLOYMENT_ENVIRONMENT", raising=False)
     monkeypatch.delenv("ISSUE_REPORT_REMOTE_ENABLED", raising=False)
     monkeypatch.setenv("ISSUE_REPORT_INGEST_URL", "")
     monkeypatch.setenv("ISSUE_REPORT_PUBLISHABLE_KEY", "")
@@ -104,6 +109,7 @@ def test_get_config_value_uses_defaults_for_missing_or_blank(monkeypatch):
     assert get_config_value("PDF_EXTRACTION_FALLBACK_ENGINE") == ""
     assert get_config_value("UNEMBEDDED_PDF_EXTRACTION_ENGINE") == ""
     assert get_config_value("MONITORING_MODE") is False
+    assert get_config_value("DEPLOYMENT_ENVIRONMENT") == "development"
     assert get_config_value("ISSUE_REPORT_REMOTE_ENABLED") is True
     assert get_config_value("ISSUE_REPORT_INGEST_URL") == (
         "https://rjjnhvoontxpimhiabou.supabase.co/functions/v1/"
@@ -185,6 +191,14 @@ def test_render_env_example_contains_generated_defaults():
     assert "DATA_ROOT=" in content
     assert "COMPANY_INDUSTRY_DATA_PATH=" in content
     assert "MONITORING_MODE=false" in content
+    assert "DEPLOYMENT_ENVIRONMENT=development" in content
+    assert "MONITORING_SUPABASE_URL=https://rjjnhvoontxpimhiabou.supabase.co" in content
+    assert "MONITORING_SUPABASE_PUBLISHABLE_KEY=sb_publishable_" in content
+    assert (
+        "MONITORING_OPERATOR_API_URL=https://rjjnhvoontxpimhiabou.supabase.co/"
+        "functions/v1/issue-report-operator"
+    ) in content
+    assert "MONITORING_ARTIFACT_ROOT=" in content
     assert "ISSUE_REPORT_REMOTE_ENABLED=true" in content
     assert (
         "ISSUE_REPORT_INGEST_URL=https://rjjnhvoontxpimhiabou.supabase.co/"

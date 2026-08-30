@@ -335,8 +335,7 @@ def test_sidebar_uses_process_persistent_status_cache_boundary():
     assert "status_cache.get_data_status()" in sidebar_source
     assert "status_module.get_data_status()" not in sidebar_source
     assert '"apps.gui.status_cache"' not in app_source
-    assert "sidebar_status = sidebar_views.render_sidebar(current_id)" in app_source
-    assert (
-        "monitoring_views.render_global_monitoring_page(sidebar_status)"
-        in app_source
-    )
+    assert "sidebar_status = sidebar_views.render_sidebar(" in app_source
+    assert "monitoring_enabled=MONITORING_MODE" in app_source
+    assert "operator_monitoring_enabled=OPERATOR_MONITORING_ENABLED" in app_source
+    assert "operator_monitoring_views.render_operator_monitoring_page()" in app_source

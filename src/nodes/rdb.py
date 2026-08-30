@@ -1,5 +1,6 @@
 import functools
 import re
+import sqlite3
 import time
 from collections import Counter
 
@@ -388,6 +389,13 @@ def extract_sources_from_rdb_result(db_result) -> list[dict]:
     if "file_name" not in columns:
         return []
 
+    file_names = [
+        str(row[columns.index("file_name")])
+        for row in db_result.get("rows") or []
+        if len(row) > columns.index("file_name")
+        and row[columns.index("file_name")]
+    ]
+    identities = _report_identities_by_file_name(file_names)
     sources: list[dict] = []
     seen_files: set[str] = set()
     for row in db_result.get("rows") or []:
@@ -396,8 +404,7 @@ def extract_sources_from_rdb_result(db_result) -> list[dict]:
         if not file_name or file_name in seen_files:
             continue
         seen_files.add(file_name)
-        sources.append(
-            {
+        source = {
                 "rank": len(sources) + 1,
                 **{
                     column: row_map.get(column, "-")
@@ -408,8 +415,52 @@ def extract_sources_from_rdb_result(db_result) -> list[dict]:
                 "recency_score": None,
                 "final_score": None,
             }
-        )
+        identity = identities.get(str(file_name))
+        if identity:
+            source.update(identity)
+        sources.append(source)
     return sources
+
+
+def _report_identities_by_file_name(
+    file_names: list[str],
+) -> dict[str, dict[str, str]]:
+    wanted = sorted(set(file_names))
+    if not wanted:
+        return {}
+    connection = None
+    try:
+        connection = get_connection(materialize_reports=False)
+        placeholders = ",".join("?" for _ in wanted)
+        rows = connection.execute(
+            f"""
+            SELECT v2_basename(canonical_relative_path) AS file_name,
+                   report_uid, source_sha256
+              FROM main.active_reports
+             WHERE v2_basename(canonical_relative_path) IN ({placeholders})
+             ORDER BY canonical_relative_path
+            """,
+            wanted,
+        ).fetchall()
+    except (OSError, RuntimeError, sqlite3.Error, ValueError):
+        return {}
+    finally:
+        if connection is not None:
+            connection.close()
+    identities: dict[str, dict[str, str]] = {}
+    ambiguous_file_names: set[str] = set()
+    for row in rows:
+        file_name = str(row["file_name"])
+        if file_name in identities:
+            ambiguous_file_names.add(file_name)
+            continue
+        identities[file_name] = {
+            "source_uid": str(row["report_uid"]),
+            "source_sha256": str(row["source_sha256"]),
+        }
+    for file_name in ambiguous_file_names:
+        identities.pop(file_name, None)
+    return identities
 
 
 def summarize_rdb_result(db_result) -> dict:

@@ -265,6 +265,18 @@ def _resolve_relative_temporal_context(query: str, today: date) -> TemporalConte
             start, end = _bounds_for_month_offset(today, offset)
             return _temporal_context(expression, start, end, today)
 
+    relative_years = (
+        ("지난해", -1),
+        ("작년", -1),
+        ("올해", 0),
+        ("금년", 0),
+        ("내년", 1),
+    )
+    for expression, offset in relative_years:
+        if expression in normalized_query:
+            start, end = _bounds_for_year(today.year + offset)
+            return _temporal_context(expression, start, end, today)
+
     return None
 
 

@@ -56,6 +56,9 @@ _ALLOWED_SOURCES = {"local_chat", "chat_monitoring_trace", "system"}
 _RESULT_COUNT_KINDS = {"document", "row", "source"}
 _REMOTE_TURN_TRACE_LIMIT = 8
 _REMOTE_TURN_TRACE_BYTES = 48 * 1024
+_CASE_DIAGNOSTIC_PRIOR_TURN_LIMIT = 8
+_CASE_DIAGNOSTIC_RETRIEVAL_LIMIT = 20
+_CASE_DIAGNOSTIC_EVIDENCE_LIMIT = 20
 _REMOTE_FILTER_BYTES = 2 * 1024
 _REMOTE_FILTER_KEYS = {
     "broker",
@@ -73,6 +76,11 @@ _REMOTE_FILTER_KEYS = {
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$")
 _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_DIAGNOSTIC_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+-]{0,127}$")
+_UNSAFE_DIAGNOSTIC_FILE_RE = re.compile(
+    r"(?i)(?:^|[\\/])[^\\/]+\.(?:db|sqlite|sqlite3|faiss|zip|tar|tgz|gz|7z|rar)$"
+)
+_BASE64_BINARY_RE = re.compile(r"^(?:[A-Za-z0-9+/]{4}){32,}={0,2}$")
 _OUTBOUND_REDACTIONS = (
     (
         "credential",
@@ -402,13 +410,35 @@ def build_remote_report(
         else None
     )
 
+    diagnostic_consent = explicitly_allowed("include_previous_turns")
+    case_diagnostics = (
+        _build_case_diagnostics(
+            context=context,
+            trace=trace,
+            selected_metadata=selected_metadata,
+            include_prior_turns=True,
+            removed_fields=removed_fields,
+        )
+        if diagnostic_consent and question is not None
+        else None
+    )
+    if case_diagnostics is None:
+        removed_fields.add("case_diagnostics")
+    normalized_release_version = app_version.removeprefix("v")
+    reported_release_id = (
+        f"release-v{normalized_release_version}"
+        if normalized_release_version != "unknown"
+        else "release-unknown"
+    )
+
     remote = {
-        "schema_version": 2,
-        "report_contract_version": 2,
+        "schema_version": 3,
+        "report_contract_version": 3,
         "kind": kind,
         "report_target_type": target_type,
         "source": source,
         "app_version": app_version,
+        "reported_release_id": reported_release_id,
         "category": category,
         "comment": comment,
         "consent": {
@@ -416,7 +446,7 @@ def build_remote_report(
             "include_comment": bool(comment),
             "include_selected_question": question is not None,
             "include_selected_answer": answer is not None,
-            "include_previous_turns": bool(turn_trace),
+            "include_previous_turns": bool(turn_trace) or case_diagnostics is not None,
         },
         "observed": {
             "route": route,
@@ -446,6 +476,8 @@ def build_remote_report(
             "removed_fields": sorted(removed_fields)[:16],
         },
     }
+    if case_diagnostics is not None:
+        remote["case_diagnostics"] = case_diagnostics
     serialized = json.dumps(
         remote,
         ensure_ascii=False,
@@ -1059,6 +1091,253 @@ def _remote_debug_hints(
         hints.append(hint)
         total += len(encoded)
     return hints
+
+
+def _build_case_diagnostics(
+    *,
+    context: Mapping[str, Any],
+    trace: Mapping[str, Any],
+    selected_metadata: Mapping[str, Any],
+    include_prior_turns: bool,
+    removed_fields: set[str],
+) -> dict[str, Any] | None:
+    truncated = False
+    prior_turns: list[dict[str, str]] = []
+    raw_messages = context.get("conversation_messages") or context.get(
+        "recent_messages"
+    )
+    if include_prior_turns and isinstance(raw_messages, list):
+        user_messages: list[Mapping[str, Any]] = []
+        for raw_message in raw_messages:
+            if not isinstance(raw_message, Mapping):
+                truncated = True
+                continue
+            role = str(raw_message.get("role") or "").lower()
+            if role == "assistant":
+                continue
+            if role != "user":
+                truncated = True
+                continue
+            user_messages.append(raw_message)
+
+        if len(user_messages) > _CASE_DIAGNOSTIC_PRIOR_TURN_LIMIT:
+            truncated = True
+        for raw_message in user_messages[-_CASE_DIAGNOSTIC_PRIOR_TURN_LIMIT:]:
+            content = _redact_and_bound(
+                raw_message.get("content"),
+                maximum=4096,
+                field="case_diagnostics.prior_turns.content",
+                removed_fields=removed_fields,
+            )
+            if not content:
+                truncated = True
+                continue
+            prior_turns.append({"role": "user", "content": content})
+
+    route_observations: list[dict[str, Any]] = []
+    query_rewrite = _mapping(trace.get("query_rewrite"))
+    routing = _mapping(trace.get("routing"))
+    scope = _mapping(trace.get("scope"))
+    rewritten_query = _safe_diagnostic_text(
+        query_rewrite.get("rewritten_query") or trace.get("rewritten_query"),
+        maximum=2048,
+        removed_fields=removed_fields,
+        field="case_diagnostics.route_observations.rewritten_query",
+    )
+    selected_route = _safe_diagnostic_token(
+        routing.get("route") or selected_metadata.get("route")
+    )
+    filters, filters_truncated = _case_diagnostic_filters(
+        scope.get("search_filters") or selected_metadata.get("search_filters"),
+        removed_fields=removed_fields,
+    )
+    fallback_reason = _safe_diagnostic_text(
+        routing.get("fallback_reason"),
+        maximum=512,
+        removed_fields=removed_fields,
+        field="case_diagnostics.route_observations.fallback_reason",
+    )
+    truncated = truncated or filters_truncated
+    if rewritten_query or selected_route or filters or fallback_reason:
+        route_observations.append(
+            {
+                "rewritten_query": rewritten_query,
+                "selected_route": selected_route,
+                "filters": filters,
+                "fallback_reason": fallback_reason,
+            }
+        )
+
+    raw_sources = trace.get("sources") or selected_metadata.get(
+        "selected_sources"
+    )
+    retrieval_observations: list[dict[str, Any]] = []
+    evidence_refs: list[str] = []
+    if isinstance(raw_sources, list):
+        if len(raw_sources) > _CASE_DIAGNOSTIC_RETRIEVAL_LIMIT:
+            truncated = True
+        for position, raw_source in enumerate(raw_sources, 1):
+            if len(retrieval_observations) >= _CASE_DIAGNOSTIC_RETRIEVAL_LIMIT:
+                break
+            if not isinstance(raw_source, Mapping):
+                truncated = True
+                continue
+            source_uid = _safe_diagnostic_token(
+                raw_source.get("source_uid") or raw_source.get("report_uid")
+            )
+            source_sha256 = _safe_sha256(raw_source.get("source_sha256"))
+            rank = _positive_integer(raw_source.get("rank")) or position
+            role = str(raw_source.get("role") or "OBSERVED_RESULT").upper()
+            if role not in {"OBSERVED_RESULT", "CONTEXT_USED", "CITED"}:
+                role = "OBSERVED_RESULT"
+                truncated = True
+            if source_uid is None or source_sha256 is None:
+                truncated = True
+                continue
+            observation: dict[str, Any] = {
+                "role": role,
+                "source_uid": source_uid,
+                "source_sha256": source_sha256,
+                "rank": rank,
+            }
+            chunk_uid = _safe_diagnostic_token(raw_source.get("chunk_uid"))
+            chunk_sha256 = _safe_sha256(raw_source.get("chunk_sha256"))
+            if chunk_uid is not None or chunk_sha256 is not None:
+                if chunk_uid is None or chunk_sha256 is None:
+                    truncated = True
+                else:
+                    observation["chunk_uid"] = chunk_uid
+                    observation["chunk_sha256"] = chunk_sha256
+            retrieval_observations.append(observation)
+            locator = _safe_diagnostic_text(
+                raw_source.get("locator"),
+                maximum=256,
+                removed_fields=removed_fields,
+                field="case_diagnostics.evidence_refs",
+            )
+            evidence_ref = f"{source_uid}#{locator}" if locator else source_uid
+            if (
+                evidence_ref not in evidence_refs
+                and len(evidence_refs) < _CASE_DIAGNOSTIC_EVIDENCE_LIMIT
+            ):
+                evidence_refs.append(evidence_ref)
+
+    if not prior_turns and not route_observations and not retrieval_observations:
+        return None
+    return {
+        "schema_version": 1,
+        "truncated": truncated,
+        "prior_turns": prior_turns,
+        "route_observations": route_observations,
+        "retrieval_observations": retrieval_observations,
+        "evidence_refs": evidence_refs,
+    }
+
+
+def _safe_sha256(value: Any) -> str | None:
+    text = str(value or "")
+    return text if _SHA256_RE.fullmatch(text) is not None else None
+
+
+def _positive_integer(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return min(value, 1_000_000)
+
+
+def _safe_diagnostic_token(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if (
+        not text
+        or _DIAGNOSTIC_TOKEN_RE.fullmatch(text) is None
+        or artifact_io.contains_sensitive_identifier_pattern(text)
+        or _UNSAFE_DIAGNOSTIC_FILE_RE.search(text) is not None
+        or _BASE64_BINARY_RE.fullmatch(text) is not None
+    ):
+        return None
+    return text
+
+
+def _safe_diagnostic_text(
+    value: Any,
+    *,
+    maximum: int,
+    removed_fields: set[str],
+    field: str,
+) -> str | None:
+    if value is None:
+        return None
+    raw = str(value)
+    if (
+        artifact_io.contains_sensitive_identifier_pattern(raw)
+        or _UNSAFE_DIAGNOSTIC_FILE_RE.search(raw) is not None
+        or _BASE64_BINARY_RE.fullmatch(raw.strip()) is not None
+        or raw.strip().lower().startswith("data:")
+    ):
+        removed_fields.add(field)
+        return None
+    text = _redact_and_bound(
+        raw,
+        maximum=maximum,
+        field=field,
+        removed_fields=removed_fields,
+    )
+    return text or None
+
+
+def _case_diagnostic_filters(
+    value: Any,
+    *,
+    removed_fields: set[str],
+) -> tuple[dict[str, Any], bool]:
+    if not isinstance(value, Mapping):
+        return {}, False
+    result: dict[str, Any] = {}
+    truncated = len(value) > 16
+    for raw_key in sorted(value, key=str)[:16]:
+        key = str(raw_key)
+        if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) is None:
+            truncated = True
+            continue
+        raw_item = value[raw_key]
+        if raw_item is None or isinstance(raw_item, (bool, int, float)):
+            item: Any = raw_item
+        elif isinstance(raw_item, str):
+            item = _safe_diagnostic_text(
+                raw_item,
+                maximum=256,
+                removed_fields=removed_fields,
+                field="case_diagnostics.route_observations.filters",
+            )
+            if item is None:
+                truncated = True
+                continue
+        elif isinstance(raw_item, (list, tuple)):
+            if len(raw_item) > 8:
+                truncated = True
+            items: list[Any] = []
+            for value_item in list(raw_item)[:8]:
+                if value_item is None or isinstance(value_item, (bool, int, float)):
+                    items.append(value_item)
+                elif isinstance(value_item, str):
+                    safe = _safe_diagnostic_text(
+                        value_item,
+                        maximum=256,
+                        removed_fields=removed_fields,
+                        field="case_diagnostics.route_observations.filters",
+                    )
+                    if safe is not None:
+                        items.append(safe)
+                    else:
+                        truncated = True
+                else:
+                    truncated = True
+            item = items
+        else:
+            truncated = True
+            continue
+        result[key] = item
+    return result, truncated
 
 
 def _compact_remote_turn_trace(

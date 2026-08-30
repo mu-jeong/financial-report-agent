@@ -25,6 +25,10 @@ DEFAULT_ISSUE_REPORT_INGEST_URL = (
 DEFAULT_ISSUE_REPORT_PUBLISHABLE_KEY = (
     "sb_publishable_O5bQ-b9VvY1fcwDz0IQlPg_prsFM87B"
 )
+DEFAULT_MONITORING_SUPABASE_URL = "https://rjjnhvoontxpimhiabou.supabase.co"
+DEFAULT_MONITORING_OPERATOR_API_URL = (
+    f"{DEFAULT_MONITORING_SUPABASE_URL}/functions/v1/issue-report-operator"
+)
 
 
 def _default_save_dir() -> str:
@@ -45,6 +49,10 @@ def _default_conversation_db_path() -> str:
 
 def _default_company_industry_data_path() -> str:
     return ""
+
+
+def _default_monitoring_artifact_root() -> str:
+    return str(Path(_default_data_root()) / "monitoring")
 
 
 def _default_log_file() -> str:
@@ -537,8 +545,73 @@ CONFIG_SPECS: "OrderedDict[str, ConfigSpec]" = OrderedDict(
                 name="MONITORING_MODE",
                 default=False,
                 parser=as_bool,
-                description="Enable the Streamlit Monitoring Mode UI for performance metric review.",
+                description=(
+                    "Enable local Chat diagnostics and improvement experiments. "
+                    "The production operator UI also requires every setting below."
+                ),
                 section="Monitoring",
+            ),
+        ),
+        (
+            "DEPLOYMENT_ENVIRONMENT",
+            ConfigSpec(
+                name="DEPLOYMENT_ENVIRONMENT",
+                default="development",
+                parser=as_lower_str,
+                description=(
+                    "Deployment boundary for production-only Monitoring access. "
+                    "Use production only on the operator deployment."
+                ),
+                section="Monitoring",
+            ),
+        ),
+        (
+            "MONITORING_SUPABASE_URL",
+            ConfigSpec(
+                name="MONITORING_SUPABASE_URL",
+                default=DEFAULT_MONITORING_SUPABASE_URL,
+                parser=as_optional_str,
+                description=(
+                    "Public Supabase project URL used for operator email/password Auth."
+                ),
+                section="Monitoring",
+            ),
+        ),
+        (
+            "MONITORING_SUPABASE_PUBLISHABLE_KEY",
+            ConfigSpec(
+                name="MONITORING_SUPABASE_PUBLISHABLE_KEY",
+                default=DEFAULT_ISSUE_REPORT_PUBLISHABLE_KEY,
+                parser=as_optional_str,
+                description=(
+                    "Public Supabase key for operator Auth and authenticated Edge Function calls."
+                ),
+                section="Monitoring",
+            ),
+        ),
+        (
+            "MONITORING_OPERATOR_API_URL",
+            ConfigSpec(
+                name="MONITORING_OPERATOR_API_URL",
+                default=DEFAULT_MONITORING_OPERATOR_API_URL,
+                parser=as_optional_str,
+                description=(
+                    "Authenticated production Edge Function URL for the Monitoring operator API."
+                ),
+                section="Monitoring",
+            ),
+        ),
+        (
+            "MONITORING_ARTIFACT_ROOT",
+            ConfigSpec(
+                name="MONITORING_ARTIFACT_ROOT",
+                default=_default_monitoring_artifact_root,
+                parser=as_str,
+                description=(
+                    "Managed local root for immutable release, FixedSnapshot, Run, and registry artifacts."
+                ),
+                section="Monitoring",
+                env_example="",
             ),
         ),
         (

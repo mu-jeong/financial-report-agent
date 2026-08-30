@@ -232,6 +232,13 @@ def _render_parsing_engine_evaluation() -> None:
         st.caption("No row data.")
 
 
+def render_improvement_experiments_page() -> None:
+    """Render the currently available product-improvement experiments."""
+    st.header("개선 실험")
+    st.caption("현재는 동일한 PDF의 파싱 엔진별 추출 품질 비교만 제공합니다.")
+    _render_parsing_engine_evaluation()
+
+
 def _all_thread_messages() -> list[dict]:
     threads = conversation_store.list_threads()
     return [
@@ -720,6 +727,7 @@ def _chat_technical_sections(detail: dict) -> dict:
     """Normalize partial or legacy trace detail before rendering raw sections."""
 
     dict_sections = (
+        "graph_manifest",
         "timing",
         "generation_performance",
         "execution",
@@ -742,7 +750,538 @@ def _chat_technical_sections(detail: dict) -> dict:
         if isinstance(detail.get("used_chunks"), list)
         else []
     )
+    sections["graph_schema_version"] = detail.get("graph_schema_version")
+    sections["node_runs"] = (
+        detail.get("node_runs") if isinstance(detail.get("node_runs"), list) else []
+    )
     return sections
+
+
+def _chat_monitoring_node_status_label(status: object) -> str:
+    return {
+        "completed": "완료",
+        "partial": "일부 완료",
+        "failed": "실패",
+        "running": "처리 중",
+        "no_results": "결과 없음",
+        "not_applicable": "해당 없음",
+        "not_measured": "측정 전",
+        "not_run": "실행 안 함",
+        "interrupted": "중단됨",
+    }.get(str(status or "not_measured"), "측정 전")
+
+
+def _chat_monitoring_node_button_label(node: dict) -> str:
+    icon = {
+        "completed": "✓",
+        "partial": "!",
+        "failed": "×",
+        "running": "…",
+        "no_results": "○",
+        "not_applicable": "–",
+        "not_measured": "·",
+        "not_run": "◇",
+        "interrupted": "∥",
+    }.get(str(node.get("status") or "not_measured"), "·")
+    duration = node.get("duration_seconds")
+    duration_label = (
+        f" · {_format_chat_duration(duration)}"
+        if isinstance(duration, (int, float))
+        else ""
+    )
+    return (
+        f"{icon} {node.get('label')} · "
+        f"{_chat_monitoring_node_status_label(node.get('status'))}{duration_label}"
+    )
+
+
+def _chat_monitoring_graph_dot(graph: dict) -> str:
+    """Build a safe DOT projection from a persisted graph snapshot."""
+
+    def quote(value: object) -> str:
+        return (
+            str(value or "")
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r", "")
+            .replace("\n", "\\n")
+        )
+
+    palette = {
+        "completed": ("#E6FFFA", "#2F855A"),
+        "partial": ("#FFFAF0", "#B7791F"),
+        "failed": ("#FFF5F5", "#C53030"),
+        "running": ("#EBF8FF", "#2B6CB0"),
+        "interrupted": ("#FAF5FF", "#805AD5"),
+        "not_run": ("#F7FAFC", "#A0AEC0"),
+        "not_measured": ("#F7FAFC", "#718096"),
+    }
+    icons = {
+        "completed": "✓",
+        "partial": "!",
+        "failed": "×",
+        "running": "…",
+        "interrupted": "∥",
+        "not_run": "◇",
+        "not_measured": "·",
+    }
+    lines = [
+        "digraph chat_monitoring {",
+        '  graph [rankdir="TB", bgcolor="transparent", ranksep="0.45", nodesep="0.24"];',
+        '  node [shape="box", style="rounded,filled", fontname="Arial", fontsize="10", margin="0.12,0.08"];',
+        '  edge [arrowsize="0.65", color="#A0AEC0"];',
+    ]
+    node_ids = set()
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or not node.get("id"):
+            continue
+        node_id = str(node["id"])
+        node_ids.add(node_id)
+        status = str(node.get("status") or "not_measured")
+        fill_color, border_color = palette.get(status, palette["not_measured"])
+        duration = node.get("duration_seconds")
+        duration_label = (
+            f"\\n{float(duration):.3f}s"
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+            else ""
+        )
+        label = f"{icons.get(status, '·')} {node.get('label') or node_id}{duration_label}"
+        shape = "ellipse" if node.get("kind") == "boundary" else "box"
+        lines.append(
+            f'  "{quote(node_id)}" [label="{quote(label)}", shape="{shape}", '
+            f'fillcolor="{fill_color}", color="{border_color}"];'
+        )
+    for edge in graph.get("edges") or []:
+        if not isinstance(edge, dict):
+            continue
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        if source not in node_ids or target not in node_ids:
+            continue
+        style = "dashed" if edge.get("conditional") else "solid"
+        lines.append(
+            f'  "{quote(source)}" -> "{quote(target)}" '
+            f'[style="{style}", color="#A0AEC0", penwidth="1.0"];'
+        )
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _render_chat_graph_connector(symbol: str) -> None:
+    st.markdown(
+        f"<div style='text-align:center; color:#718096; line-height:1.1'>{symbol}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_chat_monitoring_graph(
+    detail: dict,
+    *,
+    current_id: str,
+    selected_message_id: object,
+) -> tuple[str, dict]:
+    graph = monitoring.build_chat_monitoring_graph(detail)
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+    selection_key = (
+        f"_chat_monitoring_selected_node_{current_id}_{selected_message_id}"
+    )
+    valid_selections = {"overview", *node_by_id}
+    selected_node_id = st.session_state.get(selection_key, "overview")
+    if selected_node_id not in valid_selections:
+        selected_node_id = "overview"
+        st.session_state[selection_key] = selected_node_id
+
+    def render_node(node: dict) -> None:
+        nonlocal selected_node_id
+        if st.button(
+            _chat_monitoring_node_button_label(node),
+            key=f"chat_monitoring_node_{current_id}_{selected_message_id}_{node['id']}",
+            type="primary" if selected_node_id == node["id"] else "secondary",
+            help=node.get("summary"),
+            width="stretch",
+        ):
+            selected_node_id = node["id"]
+            st.session_state[selection_key] = selected_node_id
+
+    with st.container(border=True):
+        st.markdown("#### 실행 그래프")
+        is_persisted_graph = graph.get("source") == "persisted_manifest"
+        is_graph_error = graph.get("source") == "persisted_graph_error"
+        if is_persisted_graph:
+            revision = str(graph.get("revision") or "")
+            revision_label = revision[:12] if revision else "없음"
+            st.caption(
+                f"응답 저장 스냅샷 · schema v{graph.get('schema_version')} · "
+                f"topology {revision_label}"
+            )
+        elif is_graph_error:
+            st.error(
+                str(graph.get("error_message") or "실행 그래프를 표시할 수 없습니다.")
+            )
+            st.caption(
+                f"오류 코드: {graph.get('error_code')} · "
+                f"오류 유형: {graph.get('error_type') or '해당 없음'} · "
+                f"저장 schema: {graph.get('schema_version')}"
+            )
+        else:
+            st.caption(
+                "이전 응답용 6단계 호환 그래프입니다. 노드를 선택하면 우측에서 해당 단계만 확인합니다."
+            )
+        if st.button(
+            "전체 지표",
+            key=f"chat_monitoring_overview_{current_id}_{selected_message_id}",
+            type="primary" if selected_node_id == "overview" else "secondary",
+            width="stretch",
+        ):
+            selected_node_id = "overview"
+            st.session_state[selection_key] = selected_node_id
+
+        if is_persisted_graph:
+            graph_height = min(900, max(420, len(node_by_id) * 28))
+            st.graphviz_chart(
+                _chat_monitoring_graph_dot(graph),
+                width="stretch",
+                height=graph_height,
+            )
+            task_nodes = [
+                node
+                for node in graph.get("nodes") or []
+                if node.get("kind") != "boundary"
+            ]
+            executed_nodes = sorted(
+                (
+                    node
+                    for node in task_nodes
+                    if node.get("status") != "not_run"
+                ),
+                key=lambda node: (
+                    int(node.get("first_run_sequence") or 10**9),
+                    int(node.get("order") or 0),
+                ),
+            )
+            skipped_nodes = sorted(
+                (
+                    node
+                    for node in task_nodes
+                    if node.get("status") == "not_run"
+                ),
+                key=lambda node: int(node.get("order") or 0),
+            )
+            if executed_nodes:
+                st.markdown("**실행된 노드 선택**")
+                for node in executed_nodes:
+                    render_node(node)
+            if skipped_nodes:
+                with st.expander(
+                    f"실행되지 않은 조건부 분기 ({len(skipped_nodes)})",
+                    expanded=False,
+                ):
+                    for node in skipped_nodes:
+                        render_node(node)
+            st.caption(
+                "실선은 일반 edge, 점선은 조건부 edge입니다. edge는 저장 topology이며 실제 통과 여부를 뜻하지 않습니다."
+            )
+        elif not is_graph_error:
+            _render_chat_graph_connector("↓")
+            render_node(node_by_id["input"])
+            _render_chat_graph_connector("↙　↘")
+            query_column, scope_column = st.columns(2, gap="small")
+            with query_column:
+                render_node(node_by_id["query_rewrite"])
+            with scope_column:
+                render_node(node_by_id["search_scope"])
+            _render_chat_graph_connector("↘　↙")
+            render_node(node_by_id["routing"])
+            _render_chat_graph_connector("↓")
+            render_node(node_by_id["retrieval"])
+            _render_chat_graph_connector("↓")
+            render_node(node_by_id["answer"])
+            st.caption(
+                "저장되지 않은 실제 LangGraph NodeRun과 노드별 시간은 추정하지 않습니다."
+            )
+    return selected_node_id, graph
+
+
+def _render_chat_monitoring_node_detail(
+    selected_node_id: str,
+    *,
+    detail: dict,
+    graph: dict,
+) -> None:
+    node = next(
+        (item for item in graph.get("nodes") or [] if item.get("id") == selected_node_id),
+        None,
+    )
+    if not node:
+        st.warning("선택한 실행 단계를 찾을 수 없습니다.")
+        return
+
+    st.subheader(str(node.get("label") or "실행 단계"))
+    status_column, timing_column = st.columns(2)
+    status_column.metric(
+        "단계 상태",
+        _chat_monitoring_node_status_label(node.get("status")),
+    )
+    timing_column.metric(
+        "노드 실행 구간",
+        _format_chat_duration(node.get("duration_seconds")),
+    )
+    st.caption(str(node.get("summary") or "저장된 요약이 없습니다."))
+    status = node.get("status")
+    if status == "failed":
+        st.error("이 단계가 실패한 것으로 기록되었습니다.")
+    elif status in {"partial", "no_results"}:
+        st.warning("이 단계는 일부 결과만 남았거나 검색 결과가 없습니다.")
+    elif status == "not_measured":
+        st.info("이 응답에는 이 단계의 상태 또는 시간이 저장되지 않았습니다.")
+    elif status == "not_run":
+        st.info("이 응답에서는 이 조건부 분기를 실행하지 않았습니다.")
+
+    mapped_detail_section = node.get("detail_section")
+    detail_section = mapped_detail_section or selected_node_id
+    if graph.get("source") == "persisted_manifest":
+        runs = node.get("runs") or []
+        incoming = [
+            edge
+            for edge in graph.get("edges") or []
+            if edge.get("target") == selected_node_id
+        ]
+        outgoing = [
+            edge
+            for edge in graph.get("edges") or []
+            if edge.get("source") == selected_node_id
+        ]
+        topology_columns = st.columns(3)
+        topology_columns[0].metric("실행 횟수", len(runs))
+        topology_columns[1].metric("들어오는 edge", len(incoming))
+        topology_columns[2].metric("나가는 edge", len(outgoing))
+        total_work_seconds = node.get("total_work_seconds")
+        if len(runs) > 1 and isinstance(total_work_seconds, (int, float)):
+            st.caption(
+                "병렬 실행을 포함한 개별 invocation 시간 합계: "
+                f"{_format_chat_duration(total_work_seconds)}"
+            )
+        if runs:
+            st.markdown("**저장된 NodeRun**")
+            st.dataframe(
+                [
+                    {
+                        "순서": run.get("sequence"),
+                        "실행 회차": run.get(
+                            "invocation_index", run.get("attempt")
+                        ),
+                        "상태": _chat_monitoring_node_status_label(
+                            run.get("status")
+                        ),
+                        "시간": _format_chat_duration(
+                            run.get("duration_seconds")
+                        ),
+                        "결과 key": ", ".join(run.get("result_keys") or []),
+                    }
+                    for run in runs
+                ],
+                width="stretch",
+                hide_index=True,
+            )
+        with st.expander("저장된 topology", expanded=False):
+            st.json(
+                {
+                    "node": {
+                        key: value
+                        for key, value in node.items()
+                        if key not in {"runs"}
+                    },
+                    "incoming_edges": incoming,
+                    "outgoing_edges": outgoing,
+                }
+            )
+        if not mapped_detail_section:
+            return
+
+    transitions = detail.get("state_transitions") or {}
+    if detail_section == "input":
+        input_detail = transitions.get("input") or {}
+        st.markdown("**입력 질문**")
+        st.write(
+            (detail.get("query_rewrite") or {}).get("original_question")
+            or input_detail.get("question")
+            or "측정 전"
+        )
+        prior_scope = input_detail.get("prior_search_scope")
+        if prior_scope:
+            with st.expander("이전 대화에서 이어진 검색 범위", expanded=False):
+                st.json(prior_scope)
+    elif detail_section == "query_rewrite":
+        query_rewrite = detail.get("query_rewrite") or {}
+        st.markdown("**원문 질문**")
+        st.write(query_rewrite.get("original_question") or "측정 전")
+        st.markdown("**재작성 결과**")
+        st.write(query_rewrite.get("rewritten_query") or "측정 전")
+        history_column, followup_column = st.columns(2)
+        history_column.metric(
+            "대화 이력 사용",
+            "예" if query_rewrite.get("uses_chat_history") is True else "아니오"
+            if query_rewrite.get("uses_chat_history") is False
+            else "측정 전",
+        )
+        followup_column.metric(
+            "이전 범위 이어쓰기",
+            "예" if query_rewrite.get("followup_scope_intent") is True else "아니오"
+            if query_rewrite.get("followup_scope_intent") is False
+            else "측정 전",
+        )
+        with st.expander("저장된 질문 재작성 정보", expanded=False):
+            st.json(query_rewrite)
+            st.json(transitions.get("after_query_rewrite") or {})
+    elif detail_section == "search_scope":
+        scope = detail.get("scope") or {}
+        after_scope = transitions.get("after_search_scope") or {}
+        scope_column, file_column = st.columns(2)
+        scope_column.metric(
+            "범위 출처",
+            (detail.get("query_rewrite") or {}).get("scope_source") or "측정 전",
+        )
+        file_column.metric(
+            "검색 파일",
+            after_scope.get("search_scope_file_count")
+            if after_scope.get("search_scope_file_count") is not None
+            else "측정 전",
+        )
+        st.markdown("**적용 검색 조건**")
+        search_filters = scope.get("search_filters") or {}
+        if search_filters:
+            st.json(search_filters)
+        else:
+            st.caption("저장된 검색 조건이 없습니다.")
+        with st.expander("검색 범위 세부정보", expanded=False):
+            st.json(scope)
+            st.json(after_scope)
+    elif detail_section == "routing":
+        routing = detail.get("routing") or {}
+        route_column, hint_column = st.columns(2)
+        route_column.metric("선택 경로", routing.get("route") or "측정 전")
+        hint_column.metric("경로 힌트", routing.get("route_hint") or "측정 전")
+        with st.expander("저장된 라우팅 정보", expanded=True):
+            st.json(routing)
+            st.json(transitions.get("after_routing") or {})
+    elif detail_section == "retrieval":
+        retrieval = detail.get("retrieval") or {}
+        retrieval_k = detail.get("retrieval_k") or {}
+        execution = detail.get("execution") or {}
+        metric_columns = st.columns(3)
+        metric_columns[0].metric(
+            "필터 후 후보",
+            retrieval.get("candidate_count_after_filter")
+            if retrieval.get("candidate_count_after_filter") is not None
+            else "측정 전",
+        )
+        metric_columns[1].metric(
+            "최종 context",
+            retrieval_k.get("context_count")
+            if retrieval_k.get("context_count") is not None
+            else "측정 전",
+        )
+        metric_columns[2].metric(
+            "검색 실행",
+            _chat_execution_label(execution, (detail.get("routing") or {}).get("route")),
+        )
+        branches = execution.get("branches") or []
+        if branches:
+            st.markdown("**대상별 검색**")
+            st.dataframe(branches, width="stretch", hide_index=True)
+        documents = detail.get("used_documents") or detail.get("rdb_evidence") or []
+        if documents:
+            st.markdown("**답변에 전달된 문서**")
+            st.dataframe(documents, width="stretch", hide_index=True)
+        else:
+            st.caption("이 단계에 연결된 문서 근거가 없습니다.")
+        with st.expander("검색 기술 세부정보", expanded=False):
+            st.json(retrieval_k)
+            st.json(execution)
+            st.json(retrieval)
+            if detail.get("used_chunks"):
+                st.dataframe(
+                    detail["used_chunks"],
+                    width="stretch",
+                    hide_index=True,
+                )
+    elif detail_section == "answer":
+        generation = detail.get("generation_performance") or {}
+        answer = detail.get("answer") or {}
+        grounding = detail.get("grounding") or {}
+        metric_columns = st.columns(4)
+        metric_columns[0].metric(
+            "입력 토큰",
+            _format_chat_token_count(generation.get("input_tokens")),
+        )
+        metric_columns[1].metric(
+            "출력 토큰",
+            _format_chat_token_count(generation.get("output_tokens")),
+        )
+        metric_columns[2].metric(
+            "최초 토큰",
+            _format_chat_duration(generation.get("time_to_first_token_seconds")),
+        )
+        metric_columns[3].metric(
+            "실제 provider",
+            generation.get("provider_name") or "측정 전",
+        )
+        st.markdown("**답변 요약**")
+        st.write(answer.get("assistant_preview") or "측정 전")
+        grounding_column, source_column = st.columns(2)
+        grounding_column.metric(
+            "인용 연결",
+            _chat_grounding_label(grounding.get("status")),
+        )
+        source_column.metric(
+            "사용 문서",
+            answer.get("source_count")
+            if answer.get("source_count") is not None
+            else "측정 전",
+        )
+        with st.expander("답변 생성 세부정보", expanded=False):
+            st.json(generation)
+            st.json(answer)
+            st.json(grounding)
+
+
+def _render_chat_monitoring_workspace(
+    detail: dict,
+    *,
+    trace_summary: dict,
+    diff: dict,
+    hints: list[str],
+    current_id: str,
+    selected_message_id: object,
+) -> None:
+    graph_column, detail_column = st.columns(
+        [0.34, 0.66],
+        gap="large",
+        vertical_alignment="top",
+    )
+    with graph_column:
+        selected_node_id, graph = _render_chat_monitoring_graph(
+            detail,
+            current_id=current_id,
+            selected_message_id=selected_message_id,
+        )
+    with detail_column:
+        if selected_node_id == "overview":
+            st.subheader("전체 지표")
+            _render_chat_answer_performance(
+                detail,
+                trace_summary=trace_summary,
+                diff=diff,
+                hints=hints,
+                current_id=current_id,
+                selected_message_id=selected_message_id,
+            )
+        else:
+            _render_chat_monitoring_node_detail(
+                selected_node_id,
+                detail=detail,
+                graph=graph,
+            )
 
 
 def _render_chat_answer_performance(
@@ -992,6 +1531,17 @@ def _render_chat_answer_performance(
         st.markdown("**state 처리 흐름**")
         st.json(technical["state_status"])
         st.json(technical["state_transitions"])
+        if technical["graph_manifest"]:
+            st.markdown(
+                f"**실행 그래프 스냅샷 · schema v{technical['graph_schema_version']}**"
+            )
+            st.json(technical["graph_manifest"])
+            if technical["node_runs"]:
+                st.dataframe(
+                    technical["node_runs"],
+                    width="stretch",
+                    hide_index=True,
+                )
         st.caption("청크 본문은 저장하지 않고 안정적 ID·순위·점수만 표시합니다.")
 
 
@@ -999,7 +1549,7 @@ def _render_global_chat_diagnostics(
     current_id: str,
     messages: list[dict],
     *,
-    performance_first: bool = False,
+    interactive_graph: bool = False,
 ) -> None:
     rows = monitoring.build_message_monitoring_rows(messages)
     if rows:
@@ -1017,7 +1567,7 @@ def _render_global_chat_diagnostics(
             "not_evaluated": "평가하지 않음",
             "not_measured": "측정 전",
         }
-        if performance_first:
+        if interactive_graph:
             table_rows = [
                 {
                     "발생 시각": row.get("created_at"),
@@ -1119,8 +1669,8 @@ def _render_global_chat_diagnostics(
         diff=diff,
         hints=hints,
     )
-    if performance_first:
-        _render_chat_answer_performance(
+    if interactive_graph:
+        _render_chat_monitoring_workspace(
             detail,
             trace_summary=trace_summary,
             diff=diff,
@@ -1233,20 +1783,20 @@ def _render_chat_latency_table(messages: list[dict]) -> None:
 
 def render_chat_monitoring_page(current_id: str, current_thread: dict) -> None:
     """Render current-thread Native V2 timing and turn evidence."""
-    st.header("답변 모니터링")
+    st.header("개별 Chat Monitoring")
     st.caption(
-        f"현재 대화: {current_thread['name']} · 선택한 답변의 속도·검색 실행·근거를 우선 표시합니다."
+        f"현재 대화: {current_thread['name']} · 응답별 실행 흐름과 저장된 모니터링 근거를 확인합니다."
     )
     messages = conversation_store.list_messages(current_id)
-    st.markdown("#### 답변별 성능과 근거")
+    st.markdown("#### 응답별 실행 그래프와 근거")
     st.caption(
-        "응답을 선택하면 총시간, 실제 검색 실행 방식, 대상별 검색 성공, "
-        "답변에 연결된 문서를 바로 확인할 수 있습니다."
+        "응답을 선택하면 좌측에 저장된 실행 단계를 표시합니다. 기본 화면은 전체 지표이며, "
+        "노드를 선택하면 우측이 해당 단계의 정보로 전환됩니다."
     )
     _render_global_chat_diagnostics(
         current_id,
         messages,
-        performance_first=True,
+        interactive_graph=True,
     )
 
     with st.expander("대화 전체 속도 추이", expanded=False):
@@ -1330,10 +1880,10 @@ def _resolve_global_monitoring_status(status: dict | None) -> dict:
 
 def render_global_monitoring_page(status: dict | None = None) -> None:
     """Render the V2-only speed/accuracy dashboard and problem tools."""
-    st.header("답변 모니터링")
+    st.header("로컬 응답 진단")
     st.caption(
-        "답변 속도와 정확도를 먼저 확인하고, 아래에서 운영 진단과 "
-        "성능 개선 실험을 나누어 선택합니다."
+        "Supabase 신고 작업함이 아니라 이 기기의 대화·데이터 상태를 봅니다. "
+        "답변 속도와 품질을 확인하고 성능 개선 실험을 나누어 선택합니다."
     )
 
     status = _resolve_global_monitoring_status(status)

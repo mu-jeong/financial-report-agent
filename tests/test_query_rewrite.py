@@ -60,6 +60,7 @@ def test_query_rewrite_detects_temporal_filter_followups_without_llm(monkeypatch
 
     assert query_rewrite.should_rewrite_with_history("6월에 발간된 내용만 정리해서 알려줘", RECENT_HISTORY)
     assert query_rewrite.should_rewrite_with_history("이번주 것만 알려줘", RECENT_HISTORY)
+    assert query_rewrite.should_rewrite_with_history("올해 것만 알려줘", RECENT_HISTORY)
 
 
 def test_query_rewrite_marks_prior_scope_followups_without_history():
@@ -89,6 +90,7 @@ def test_history_decision_detects_prior_scope_followups_without_llm(monkeypatch)
 def test_query_rewrite_topic_detection_ignores_generic_date_filter_terms():
     assert not query_rewrite.has_explicit_search_topic("6월에 발간된 내용만 정리해서 알려줘")
     assert not query_rewrite.has_explicit_search_topic("6월 리포트 목록 알려줘")
+    assert not query_rewrite.has_explicit_search_topic("올해 리포트 목록 알려줘")
     assert query_rewrite.has_explicit_search_topic("6월에 발간된 2차전지와 관련된 내용 알려줘")
     assert query_rewrite.has_explicit_search_topic("이번주 삼성전자 리포트 알려줘")
 

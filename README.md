@@ -1,6 +1,6 @@
 ﻿# Finance Report Agent
 
-> Version: `0.6.1`
+> Version: `0.6.1.1`
 
 Finance Report Agent는 여러 증권사의 기업·산업·경제 리포트를 한곳에 모아 자연어로 검색하고 분석하는 로컬 리서치 도구입니다. 원하는 기간과 기업, 산업, 증권사를 말로 지정하면 관련 리포트의 목록과 통계, 핵심 내용을 대화형 답변으로 확인할 수 있습니다.
 
@@ -294,15 +294,32 @@ python -m pytest -q
 
 ## Monitoring Mode
 
-Monitoring Mode는 전체 Native V2 운영 상태와 개별 대화 turn을 분리해 확인하는 개발자 화면입니다. 개별 답변 모니터링은 처리시간과 실제 답변 근거를 추적합니다. 일반 GUI에서는 숨기고 `.env`에서 명시적으로 켰을 때만 노출합니다. 구현 계약은 [`docs/MONITORING.md`](docs/MONITORING.md)에 정리되어 있습니다.
+`MONITORING_MODE=true`는 로컬 `개별 Chat Monitoring`과 `개선 실험`을 엽니다. 이 가운데 최상위 `Monitoring`은 한 명의 운영자가 사용자의 Supabase 신고를 받아 같은 질문·검색 자료·릴리스 조건으로 재현하고, 개선 후보와 비교한 뒤 이슈를 분류하는 production 전용 화면입니다. production 설정이 일부만 있거나 인증 경계가 준비되지 않으면 운영자 `Monitoring` 메뉴만 노출하지 않습니다.
+
+현재 구현의 저장 권위, 강제 gate, 권장 운영 순서, 알려진 제한은 [사용자 신고 기반 개선 루프](docs/IMPROVEMENT_LOOP.md)를 기준으로 합니다.
+
+운영 화면은 세 작업공간만 제공합니다.
+
+1. `작업함`: 신고 요약과 동의된 원문을 함께 봅니다. 신고를 선택하면 원문을 자동 조회하고 최초 표시를 audit event로 남기며 같은 로그인 session에서는 cache를 사용합니다.
+2. `재현 케이스`: Fixture 초안, self-contained FixedSnapshot, 자료 대응(Lineage)을 묶어 변경 불가 `case_contract_id`를 만듭니다.
+3. `버전 비교`: 신고 릴리스 Baseline과 개선 Candidate를 같은 Case로 필요할 때마다 실행하고, 답변·근거·검사·지연시간·runtime profile 차이를 보고 정성 판단을 저장합니다.
+
+속도와 품질은 모두 표시하지만 고정 실행 횟수, 절대 점수, 자동 통과 임계값은 두지 않습니다. 각 Run과 Comparison은 덮어쓰지 않으며, 재실행과 재판단은 새 이력으로 남습니다.
 
 ### 실행 방법
 
-Monitoring Mode UI는 `.env`에서 명시적으로 켰을 때만 Streamlit에 표시됩니다.
+로컬 Chat 진단과 개선 실험에는 `MONITORING_MODE=true`만 필요합니다. production 운영자 `Monitoring`에는 다음 값을 모두 설정해야 합니다. publishable key는 공개 클라이언트 키이며, service-role key·DB 비밀번호·refresh token은 앱에 저장하거나 입력하지 않습니다. `MONITORING_ARTIFACT_ROOT`는 릴리스 bundle, FixedSnapshot, Run artifact와 로컬 registry를 보존할 전용 절대 경로를 권장합니다.
 
 ```env
 MONITORING_MODE=true
+DEPLOYMENT_ENVIRONMENT=production
+MONITORING_SUPABASE_URL=https://<project-ref>.supabase.co
+MONITORING_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+MONITORING_OPERATOR_API_URL=https://<project-ref>.supabase.co/functions/v1/issue-report-operator
+MONITORING_ARTIFACT_ROOT=C:\finance-llm-monitoring
 ```
+
+operator Function URL은 같은 Supabase project origin의 정확한 `/functions/v1/issue-report-operator` 경로여야 합니다. 다른 host·port·경로 조합에는 access token을 보내지 않습니다.
 
 이후 평소처럼 GUI를 실행합니다.
 
@@ -310,29 +327,36 @@ MONITORING_MODE=true
 streamlit run apps/gui/app.py
 ```
 
-활성화되면 사이드바에 `Chat`과 `Monitoring`이 표시되고, `Chat`에는 `Chat / 답변 모니터링` 탭이 생깁니다. 개별 답변 모니터링은 선택한 turn의 총시간, 실제 검색 실행 방식, 요청 대상별 근거 확보, 인용 연결을 먼저 보여줍니다. 복수 기업 비교는 저장된 실측 동시성에 따라 `Send 병렬 실행 (동시성 N)` 또는 `Send 직렬 실행 (동시성 1)`로 표시하고 대상별 후보·검색·대기시간을 함께 보여줍니다. 사용 문서는 기본 화면에서 확인하고, 현재 대화 평균·RDB/Vector DB 평균은 접힌 속도 추이에서, 검색 k·compact state·prompt chunk는 `기술 세부정보`를 선택했을 때 확인합니다. 전체 Monitoring 기본 화면은 `응답 속도(P95)`와 correctness-only `답변 정확도`를 보여줍니다. 상세 화면은 상단의 `운영 모니터링`과 `성능 개선 실험`으로 나뉩니다. 운영 모니터링에는 현재 문제·전역 응답 trace·검색 자료 상태를, 성능 개선 실험에는 정확도 평가와 parsing 비교를 둡니다. 문제 신고는 Chat의 redaction·원격 outbox 경로에서만 제출하며 Monitoring에는 신고·회귀 후보 관리 화면이 없습니다. `MONITORING_MODE=false`이거나 설정이 없으면 일반 채팅 UI만 동작합니다.
+활성화되면 사이드바에 `Chat`, `Monitoring`, `개선 실험`이 표시됩니다. Chat 안에는 `Chat`과 `개별 Chat Monitoring` 두 탭만 있으며, 개별 Chat Monitoring은 선택한 응답에 저장된 versioned graph manifest와 NodeRun을 좌측 그래프로 보여주고 우측에서 전체 지표 또는 선택 노드의 세부정보를 확인하게 합니다. graph snapshot이 없는 기존 응답은 6단계 호환 그래프로 표시합니다. `개선 실험`은 Chat 내부에 중복 노출하지 않고 사이드바의 독립 메뉴에서만 열리며, 현재 동일한 PDF 표본의 파싱 엔진별 추출 품질 비교만 제공합니다. Monitoring에 들어가 Supabase Auth의 email/password로 로그인하면 access token만 현재 Streamlit session 메모리에 보관하며 refresh token은 폐기합니다. 로그아웃하거나 session이 끝나면 열람한 원문 기반 재현 seed도 함께 제거합니다.
+
+초기 운영자는 Supabase Dashboard에서 초대 또는 생성한 Auth 사용자 UUID를 `private.monitoring_admins`에 active 행으로 등록해야 합니다. 이 작업은 운영 DB 권한이 있는 배포 담당자가 migration 적용 후 한 번 수행하며, 앱 UI에서는 관리자 추가·권한 변경을 제공하지 않습니다.
+
+운영 프로젝트의 Supabase Auth에서는 공개 email 가입을 끄고 관리자 계정을 초대 방식으로만 만드세요. 설령 다른 Auth 사용자가 존재하더라도 Edge Function은 활성 `monitoring_admins` 행을 다시 확인해 접근을 거부합니다.
+
+```sql
+insert into private.monitoring_admins (user_id)
+values ('<auth.users.id>');
+```
+
+원격 적용 순서는 `supabase/migrations/`의 파일명 순서대로 migration 적용 → `issue-report-ingest`, `issue-report-operator` Function 배포 → admin 행 등록 → 비관리자 403, 관리자 목록 조회, 원문 열람 audit를 확인하는 순서입니다. hosted Supabase가 없으면 인증·원격 migration을 우회하지 않고 Monitoring은 비활성 상태로 둡니다.
 
 ### 테스트 방법
 
 ```bash
-python -m pytest tests/test_settings.py tests/test_monitoring.py tests/test_gui_view_contracts.py -q
+python -m pytest tests/monitoring_v8 tests/test_fixed_snapshot.py tests/test_release_assets.py tests/test_reproduction_runner.py tests/test_operator_monitoring_views.py tests/test_monitoring_admin_client.py tests/test_supabase_monitoring_operator.py tests/e2e -q
 python -m pytest -q
 ```
 
-### 화면 원칙
+### 자산과 라이프사이클 원칙
 
-- 속도는 assistant 응답 latency의 P95로 표시합니다.
-- 속도는 실제 Native V2 runtime provenance가 저장된 응답만 집계합니다.
-- 정확도는 snapshot/build/profile/generation과 hash가 검증된 Native V2 평가 run의 correctness 검사만 집계하며 latency는 제외합니다.
-- 평가 자료가 없으면 0%가 아니라 `측정 전`으로 표시합니다.
-- Native V2 상태가 없을 때 과거 지표로 우회하지 않습니다.
-- 스키마와 hash가 유효하지 않은 evaluation run은 활성 화면에서 제외합니다.
-- 개별 turn의 근거 연결 상태는 의미 정확도 점수가 아니며, 청크/PDF 본문이나 provider 원문 응답은 monitoring metadata에 복제하지 않습니다.
-
-### 용도별 상세 영역
-
-- 운영 모니터링: 현재 문제, 응답 원인 확인, 검색 자료 준비
-- 성능 개선 실험: 정확도 평가, 문서 읽기 품질 비교
+- Issue는 `OPEN`(미확인)에서 `IN_PROGRESS`(조치 중)로 진행하고, `RESOLVED`(해결됨) 또는 `NOT_ISSUE`(이슈 아님)로 종결합니다. 모든 상태 변경은 사유와 함께 event로 남기며, 기존 `CLOSED` 기록은 결과를 추정하지 않고 `종료(미분류)`로 표시해 재분류하거나 다시 열 수 있게 합니다. 새 `CLOSED` 전환은 허용하지 않으며 production 상태·감사 이력의 기준은 Supabase입니다. 로컬 registry는 재현 자산을 관리하되 같은 lifecycle 상태를 두 번째로 쓰지 않습니다.
+- Fixture와 Case는 `DRAFT → READY`이며 READY 내용은 수정하지 않고 새 revision으로 이어갑니다.
+- FixedSnapshot은 TEMP 검증을 통과한 READY만 등록합니다. 현재 base와 ready delta를 합친 실제 검색 범위를 투영하며 active DB/index로 fallback하지 않습니다.
+- Release의 의미상 identity는 README의 app version과 full Git commit이다. 두 값은 운영자가 입력하지 않고 clean Git 상태에서 자동으로 읽으며, STAGED cache도 worktree 복사가 아니라 해당 commit의 추적 파일에서 생성한다. `.env`, private key, VCS metadata는 cache에 포함하지 않는다. runtime profile은 Release에 넣지 않고 현재 비밀이 아닌 모델·검색 설정 17개를 Run queue 시점에 불변 입력으로 저장하며, API 키는 실행 process에만 전달한다. `v0.6.1`의 공식 commit은 `aac850769e97388884e49c0068ea97f691e06d9e`이고 원격에 없는 `v0.6.0`은 baseline으로 등록하지 않는다. runner는 cache의 app import를 현재 checkout과 격리하지만 현재 Python interpreter와 site-packages를 사용하므로 dependency-hermetic 실행은 아니다.
+- Run은 `QUEUED → RUNNING → terminal`이고 결과 artifact와 로컬 terminal record를 먼저 저장한 뒤 원격 terminal projection을 시도합니다. 이 마지막 원격 동기화가 실패해도 로컬 결과를 보존하고 경고하며, `QUEUED`·`RUNNING` 동기화 실패는 실행을 중단합니다. 프로세스 중단으로 미완료 Run이 남으면 새 실행을 차단하고 경고합니다. 운영자가 다른 Monitoring·runner 프로세스가 없음을 확인한 뒤에만 `INTERRUPTED · INVALID` artifact로 보존하며, Supabase 감사 기록에도 `QUEUED → RUNNING → INTERRUPTED` 상태를 각각 남깁니다. terminal Run과 Comparison은 변경하지 않습니다.
+- Git Release cache가 없으면 실행 전에 등록된 commit에서 자동 재생성한다. Git object가 없거나 cache가 손상·비호환이면 기존 기록을 덮어쓰지 않고 실행을 차단한다. FixedSnapshot bytes가 없거나 유효하지 않으면 현재 자료로 새 revision을 만들어 새 Case에 연결한다. 운영자 UI는 개별 자산의 수동 exact-bytes 복구를 제공하지 않는다.
+- Supabase에는 lifecycle ID·digest·파생 가용성·정성 분류만 동기화합니다. 질문·답변·EvidenceRef·runtime profile·로컬 경로와 Comparison의 반복 Run 목록은 로컬에만 둡니다. 운영자 UI/service는 원격과 로컬 projection이 일치하지 않으면 현재 새 Run·상태 전환 요청을 중단하지만, terminal Issue API와 projection 검사는 하나의 서버 transaction으로 묶여 있지 않습니다.
+- 신고 원문의 질문·답변·진단은 선택한 신고에서 자동 열람한 뒤 Fixture/Snapshot 제안에 필요한 최소 seed만 session 메모리에 두며, 전체 대화 DB·PDF·FAISS·로컬 절대 경로를 Supabase metadata에 복제하지 않습니다.
 
 ### TODO
 
@@ -345,7 +369,8 @@ python -m pytest -q
 - [ ] 미래에셋 이미지형 PDF 실패군에서 OpenRouter `mistral-ocr`와 `qwen/qwen3-vl-32b-instruct`를 동일한 페이지 표본으로 비교하고, 한글 CER·숫자 exact-match·표 cell F1·누락/환각률·페이지당 비용·latency를 기준으로 OCR fallback 채택 여부와 임계값을 결정합니다. 이후 실험을 통과한 OCR 경로를 PyMuPDF·OpenDataLoader 이후의 조건부 fallback으로 추가합니다.
 - [ ] 상세 parser 오류·시도 횟수와 fallback 사용 추이를 별도 진단 이력으로 관측할 수 있게 합니다.
 - [ ] parsing·chunking·retrieval·rerank·모델 변경의 품질, 답변 변화량, 비용/latency를 비교할 수 있는 관측 지표를 정리합니다.
-- [ ] 설정 변경이나 파이프라인 개선 전후를 비교할 수 있는 실험·평가 흐름을 마련합니다.
+- [x] 신고 릴리스 Baseline과 다른 Candidate 릴리스를 같은 `case_contract_id`로 반복 실행하고 정성 Comparison을 저장하는 release-scoped 비교 흐름을 마련합니다.
+- [ ] 여러 이슈를 묶는 versioned evaluation suite, 자동 품질 gate, promotion·canary·rollback 흐름을 마련합니다.
 - [x] Monitoring Mode가 일반 실행 경로에 영향을 주지 않는지 회귀 테스트로 보호합니다.
 - [x] Native V2를 V1 SQLite·FAISS·pickle 경로에서 분리하고 기본 설치의 `langchain-community` 의존성을 제거한 뒤, 일회성 마이그레이션 완료 시 남은 V1 artifacts를 삭제합니다.
 - [x] 복수 기업 질문을 retrieval-only LangGraph `Send` fan-out과 단일 fan-in·rerank·답변·전역 citation으로 처리합니다.

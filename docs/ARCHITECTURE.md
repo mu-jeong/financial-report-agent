@@ -81,6 +81,7 @@ LangGraph는 대략 다음 노드로 구성됩니다.
 6. VectorDB 결과가 없으면 해당 thread의 short-term memory 영향을 제거하고 원질문으로 한 번 더 검색합니다.
 7. Final response: 검색 결과와 참고 문서를 바탕으로 답변을 생성합니다.
    - GUI는 성공한 assistant 메시지 metadata에 `selected_sources`와 `search_scope`를 저장합니다. `search_scope`는 다음 후속 질문의 `prior_search_scope` 입력으로 전달됩니다.
+   - GUI 실행기는 compiled graph의 `get_graph(xray=True)` topology와 `tasks` stream을 함께 수집합니다. 완료 또는 제한시간 중단 후 `graph_schema_version`, `graph_manifest`, `node_runs`를 assistant monitoring metadata에 저장하며 node input/result 값은 저장하지 않습니다. NodeRun은 invocation 회차와 trace 기준 상대 시각을 포함하므로 병렬 실행의 wall-clock 구간과 개별 작업시간 합계를 구분할 수 있습니다.
    - `selected_sources`에는 답변에 사용된 source의 `report_type`도 포함되어 이후 `answer_scope_index` 구성과 monitoring의 섹션별 source 확인에 사용됩니다. `rerank_info`는 기존 대화 호환용 read fallback입니다.
    - GUI source renderer는 같은 PDF에서 검색된 여러 chunk를 `group_sources_by_document()`로 문서 단위로 묶고, `document_rank_aliases()`로 원래 chunk rank를 1부터 시작하는 문서 표시 번호로 다시 매깁니다.
 
@@ -124,6 +125,7 @@ RERANK_MODEL=cohere/rerank-v3.5
 - deprecated CLI는 기존 호환성을 위해 기본 thread를 계속 사용하지만 신규 기능 개발 대상이 아닙니다.
 - assistant 메시지는 참고 문서와 `selected_sources` 정보를 metadata로 함께 저장할 수 있습니다. 기존 `rerank_info`는 read fallback으로만 지원합니다.
 - GUI assistant 메시지는 성공 시 `search_scope` metadata를 추가로 저장합니다. 값에는 `route`, `search_filters`, `temporal_context`, `scope_source`, `file_names`, `answer_scope_index`가 포함될 수 있으며, 이후 같은 thread의 후속 질문에서 가장 최근 성공 답변의 scope를 재사용합니다.
+- GUI assistant 메시지는 실행 당시 graph topology revision과 노드별 상태·시간도 저장합니다. topology가 바뀐 뒤에도 과거 응답은 현재 graph를 참조하지 않고 자기 manifest를 사용합니다.
 
 ## 9. 문제 신고
 
@@ -135,17 +137,19 @@ GUI의 `신고` 버튼은 `src/core/issue_report_store.py`에서 메모리 paylo
 
 ### Chat Monitoring trace viewer
 
-개별 chat monitoring은 assistant 응답 row에서 확인할 턴을 선택하는 trace viewer를 제공합니다. 개별 Chat 화면의 row는 상태, 실제 검색 실행 방식, 총시간, 요청 대상별 근거, 인용 연결, 질문을 우선 표시합니다. 전역 Monitoring의 응답 원인 확인 화면은 기존 route, k, state 중심 row를 유지합니다.
+`개별 Chat Monitoring`은 assistant 응답 row에서 확인할 턴을 선택하는 trace viewer를 제공합니다. 개별 Chat 화면의 row는 상태, 실제 검색 실행 방식, 총시간, 요청 대상별 근거, 인용 연결, 질문을 우선 표시합니다. 응답을 선택하면 화면은 좌측 compact 실행 그래프와 우측 상세 패널로 나뉩니다. 전역 Monitoring의 응답 원인 확인 화면은 기존 route, k, state 중심 row를 유지합니다.
 
 개별 Chat에서 선택된 응답은 다음 정보 우선순위로 표시됩니다.
 
-1. Answer verdict: 총시간, 검색 실행 방식, 대상별 근거 확보, 인용 연결을 카드로 보여줍니다.
-2. Performance evidence: 실제 계측된 backend 또는 비교 branch 시간만 표로 보여줍니다. 병렬 branch의 가장 느린 검색과 작업시간 합은 서로 다른 값으로 유지합니다.
-3. Retrieval coverage: 복수 기업 비교라면 대상별 상태·후보 수·검색시간·대기시간과 전역 rerank/합성 횟수를 보여줍니다.
-4. Answer evidence: 최종 prompt에 사용된 문서를 대상·발간일·증권사·인용 chunk와 함께 보여줍니다.
-5. Technical details: `기본만 / 이전 응답 비교 / 기술 세부정보` selector에서 명시적으로 선택했을 때만 query rewrite, scope/routing, 검색 k, retrieval/answer/grounding 원자료, prompt chunk, state transitions를 렌더링합니다. 대화 전체 속도 추이도 기본 화면에서 접습니다.
+1. Execution graph: 좌측은 응답 metadata의 versioned graph manifest와 NodeRun을 데이터 기반으로 렌더링합니다. 실행 노드와 실행되지 않은 조건부 분기, 일반/조건부 topology edge를 구분하되 edge 통과 여부는 추정하지 않습니다. snapshot이 없는 기존 응답만 6단계 projection을 사용하며 손상되거나 미지원인 schema는 오류로 표시합니다. 기본 선택은 `전체 지표`이며 노드를 누르면 응답별 session state에 선택을 보존합니다.
+2. Answer verdict: 우측 전체 지표는 총시간, 검색 실행 방식, 대상별 근거 확보, 인용 연결을 카드로 보여줍니다.
+3. Performance evidence: 실제 계측된 backend 또는 비교 branch 시간만 표로 보여줍니다. 병렬 branch의 가장 느린 검색과 작업시간 합은 서로 다른 값으로 유지합니다.
+4. Retrieval coverage: 복수 기업 비교라면 대상별 상태·후보 수·검색시간·대기시간과 전역 rerank/합성 횟수를 보여줍니다.
+5. Answer evidence: 최종 prompt에 사용된 문서를 대상·발간일·증권사·인용 chunk와 함께 보여줍니다.
+6. Node detail: 좌측 단계 노드를 선택하면 우측은 해당 단계의 저장된 상태와 시간, 입력·출력 요약, 검색 근거를 보여줍니다.
+7. Technical details: `기본만 / 이전 응답 비교 / 기술 세부정보` selector에서 명시적으로 선택했을 때만 query rewrite, scope/routing, 검색 k, retrieval/answer/grounding 원자료, prompt chunk, state transitions를 렌더링합니다. 대화 전체 속도 추이도 기본 화면에서 접습니다.
 
-비교 실행 metadata에는 compact retrieval plan과 실제 `execution_mode`, 대상별 상태·후보 수·retrieval/queue 시간, 전역 rerank/합성 횟수를 저장합니다. 운영 그래프의 복수 기업 비교는 항상 LangGraph `Send`를 사용하며, 순차 경로는 동등성 검증용 내부 회귀 테스트로만 유지합니다. UI는 저장된 실행 mode와 실측 동시성을 함께 표시하고, 과거 응답은 실행 방식을 추정하지 않습니다. 또한 날짜 필터 손실, prior scope 미사용, no-result, route/content-intent 불일치, document coverage 미적용 같은 흔한 RAG 실패 패턴은 rule-based debug hint로 노출합니다.
+비교 실행 metadata에는 compact retrieval plan과 실제 `execution_mode`, 대상별 상태·후보 수·retrieval/queue 시간, 전역 rerank/합성 횟수를 저장합니다. 운영 그래프의 복수 기업 비교는 항상 LangGraph `Send`를 사용하며, 순차 경로는 동등성 검증용 내부 회귀 테스트로만 유지합니다. UI는 저장된 실행 mode와 실측 동시성을 함께 표시하고, 과거 응답은 실행 방식이나 현재 LangGraph의 개별 NodeRun을 추정하지 않습니다. 신규 응답의 좌측 그래프는 실행 당시 topology와 task event의 스냅샷이며 기존 응답에만 6개 compact 단계 fallback을 적용합니다. 또한 날짜 필터 손실, prior scope 미사용, no-result, route/content-intent 불일치, document coverage 미적용 같은 흔한 RAG 실패 패턴은 rule-based debug hint로 노출합니다.
 
 ## 10. 참고 문서 네비게이션과 PDF 위치 이동 한계
 

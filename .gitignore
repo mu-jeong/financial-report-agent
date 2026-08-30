@@ -61,6 +61,10 @@ Thumbs.db
 
 deliverables/
 
+# Generated document and presentation build artifacts
+/outputs/*/documents/
+/outputs/*/presentations/
+
 # Evaluation datasets and fixed snapshots are intentionally absent until the
 # source data is complete and the baseline is reviewed.
 tests/fixtures/

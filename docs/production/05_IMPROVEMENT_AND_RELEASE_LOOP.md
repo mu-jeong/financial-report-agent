@@ -2,27 +2,27 @@
 
 | 항목 | 값 |
 | --- | --- |
-| 상태 | 운영판 기획 초안 · 전체 과정 미완성 |
+| 상태 | 미래 운영판 목표 기획안 · promotion 이후 과정 미구현 |
 | 문서 버전 | 0.2.0 |
 | 기획 책임자 | 기획자 / 운영자 |
 | 기술 검토자 | 지정 필요 |
-| 최종 갱신일 | 2026-08-09 |
+| 최종 갱신일 | 2026-08-30 |
 
-> 아래 전체 과정은 별도로 개발할 운영판의 목표 흐름이다. 현재 PoC/MVP 저장소에 있는 로컬 신고·회귀 후보·평가 기능과 같지 않으며, 전체 과정이 구현되었다는 뜻이 아니다.
+> 현재 구현의 신고 접수, 운영자 lifecycle, Fixture·FixedSnapshot·Case, Baseline·Candidate Run, 정성 Comparison 계약은 [사용자 신고 기반 개선 루프](../IMPROVEMENT_LOOP.md)를 기준으로 한다. 아래 문서는 canary, qualification, PromotionRecord, installer 게시, 배포 후 rollback까지 확장하는 **미래 목표 흐름**이며, 그 전체 과정이 구현되었다는 뜻이 아니다.
 
 ## 1. 현재 상태
 
 | 구간 | 현재 PoC/MVP 상태 | 운영판 상태 |
 | --- | --- | --- |
-| 문제 신고 | 화면 입력, 최소정보 동의, retry-only SQLite outbox, 익명 원격 접수 hosted 검증 | 운영자 인증·처리 화면 미완료 |
-| 회귀 후보 관리 | 상태 전이, 기대 결과 승인, 재현 근거 확인, 평가 실행 계약 구현 | 운영판 자료 모델과 권한 경계 미승인 |
+| 문제 신고 | 화면 입력, 개별 동의·redaction preview, retry-only SQLite outbox, 원격 ingest가 현재 구현에 포함됨 | 일반 관측 event와 사용자 후속 알림 미완료 |
+| 운영자 처리·재현 | Supabase Auth/admin, Issue lifecycle, Fixture·FixedSnapshot·Case, Release Run, Comparison이 현재 구현에 포함됨 | hosted 최신 배포와 장기 운영 검증 필요 |
 | 기준 질문 평가 | 실행 코드와 시험은 있음 | 승인된 `tests/fixtures/evaluation_dataset.json` 파일이 없어 기획자 입력 필요 |
 | 다중 대화 평가 | 실행 코드와 시험은 있음 | 승인된 `tests/fixtures/multiturn_evaluation_dataset.json` 파일이 없어 기획자 입력 필요 |
-| 원격 관측·전송 | `issue-report-ingest` Edge Function·private DDL·입력 검증·hosted 권한 감사와 신고 outbox 구현 | 일반 관측 이벤트, 운영자 경계 미완료 |
+| 원격 관측·전송 | `issue-report-ingest`, `issue-report-operator`, private DDL, bounded control projection이 현재 구현에 포함됨 | 일반 관측 이벤트, 배포 manifest, 장기 soak 미완료 |
 | 시험 운영·배포 승인 | 일부 로컬 평가 도구만 있음 | 시험 운영, 승인 기록, 설치 파일 게시, 실제 설치 확인 미구현 |
 | 복구·보존·삭제 | 로컬 검색 자료 복구 기능 일부 존재 | 운영판 배포 복구, 원격 보존·삭제 절차 미구현 |
 
-현재 코드는 로컬 개선 과정의 일부 계약과 익명 이슈 접수의 서버/클라이언트 1단계 계약을 검증하며 hosted 운영 근거도 확보했다. 운영자 처리 경계와 승인된 질문·기대 결과가 아직 없으므로 **닫힌 운영판 개선 과정이 완성된 것으로 판단하지 않는다.**
+현재 구현에는 한 이슈를 재현하고 릴리스별 결과를 비교해 분류하는 기본 루프가 있다. 그러나 automatic qualification, canary, package publication, 실제 설치 확인, post-promotion rollback은 없으므로 이 문서가 정의하는 **전체 배포 개선 과정이 완성된 것으로 판단하지 않는다.**
 
 ## 2. 기획자가 채우거나 승인해야 할 내용
 

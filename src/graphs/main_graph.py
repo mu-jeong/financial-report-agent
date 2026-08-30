@@ -375,7 +375,7 @@ def build_graph():
     workflow.add_edge("final_response_node", END)
 
     memory = MemorySaver()
-    return workflow.compile(checkpointer=memory)
+    return workflow.compile(checkpointer=memory, name="finance_chat")
 
 
 graph_app = build_graph()

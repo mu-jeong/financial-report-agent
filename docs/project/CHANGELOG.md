@@ -4,6 +4,20 @@
 
 ## Unreleased
 
+## v0.6.1.1 - 2026-08-30
+
+### Fixed
+
+- `올해`와 같은 상대 연도 표현을 실행일 기준의 실제 연도로 해석해, 과거 연도 데이터를 잘못 참조하지 않도록 수정했습니다.
+
+### Changed
+
+- Release identity를 README app version과 full Git commit으로 단순화하고 두 값을 clean Git 상태에서 자동으로 읽도록 변경했습니다.
+- STAGED Release cache를 worktree가 아닌 등록 commit의 추적 파일에서 만들며 `.env`와 비밀 파일을 포함하지 않도록 변경했습니다.
+- runtime profile을 Release identity에서 분리해 Run queue 시점의 불변 입력으로 저장하고 실행 artifact와 대조하도록 변경했습니다.
+- 누락된 Git Release cache는 실행 시 등록 commit에서 자동 재생성하고 checksum을 검증하도록 변경했습니다.
+- 개별 Release·FixedSnapshot의 수동 exact-bytes 복구 화면을 제거했습니다. FixedSnapshot은 새 revision으로 이어가며 손상된 Release cache는 덮어쓰지 않습니다.
+
 ## v0.6.1 - 2026-08-29
 
 ### Fixed

@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.supabase-health-check]
 verify_jwt = false
+
+[functions.issue-report-operator]
+verify_jwt = true

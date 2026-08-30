@@ -526,6 +526,34 @@ def test_resolve_temporal_context_for_relative_dates():
     ] == "다음주=2026-06-08~2026-06-14 (오늘 2026-06-06 기준)"
 
 
+@pytest.mark.parametrize(
+    ("query", "expected_expression", "expected_start", "expected_end"),
+    [
+        ("올해 발간된 리포트", "올해", "2026-01-01", "2026-12-31"),
+        ("지난해 발간된 리포트", "지난해", "2025-01-01", "2025-12-31"),
+        ("내년 발간 예정 리포트", "내년", "2027-01-01", "2027-12-31"),
+    ],
+)
+def test_resolve_temporal_context_for_relative_years(
+    query,
+    expected_expression,
+    expected_start,
+    expected_end,
+):
+    context = resolve_temporal_context(query, current_date=date(2026, 8, 30))
+
+    assert context == {
+        "expression": expected_expression,
+        "report_date_start": expected_start,
+        "report_date_end": expected_end,
+        "current_date": "2026-08-30",
+        "description": (
+            f"{expected_expression}={expected_start}~{expected_end} "
+            "(오늘 2026-08-30 기준)"
+        ),
+    }
+
+
 def test_metadata_matches_all_explicit_filters():
     metadata = {
         "target_name": "삼성전자",

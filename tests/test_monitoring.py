@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from src.core.graph_observability import GRAPH_TRACE_STATE_KEY
 from src.core.monitoring import (
     CandidateValidationError,
     build_chat_trace_debug_hints,
@@ -26,6 +27,7 @@ from src.core.monitoring import (
     filter_evaluation_runs_by_mode,
     build_message_monitoring_rows,
     build_chat_latency_rows,
+    build_chat_monitoring_graph,
     compare_evaluation_runs,
     compact_graph_monitoring_metadata,
     compute_evaluation_run_hash,
@@ -786,6 +788,264 @@ def test_message_trace_summary_flattens_common_debug_fields():
     assert summary["diff_available"] is True
 
 
+def test_chat_monitoring_graph_projects_persisted_stage_evidence_only():
+    graph = build_chat_monitoring_graph(
+        {
+            "query_rewrite": {
+                "original_question": "삼성전자 실적을 설명해줘",
+                "rewritten_query": "삼성전자 최근 실적 리포트",
+            },
+            "scope": {"search_filters": {"target_name": "삼성전자"}},
+            "routing": {"route": "vectordb"},
+            "retrieval_k": {"context_count": 4},
+            "timing": {
+                "total_seconds": 3.2,
+                "vector_search_seconds": 0.7,
+                "answer_synthesis_seconds": 1.1,
+            },
+            "state_status": {
+                "overall": "succeeded",
+                "stages": {
+                    "input": "completed",
+                    "query_rewrite": "completed",
+                    "search_scope": "completed",
+                    "routing": "completed",
+                    "retrieval": "completed",
+                    "answer": "completed",
+                },
+            },
+            "grounding": {"status": "linked"},
+            "answer": {"source_count": 2},
+        }
+    )
+
+    assert [node["id"] for node in graph["nodes"]] == [
+        "input",
+        "query_rewrite",
+        "search_scope",
+        "routing",
+        "retrieval",
+        "answer",
+    ]
+    assert graph["edges"] == [
+        {"source": "input", "target": "query_rewrite"},
+        {"source": "input", "target": "search_scope"},
+        {"source": "query_rewrite", "target": "routing"},
+        {"source": "search_scope", "target": "routing"},
+        {"source": "routing", "target": "retrieval"},
+        {"source": "retrieval", "target": "answer"},
+    ]
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+    assert node_by_id["retrieval"] == {
+        "id": "retrieval",
+        "label": "Vector DB 검색",
+        "status": "completed",
+        "duration_seconds": 0.7,
+        "summary": "context 4개",
+    }
+    assert node_by_id["answer"]["duration_seconds"] == 1.1
+    assert node_by_id["answer"]["summary"] == "근거 연결 · 문서 2개"
+    assert graph["overall_status"] == "succeeded"
+
+
+def test_chat_monitoring_graph_renders_persisted_manifest_and_node_runs():
+    graph = build_chat_monitoring_graph(
+        {
+            "graph_schema_version": 1,
+            "graph_manifest": {
+                "graph_id": "finance_chat",
+                "revision": "a" * 64,
+                "nodes": [
+                    {
+                        "id": "__start__",
+                        "label": "시작",
+                        "kind": "boundary",
+                        "order": 0,
+                    },
+                    {"id": "router", "label": "검색 경로 결정", "order": 1},
+                    {
+                        "id": "rdb_execute_node",
+                        "label": "RDB 실행",
+                        "order": 2,
+                    },
+                    {
+                        "id": "vectordb_node",
+                        "label": "Vector DB 검색",
+                        "order": 3,
+                    },
+                    {
+                        "id": "__end__",
+                        "label": "종료",
+                        "kind": "boundary",
+                        "order": 4,
+                    },
+                ],
+                "edges": [
+                    {
+                        "source": "__start__",
+                        "target": "router",
+                        "conditional": False,
+                    },
+                    {
+                        "source": "router",
+                        "target": "rdb_execute_node",
+                        "conditional": True,
+                    },
+                    {
+                        "source": "router",
+                        "target": "vectordb_node",
+                        "conditional": True,
+                    },
+                    {
+                        "source": "vectordb_node",
+                        "target": "__end__",
+                        "conditional": False,
+                    },
+                ],
+            },
+            "node_runs": [
+                {
+                    "run_id": "run-router",
+                    "node_id": "router",
+                    "sequence": 1,
+                    "invocation_index": 1,
+                    "started_offset_seconds": 0.0,
+                    "ended_offset_seconds": 0.1,
+                    "status": "completed",
+                    "duration_seconds": 0.1,
+                    "result_keys": ["route"],
+                },
+                {
+                    "run_id": "run-vector",
+                    "node_id": "vectordb_node",
+                    "sequence": 2,
+                    "invocation_index": 1,
+                    "started_offset_seconds": 0.1,
+                    "ended_offset_seconds": 0.8,
+                    "status": "completed",
+                    "duration_seconds": 0.7,
+                    "result_keys": ["rerank_info"],
+                },
+            ],
+            "state_status": {"overall": "succeeded"},
+        }
+    )
+
+    assert graph["source"] == "persisted_manifest"
+    assert graph["schema_version"] == 1
+    assert graph["revision"] == "a" * 64
+    node_by_id = {node["id"]: node for node in graph["nodes"]}
+    assert node_by_id["router"]["status"] == "completed"
+    assert node_by_id["router"]["detail_section"] == "routing"
+    assert node_by_id["vectordb_node"]["duration_seconds"] == 0.7
+    assert node_by_id["vectordb_node"]["detail_section"] == "retrieval"
+    assert node_by_id["rdb_execute_node"]["status"] == "not_run"
+    assert node_by_id["__start__"]["status"] == "completed"
+    assert node_by_id["__end__"]["status"] == "completed"
+    assert all("observed" not in edge for edge in graph["edges"])
+
+
+def test_chat_monitoring_graph_uses_wall_span_for_parallel_node_runs():
+    graph = build_chat_monitoring_graph(
+        {
+            "graph_schema_version": 1,
+            "graph_manifest": {
+                "graph_id": "parallel",
+                "revision": "b" * 64,
+                "nodes": [{"id": "retrieve_company", "label": "기업별 검색"}],
+                "edges": [],
+            },
+            "node_runs": [
+                {
+                    "node_id": "retrieve_company",
+                    "sequence": 1,
+                    "invocation_index": 1,
+                    "status": "completed",
+                    "started_offset_seconds": 0.0,
+                    "ended_offset_seconds": 1.0,
+                    "duration_seconds": 1.0,
+                },
+                {
+                    "node_id": "retrieve_company",
+                    "sequence": 2,
+                    "invocation_index": 2,
+                    "status": "completed",
+                    "started_offset_seconds": 0.05,
+                    "ended_offset_seconds": 1.05,
+                    "duration_seconds": 1.0,
+                },
+                {
+                    "node_id": "retrieve_company",
+                    "sequence": 3,
+                    "invocation_index": 3,
+                    "status": "completed",
+                    "started_offset_seconds": 0.1,
+                    "ended_offset_seconds": 1.1,
+                    "duration_seconds": 1.0,
+                },
+            ],
+            "state_status": {"overall": "succeeded"},
+        }
+    )
+
+    node = graph["nodes"][0]
+    assert node["duration_seconds"] == 1.1
+    assert node["total_work_seconds"] == 3.0
+    assert [run["invocation_index"] for run in node["runs"]] == [1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "manifest", "error_code"),
+    [
+        (2, {"nodes": [], "edges": []}, "unsupported_graph_schema"),
+        (1, {"nodes": "broken", "edges": []}, "invalid_graph_trace"),
+    ],
+)
+def test_chat_monitoring_graph_reports_invalid_persisted_trace(
+    schema_version, manifest, error_code
+):
+    graph = build_chat_monitoring_graph(
+        {
+            "graph_trace_present": True,
+            "graph_schema_version": schema_version,
+            "graph_manifest": manifest,
+            "node_runs": [],
+            "state_status": {"overall": "failed"},
+        }
+    )
+
+    assert graph["source"] == "persisted_graph_error"
+    assert graph["error_code"] == error_code
+    assert graph["nodes"] == []
+    assert graph["edges"] == []
+
+
+def test_chat_monitoring_graph_reports_persisted_capture_error():
+    graph = build_chat_monitoring_graph(
+        {
+            "graph_trace_present": True,
+            "graph_schema_version": 1,
+            "graph_manifest": {
+                "graph_id": "finance_chat",
+                "revision": None,
+                "nodes": [],
+                "edges": [],
+                "capture_error": {
+                    "code": "topology_capture_failed",
+                    "error_type": "RuntimeError",
+                },
+            },
+            "node_runs": [],
+            "state_status": {"overall": "succeeded"},
+        }
+    )
+
+    assert graph["source"] == "persisted_graph_error"
+    assert graph["error_code"] == "topology_capture_failed"
+    assert graph["error_type"] == "RuntimeError"
+    assert graph["overall_status"] == "succeeded"
+
+
 def test_message_trace_exposes_send_comparison_coverage_and_branch_timing():
     message = {
         "id": 11,
@@ -1190,6 +1450,62 @@ def test_compact_graph_monitoring_metadata_keeps_route_filters_and_scores():
         "selected_source_count": 2,
     }
     assert "generation" not in metadata["monitoring"]["state_snapshot"]
+
+
+def test_compact_graph_monitoring_metadata_persists_versioned_graph_trace():
+    graph_manifest = {
+        "graph_id": "finance_chat",
+        "revision": "b" * 64,
+        "nodes": [
+            {"id": "__start__", "label": "시작", "kind": "boundary", "order": 0},
+            {"id": "router", "label": "검색 경로 결정", "kind": "task", "order": 1},
+        ],
+        "edges": [
+            {"source": "__start__", "target": "router", "conditional": False}
+        ],
+    }
+    node_runs = [
+        {
+            "run_id": "run-1",
+            "node_id": "router",
+            "sequence": 1,
+            "attempt": 1,
+            "status": "completed",
+            "duration_seconds": 0.2,
+            "result_keys": ["route"],
+        }
+    ]
+
+    metadata = compact_graph_monitoring_metadata(
+        final_state={
+            "route": "vectordb",
+            GRAPH_TRACE_STATE_KEY: {
+                "graph_schema_version": 1,
+                "graph_manifest": graph_manifest,
+                "node_runs": node_runs,
+            },
+        },
+        latency_seconds=0.5,
+        rerank_info=[],
+    )
+
+    monitoring = metadata["monitoring"]
+    assert monitoring["graph_schema_version"] == 1
+    assert monitoring["graph_manifest"] == graph_manifest
+    assert monitoring["node_runs"] == node_runs
+    assert GRAPH_TRACE_STATE_KEY not in monitoring["state_snapshot"]["available_keys"]
+
+    detail = build_message_trace_detail(
+        {
+            "role": "assistant",
+            "content": "답변",
+            "metadata": {"status": "succeeded", **metadata},
+        },
+        user_question="질문",
+    )
+    assert detail["graph_schema_version"] == 1
+    assert detail["graph_manifest"] == graph_manifest
+    assert detail["node_runs"] == node_runs
 
 
 def test_compact_graph_monitoring_metadata_keeps_only_explainable_plan_fields():
@@ -1853,10 +2169,12 @@ def test_active_monitoring_candidate_list_ignores_pre_v2_contracts(tmp_path):
     assert artifacts["warnings"] == []
 
 
-def test_monitoring_page_labels_make_global_monitoring_directly_accessible():
-    assert build_monitoring_page_labels() == [
+def test_monitoring_page_labels_expose_chat_operator_and_improvement_routes():
+    assert build_monitoring_page_labels() == ["Chat", "개선 실험"]
+    assert build_monitoring_page_labels(operator_monitoring_enabled=True) == [
         "Chat",
         "Monitoring",
+        "개선 실험",
     ]
 
 def test_select_evaluation_cases_uses_selected_ids_not_count():

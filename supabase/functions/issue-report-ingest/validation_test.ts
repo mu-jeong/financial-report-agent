@@ -62,6 +62,107 @@ Deno.test("accepts the minimized canonical version 2 report subset", () => {
   }
 });
 
+Deno.test("accepts strict version 3 case diagnostics and keeps version 2 compatible", () => {
+  const report = valid();
+  report.report.schema_version = 3;
+  report.report.report_contract_version = 3;
+  report.report.consent.include_selected_question = true;
+  report.report.consent.include_previous_turns = true;
+  report.report.observed.selected_question = "현재 질문";
+  Object.assign(report.report, {
+    reported_release_id: "release-v0.6.1",
+    case_diagnostics: {
+      schema_version: 1,
+      truncated: false,
+      prior_turns: [{ role: "user", content: "직전 질문" }],
+      route_observations: [{
+        rewritten_query: "2025년 연결 영업이익",
+        selected_route: "rdb",
+        filters: { company_code: "005930", year: 2025 },
+        fallback_reason: null,
+      }],
+      retrieval_observations: [{
+        role: "OBSERVED_RESULT",
+        source_uid: "report-21",
+        source_sha256: "a".repeat(64),
+        chunk_uid: "chunk-88",
+        chunk_sha256: "b".repeat(64),
+        rank: 1,
+      }],
+      evidence_refs: ["report-21#page=12"],
+    },
+  });
+
+  validateEnvelope(report, now);
+  validateEnvelope(valid(), now);
+});
+
+Deno.test("rejects assistant answer bodies in prior turns", () => {
+  const report = valid();
+  report.report.schema_version = 3;
+  report.report.report_contract_version = 3;
+  report.report.consent.include_selected_question = true;
+  report.report.consent.include_previous_turns = true;
+  report.report.observed.selected_question = "현재 질문";
+  Object.assign(report.report, {
+    reported_release_id: "release-v0.6.1",
+    case_diagnostics: {
+      schema_version: 1,
+      truncated: false,
+      prior_turns: [{ role: "assistant", content: "private answer body" }],
+      route_observations: [],
+      retrieval_observations: [],
+      evidence_refs: [],
+    },
+  });
+
+  expectCode(report, "invalid_case_diagnostics");
+});
+
+Deno.test("rejects case diagnostics without search-state consent", () => {
+  const report = valid();
+  report.report.schema_version = 3;
+  report.report.report_contract_version = 3;
+  Object.assign(report.report, {
+    reported_release_id: "release-v0.6.1",
+    case_diagnostics: {
+      schema_version: 1,
+      truncated: false,
+      prior_turns: [],
+      route_observations: [],
+      retrieval_observations: [],
+      evidence_refs: [],
+    },
+  });
+
+  expectCode(report, "consent_mismatch");
+});
+
+Deno.test("rejects unknown and unsafe version 3 diagnostic content", () => {
+  const report = valid();
+  report.report.schema_version = 3;
+  report.report.report_contract_version = 3;
+  Object.assign(report.report, {
+    reported_release_id: "release-v0.6.1",
+    case_diagnostics: {
+      schema_version: 1,
+      truncated: false,
+      prior_turns: [],
+      route_observations: [],
+      retrieval_observations: [],
+      evidence_refs: ["/private/catalog.sqlite3"],
+    },
+  });
+  expectCode(report, "unsafe_diagnostic_content");
+
+  const unknown = structuredClone(report);
+  const unknownReport = unknown.report as Record<string, unknown>;
+  const unknownDiagnostics = unknownReport.case_diagnostics as Record<string, unknown>;
+  unknownDiagnostics.evidence_refs = [];
+  unknownDiagnostics.unknown_field_policy = "REJECT";
+  expectCode(unknown, "unknown_field");
+});
+
 Deno.test("accepts queued legacy identifiers but removes them before storage", () => {
   const legacy = valid();
   Object.assign(legacy.report, {

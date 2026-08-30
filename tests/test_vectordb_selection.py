@@ -678,6 +678,7 @@ def test_vectordb_node_records_prompt_chunk_and_document_identifiers(monkeypatch
 
     metadata = {
         "report_uid": "report-1",
+        "source_sha256": "a" * 64,
         "chunk_uid": "chunk-1",
         "parent_uid": "parent-1",
         "profile_id": "profile-1",
@@ -776,6 +777,7 @@ def test_vectordb_node_records_prompt_chunk_and_document_identifiers(monkeypatch
 
     source = result["rerank_info"][0]
     assert source["report_uid"] == "report-1"
+    assert source["source_sha256"] == "a" * 64
     assert source["chunk_uid"] == "chunk-1"
     assert source["parent_uid"] == "parent-1"
     assert source["child_index"] == 3
