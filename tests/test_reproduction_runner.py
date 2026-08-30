@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from apps.cli import reproduction_runner
+from src.core import release_assets
 
 
 def _snapshot(
@@ -261,3 +262,10 @@ def test_runtime_profile_controls_non_secret_execution_settings(
         reproduction_runner.apply_runtime_profile_environment(
             {"environment": {"OPENROUTER_API_KEY": "must-not-be-persisted"}}
         )
+
+
+def test_runtime_profile_keys_match_release_validation_contract() -> None:
+    assert (
+        reproduction_runner._PROFILE_ENVIRONMENT_KEYS
+        == release_assets.RUNTIME_PROFILE_ENVIRONMENT_KEYS
+    )

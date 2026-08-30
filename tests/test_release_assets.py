@@ -2,13 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from src.core import release_assets
+
+
+def _run_git(root: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
 
 
 def _write_bundle_inputs(root: Path, *, answer: str = "registered") -> dict[str, object]:
@@ -34,6 +47,477 @@ def _write_bundle_inputs(root: Path, *, answer: str = "registered") -> dict[str,
             "artifact_relative_path": "result.json",
         },
     }
+
+
+def test_runtime_profile_snapshot_captures_complete_non_secret_contract() -> None:
+    values = {
+        key: f"configured-{index}"
+        for index, key in enumerate(
+            sorted(release_assets.RUNTIME_PROFILE_ENVIRONMENT_KEYS)
+        )
+    }
+    values["OPENROUTER_API_KEY"] = "must-not-be-persisted"
+
+    environment = release_assets.snapshot_runtime_profile_environment(values)
+
+    assert environment == {
+        key: values[key]
+        for key in sorted(release_assets.RUNTIME_PROFILE_ENVIRONMENT_KEYS)
+    }
+    assert "OPENROUTER_API_KEY" not in environment
+
+    missing_key = next(iter(release_assets.RUNTIME_PROFILE_ENVIRONMENT_KEYS))
+    with pytest.raises(release_assets.ReleaseAssetError, match="missing settings"):
+        release_assets.snapshot_runtime_profile_environment(
+            {key: value for key, value in values.items() if key != missing_key}
+        )
+    with pytest.raises(release_assets.ReleaseAssetError, match="sensitive key"):
+        release_assets.validate_runtime_profile(
+            {"nested": {"OPENROUTER_API_KEY": "must-not-persist"}}
+        )
+
+
+def _write_project_release_checkout(root: Path) -> None:
+    files = {
+        "apps/cli/__init__.py": "",
+        "apps/cli/app.py": "def run_search(query, thread_id): return {}\n",
+        "apps/cli/reproduction_runner.py": "raise SystemExit(0)\n",
+        "apps/gui/app.py": "# packaged GUI\n",
+        "src/core/example.py": "VALUE = 'packaged'\n",
+        "src/core/__pycache__/example.pyc": "must-not-be-bundled\n",
+        "README.md": "> Version: 0.6.2\n",
+        "requirements.txt": "example-dependency==1.0\n",
+        "data/listed_company_industries.csv": (
+            "company_name,industry,main_products\nExample,Software,Search\n"
+        ),
+        ".env": "OPENROUTER_API_KEY=must-not-be-bundled\n",
+        ".git/config": "must-not-be-bundled\n",
+        "data/private.sqlite3": "must-not-be-bundled\n",
+        "tests/test_private.py": "must_not_be_bundled = True\n",
+    }
+    for relative_path, content in files.items():
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+
+def _initialize_git_release_checkout(root: Path) -> str:
+    _write_project_release_checkout(root)
+    _run_git(root, "init")
+    _run_git(root, "config", "user.email", "release-test@example.com")
+    _run_git(root, "config", "user.name", "Release Test")
+    _run_git(root, "config", "core.autocrlf", "false")
+    _run_git(root, "add", "apps", "src", "README.md", "requirements.txt", "data")
+    _run_git(root, "commit", "-m", "Create release fixture")
+    return _run_git(root, "rev-parse", "HEAD")
+
+
+def test_current_project_release_identity_comes_from_clean_git(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    revision = _initialize_git_release_checkout(project_root)
+
+    identity = release_assets.inspect_current_project_release(project_root)
+
+    assert identity.app_version == "0.6.2"
+    assert identity.git_revision == revision
+    assert len(identity.git_revision) == 40
+
+    (project_root / "src" / "core" / "example.py").write_text(
+        "VALUE = 'dirty'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(release_assets.ReleaseAssetError, match="working tree"):
+        release_assets.inspect_current_project_release(project_root)
+
+
+def test_release_identity_is_version_and_commit_not_runtime_profile(
+    tmp_path: Path,
+) -> None:
+    inputs = _write_bundle_inputs(tmp_path / "inputs")
+    first = release_assets.prepare_release_stage(
+        tmp_path / "managed-first",
+        app_version="0.6.2",
+        git_revision="1" * 40,
+        manifest_version=release_assets.GIT_RELEASE_SCHEMA_VERSION,
+        **inputs,
+    )
+    inputs["runtime_profile"] = {"environment": {"SEARCH_TOP_K": 99}}
+    second = release_assets.prepare_release_stage(
+        tmp_path / "managed-second",
+        app_version="0.6.2",
+        git_revision="1" * 40,
+        manifest_version=release_assets.GIT_RELEASE_SCHEMA_VERSION,
+        **inputs,
+    )
+
+    first_release = release_assets.validate_release_stage(first)
+    second_release = release_assets.validate_release_stage(second)
+
+    assert first_release.release_manifest_id == second_release.release_manifest_id
+    assert first_release.runtime_profile_digest == second_release.runtime_profile_digest == ""
+    assert not (first / "runtime-profile.json").exists()
+    assert not (second / "runtime-profile.json").exists()
+
+
+def test_git_release_executes_with_an_ephemeral_run_profile(
+    tmp_path: Path,
+) -> None:
+    managed_root = tmp_path / "managed"
+    inputs = _write_bundle_inputs(tmp_path / "inputs")
+    app_source = inputs["app_source"]
+    assert isinstance(app_source, Path)
+    (app_source / "runner.py").write_text(
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "bundle = Path(os.environ['FINANCE_LLM_RELEASE_BUNDLE_ROOT'])\n"
+        "profile = json.loads((bundle / 'runtime-profile.json').read_text(encoding='utf-8'))\n"
+        "Path(os.environ['FINANCE_LLM_RUN_ARTIFACT_PATH']).write_text(\n"
+        "    json.dumps({'runtime_profile': profile}), encoding='utf-8'\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    stage = release_assets.prepare_release_stage(
+        managed_root,
+        app_version="0.6.2",
+        git_revision="1" * 40,
+        manifest_version=release_assets.GIT_RELEASE_SCHEMA_VERSION,
+        **inputs,
+    )
+    descriptor = release_assets.register_release_stage(
+        managed_root,
+        stage,
+        expected_tag_version="v0.6.2",
+    )
+    snapshot = managed_root / "snapshots" / "snapshot-1"
+    snapshot.mkdir(parents=True)
+    runtime_profile = {
+        "environment": {"SEARCH_TOP_K": 9},
+        "snapshot_reader": {"manifest_schema_version": 2},
+    }
+
+    result = release_assets.execute_registered_release(
+        managed_root,
+        descriptor,
+        snapshot_root=snapshot,
+        run_id="run-v2-profile",
+        runtime_profile=runtime_profile,
+    )
+
+    assert json.loads(result.artifact_path.read_text(encoding="utf-8")) == {
+        "runtime_profile": runtime_profile
+    }
+    assert not (descriptor.path / "runtime-profile.json").exists()
+    with pytest.raises(release_assets.ReleaseAssetError, match="Run profile"):
+        release_assets.execute_registered_release(
+            managed_root,
+            descriptor,
+            snapshot_root=snapshot,
+            run_id="run-v2-profile-missing",
+        )
+
+
+def test_release_cache_manifest_schema_must_match_the_registered_record(
+    tmp_path: Path,
+) -> None:
+    managed_root = tmp_path / "managed"
+    inputs = _write_bundle_inputs(tmp_path / "inputs")
+    stage = release_assets.prepare_release_stage(
+        managed_root,
+        app_version="0.6.2",
+        git_revision="1" * 40,
+        **inputs,
+    )
+    descriptor = release_assets.register_release_stage(
+        managed_root,
+        stage,
+        expected_tag_version="v0.6.2",
+    )
+
+    assert release_assets.inspect_release(
+        replace(
+            descriptor,
+            manifest_version=release_assets.GIT_RELEASE_SCHEMA_VERSION,
+        )
+    ) is release_assets.ReleaseAvailability.CORRUPT
+
+
+def test_release_cache_checksum_is_verified_without_becoming_identity(
+    tmp_path: Path,
+) -> None:
+    managed_root = tmp_path / "managed"
+    inputs = _write_bundle_inputs(tmp_path / "inputs")
+    first_stage = release_assets.prepare_release_stage(
+        managed_root,
+        app_version="0.6.2",
+        git_revision="1" * 40,
+        manifest_version=release_assets.GIT_RELEASE_SCHEMA_VERSION,
+        **inputs,
+    )
+    descriptor = release_assets.register_release_stage(
+        managed_root,
+        first_stage,
+        expected_tag_version="v0.6.2",
+    )
+    changed_runner = dict(inputs["runner"])
+    changed_runner["artifact_relative_path"] = "changed-result.json"
+    second_stage = release_assets.prepare_release_stage(
+        managed_root,
+        app_source=inputs["app_source"],
+        runtime_source=inputs["runtime_source"],
+        runtime_profile=inputs["runtime_profile"],
+        runner=changed_runner,
+        app_version="0.6.2",
+        git_revision="1" * 40,
+        manifest_version=release_assets.GIT_RELEASE_SCHEMA_VERSION,
+    )
+    changed = release_assets.validate_release_stage(second_stage)
+
+    assert changed.release_manifest_id == descriptor.release_manifest_id
+    assert changed.runtime_bundle_digest != descriptor.runtime_bundle_digest
+    assert release_assets.inspect_release(
+        replace(descriptor, path=second_stage)
+    ) is release_assets.ReleaseAvailability.CORRUPT
+
+
+def test_missing_release_cache_is_rebuilt_from_git_commit(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    managed_root = tmp_path / "managed"
+    revision = _initialize_git_release_checkout(project_root)
+    staged = release_assets.prepare_current_project_release_stage(
+        managed_root,
+        project_root=project_root,
+    )
+    descriptor = release_assets.register_release_stage(
+        managed_root,
+        staged,
+        expected_tag_version="v0.6.2",
+        expected_git_revision=revision,
+    )
+    release_assets.safe_cleanup(descriptor.path, managed_root=managed_root)
+    (project_root / "src" / "core" / "example.py").write_text(
+        "VALUE = 'dirty-working-tree'\n",
+        encoding="utf-8",
+    )
+
+    rebuilt = release_assets.rebuild_release_cache_from_git(
+        managed_root,
+        project_root=project_root,
+        descriptor=descriptor,
+    )
+
+    assert rebuilt.release_manifest_id == descriptor.release_manifest_id
+    assert rebuilt.git_revision == revision
+    assert (rebuilt.path / "app" / "src" / "core" / "example.py").read_text(
+        encoding="utf-8"
+    ) == "VALUE = 'packaged'\n"
+    assert release_assets.inspect_release(rebuilt) is release_assets.ReleaseAvailability.AVAILABLE
+
+
+def _create_directory_link(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("symlink creation is unavailable")
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        pytest.skip("directory link creation is unavailable")
+
+
+def test_project_release_stage_builds_clean_sources_automatically(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    managed_root = project_root / "data" / "monitoring"
+    _write_project_release_checkout(project_root)
+
+    stage = release_assets.prepare_project_release_stage(
+        managed_root,
+        project_root=project_root,
+        app_version="0.6.2",
+        git_revision="project-revision",
+        runtime_profile={"model": "fixture-model"},
+        runner={
+            "contract_version": 1,
+            "command": ["{python}", "{runtime_root}/reproduction_runner.py"],
+            "artifact_relative_path": "result.json",
+        },
+    )
+
+    assert (stage / "app" / "apps" / "cli" / "app.py").is_file()
+    assert (stage / "app" / "apps" / "gui" / "app.py").is_file()
+    assert (stage / "app" / "src" / "core" / "example.py").is_file()
+    assert (stage / "app" / "README.md").is_file()
+    assert (stage / "app" / "requirements.txt").is_file()
+    assert (
+        stage / "app" / "data" / "listed_company_industries.csv"
+    ).is_file()
+    assert (stage / "runtime" / "reproduction_runner.py").read_text(
+        encoding="utf-8"
+    ) == "raise SystemExit(0)\n"
+    assert not (stage / "app" / ".env").exists()
+    assert not (stage / "app" / ".git").exists()
+    assert not (stage / "app" / "data" / "private.sqlite3").exists()
+    assert not (stage / "app" / "src" / "core" / "__pycache__").exists()
+    assert not (stage / "app" / "tests").exists()
+    assert not any((managed_root / "release-sources").glob("release-*"))
+    assert release_assets.validate_release_stage(stage).stage_path == stage
+
+
+def test_project_release_source_cleanup_runs_when_staging_fails(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    managed_root = project_root / "data" / "monitoring"
+    _write_project_release_checkout(project_root)
+
+    with pytest.raises(release_assets.ReleaseAssetError, match="entrypoint"):
+        release_assets.prepare_project_release_stage(
+            managed_root,
+            project_root=project_root,
+            app_version="0.6.2",
+            git_revision="project-revision",
+            runtime_profile={"model": "fixture-model"},
+            runner={
+                "contract_version": 1,
+                "command": ["{python}", "{bundle_root}/missing-runner.py"],
+                "artifact_relative_path": "result.json",
+            },
+        )
+
+    assert not any((managed_root / "release-sources").glob("release-*"))
+    assert not any((managed_root / "staging").glob("release-*"))
+
+
+def test_project_release_stage_rejects_symlinked_source_parent(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    managed_root = project_root / "data" / "monitoring"
+    outside = tmp_path / "outside-sources"
+    _write_project_release_checkout(project_root)
+    managed_root.mkdir(parents=True)
+    outside.mkdir()
+    _create_directory_link(managed_root / "release-sources", outside)
+
+    with pytest.raises(
+        release_assets.ReleaseAssetError,
+        match="symbolic link|escapes the managed root",
+    ):
+        release_assets.prepare_project_release_stage(
+            managed_root,
+            project_root=project_root,
+            app_version="0.6.2",
+            git_revision="project-revision",
+            runtime_profile={"model": "fixture-model"},
+            runner={
+                "contract_version": 1,
+                "command": ["{python}", "{runtime_root}/reproduction_runner.py"],
+                "artifact_relative_path": "result.json",
+            },
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_release_stage_rejects_symlinked_staging_parent(tmp_path: Path) -> None:
+    managed_root = tmp_path / "managed"
+    outside = tmp_path / "outside-staging"
+    inputs = _write_bundle_inputs(tmp_path / "inputs")
+    managed_root.mkdir()
+    outside.mkdir()
+    _create_directory_link(managed_root / "staging", outside)
+
+    with pytest.raises(
+        release_assets.ReleaseAssetError,
+        match="symbolic link|escapes the managed root",
+    ):
+        release_assets.prepare_release_stage(
+            managed_root,
+            app_version="0.6.2",
+            git_revision="project-revision",
+            **inputs,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_project_release_preserves_staging_error_when_source_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    managed_root = project_root / "data" / "monitoring"
+    _write_project_release_checkout(project_root)
+    real_cleanup = release_assets.safe_cleanup
+
+    def fail_source_cleanup(path: Path, *, managed_root: Path, process=None) -> None:
+        if "release-sources" in Path(path).parts:
+            raise OSError("source cleanup locked")
+        real_cleanup(path, managed_root=managed_root, process=process)
+
+    monkeypatch.setattr(release_assets, "safe_cleanup", fail_source_cleanup)
+
+    with pytest.raises(release_assets.ReleaseAssetError) as captured:
+        release_assets.prepare_project_release_stage(
+            managed_root,
+            project_root=project_root,
+            app_version="0.6.2",
+            git_revision="project-revision",
+            runtime_profile={"model": "fixture-model"},
+            runner={
+                "contract_version": 1,
+                "command": ["{python}", "{bundle_root}/missing-runner.py"],
+                "artifact_relative_path": "result.json",
+            },
+        )
+
+    assert "runner entrypoint" in str(captured.value)
+    assert "source cleanup locked" in str(captured.value)
+
+
+def test_project_release_reports_source_and_stage_cleanup_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    managed_root = project_root / "data" / "monitoring"
+    _write_project_release_checkout(project_root)
+
+    def fail_cleanup(path: Path, *, managed_root: Path, process=None) -> None:
+        parts = Path(path).parts
+        if "release-sources" in parts:
+            raise OSError("source cleanup locked")
+        if "staging" in parts:
+            raise OSError("stage cleanup locked")
+        raise AssertionError(f"unexpected cleanup target: {path}")
+
+    monkeypatch.setattr(release_assets, "safe_cleanup", fail_cleanup)
+
+    with pytest.raises(release_assets.ReleaseAssetError) as captured:
+        release_assets.prepare_project_release_stage(
+            managed_root,
+            project_root=project_root,
+            app_version="0.6.2",
+            git_revision="project-revision",
+            runtime_profile={"model": "fixture-model"},
+            runner={
+                "contract_version": 1,
+                "command": ["{python}", "{runtime_root}/reproduction_runner.py"],
+                "artifact_relative_path": "result.json",
+            },
+        )
+
+    assert "source cleanup locked" in str(captured.value)
+    assert "stage cleanup locked" in str(captured.value)
 
 
 def _registered_release(tmp_path: Path) -> tuple[Path, release_assets.ReleaseDescriptor]:
@@ -226,7 +710,7 @@ def test_first_baseline_accepts_v061_and_rejects_v060(tmp_path: Path) -> None:
         )
 
 
-def test_registration_rejects_version_revision_and_digest_conflicts(tmp_path: Path) -> None:
+def test_registration_rejects_version_and_revision_conflicts(tmp_path: Path) -> None:
     managed_root = tmp_path / "managed"
     inputs = _write_bundle_inputs(tmp_path / "inputs")
     staged = release_assets.prepare_release_stage(
@@ -248,9 +732,52 @@ def test_registration_rejects_version_revision_and_digest_conflicts(tmp_path: Pa
             expected_tag_version="v0.6.1",
             expected_git_revision="wrong",
         )
-    with pytest.raises(release_assets.ReleaseAssetError, match="different digest"):
-        release_assets.assert_version_digest_compatible(
-            "0.6.1", validated.release_manifest_id, "0" * 64
+    with pytest.raises(release_assets.ReleaseAssetError, match="different Git commit"):
+        release_assets.assert_version_commit_compatible(
+            "0.6.1", validated.git_revision, "0" * 40
+        )
+
+
+def test_managed_stage_validation_only_accepts_contained_staging_objects(
+    tmp_path: Path,
+) -> None:
+    managed_root = tmp_path / "managed"
+    inputs = _write_bundle_inputs(tmp_path / "inputs")
+    staged = release_assets.prepare_release_stage(
+        managed_root,
+        app_version="0.6.2",
+        git_revision="project-revision",
+        **inputs,
+    )
+
+    validated = release_assets.validate_managed_release_stage(managed_root, staged)
+
+    assert validated.stage_path == staged
+    assert validated.app_version == "0.6.2"
+    assert validated.git_revision == "project-revision"
+
+    outside = tmp_path / "outside-stage"
+    outside.mkdir()
+    with pytest.raises(release_assets.ReleaseAssetError, match="managed root"):
+        release_assets.validate_managed_release_stage(managed_root, outside)
+    with pytest.raises(release_assets.ReleaseAssetError, match="managed root"):
+        release_assets.validate_managed_release_stage(managed_root, managed_root)
+    with pytest.raises(release_assets.ReleaseAssetError, match="managed staging"):
+        release_assets.validate_managed_release_stage(
+            managed_root,
+            managed_root / "staging",
+        )
+
+    descriptor = release_assets.register_release_stage(
+        managed_root,
+        staged,
+        expected_tag_version="v0.6.2",
+        expected_git_revision="project-revision",
+    )
+    with pytest.raises(release_assets.ReleaseAssetError, match="managed staging"):
+        release_assets.validate_managed_release_stage(
+            managed_root,
+            descriptor.path,
         )
 
 
@@ -267,26 +794,8 @@ def test_availability_distinguishes_missing_corrupt_and_incompatible(tmp_path: P
     runner_path.write_bytes(original)
     assert release_assets.inspect_release(descriptor).value == "AVAILABLE"
 
-    backup = tmp_path / "backup"
-    release_assets.copy_release_bundle(descriptor.path, backup)
     release_assets.safe_cleanup(descriptor.path, managed_root=managed_root)
     assert release_assets.inspect_release(descriptor).value == "LOCAL_MISSING"
-
-    restored = release_assets.restore_release_bundle(managed_root, descriptor, backup)
-    assert restored == descriptor.path
-    assert release_assets.inspect_release(descriptor).value == "AVAILABLE"
-
-
-def test_restore_rejects_different_bytes_and_never_overwrites(tmp_path: Path) -> None:
-    managed_root, descriptor = _registered_release(tmp_path)
-    backup = tmp_path / "backup"
-    release_assets.copy_release_bundle(descriptor.path, backup)
-    release_assets.safe_cleanup(descriptor.path, managed_root=managed_root)
-    (backup / "app" / "runner.py").write_text("raise SystemExit(3)\n", encoding="utf-8")
-
-    with pytest.raises(release_assets.ReleaseAssetError, match="different bytes"):
-        release_assets.restore_release_bundle(managed_root, descriptor, backup)
-    assert not descriptor.path.exists()
 
 
 def test_official_execution_uses_registered_app_and_fixed_snapshot(tmp_path: Path) -> None:

@@ -275,10 +275,91 @@ def test_app_and_sidebar_fail_closed_around_production_operator_gate() -> None:
 
 
 def test_default_release_runner_uses_registered_runtime_entrypoint_without_dummy_args() -> None:
-    source = VIEW_PATH.read_text(encoding="utf-8")
+    runner = monitoring_views.release_assets.default_release_runner()
 
-    assert '"{runtime_root}/reproduction_runner.py"' in source
-    assert '"{app_root}",' not in source
+    assert runner["command"] == [
+        "{python}",
+        "{runtime_root}/reproduction_runner.py",
+    ]
+    assert "{app_root}" not in runner["command"]
+
+
+def test_release_registration_builds_project_sources_without_operator_paths() -> None:
+    source = VIEW_PATH.read_text(encoding="utf-8")
+    release_registration = source.split(
+        "def _render_release_registration(", 1
+    )[1].split("def _render_asset_settings(", 1)[0]
+
+    assert 'st.text_input("배포 app package 경로")' not in release_registration
+    assert 'st.text_input("고정 runtime/runner 경로")' not in release_registration
+    assert "release_assets.inspect_current_project_release(" in release_registration
+    assert "release_assets.prepare_current_project_release_stage(" in release_registration
+    assert "project_root=settings_module.BASE_DIR" in release_registration
+    assert 'app_version = st.text_input("app version"' not in release_registration
+    assert 'git_revision = st.text_input("Git revision"' not in release_registration
+
+
+def test_release_registration_derives_read_only_identity_from_staged_manifest() -> None:
+    source = VIEW_PATH.read_text(encoding="utf-8")
+    release_registration = source.split(
+        "def _render_release_registration(", 1
+    )[1].split("def _render_asset_settings(", 1)[0]
+    before_register_form, register_form = release_registration.split(
+        'with st.form("register_release_stage"):', 1
+    )
+
+    assert "release_assets.validate_managed_release_stage(" in release_registration
+    assert '"STAGED bundle 경로"' in before_register_form
+    assert '"STAGED bundle 경로"' not in register_form
+    assert 'release_tag = st.text_input("공식 tag"' not in register_form
+    assert 'expected_revision = st.text_input("확인할 Git revision"' not in register_form
+    assert 'value=staged_release.app_version' in register_form
+    assert 'value=release_tag' in register_form
+    assert 'value=staged_release.git_revision' in register_form
+    assert register_form.count("disabled=True") >= 3
+    assert 'release_tag = f"v{staged_release.app_version}"' in register_form
+    assert "expected_git_revision=staged_release.git_revision" in register_form
+
+
+def test_asset_settings_warns_without_manual_exact_restore_controls() -> None:
+    source = VIEW_PATH.read_text(encoding="utf-8")
+    asset_settings = source.split("def _render_asset_settings(", 1)[1].split(
+        "def render_operator_monitoring_page(", 1
+    )[0]
+
+    assert "warnings = _asset_warnings(registry)" in asset_settings
+    assert "누락 cache는 실행 시 등록 commit에서 자동 재생성" in asset_settings
+    assert 'st.markdown("**가용성 복구**")' not in asset_settings
+    assert "def _render_exact_restore(" not in source
+    assert "restore_release_bundle(" not in source
+    assert "restore_fixed_snapshot(" not in source
+
+
+def test_default_release_profile_snapshots_every_non_secret_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = {}
+    for index, key in enumerate(
+        sorted(monitoring_views.release_assets.RUNTIME_PROFILE_ENVIRONMENT_KEYS)
+    ):
+        value = f"configured-{index}"
+        monkeypatch.setattr(monitoring_views.config_module, key, value)
+        expected[key] = value
+    monkeypatch.setattr(
+        monitoring_views.config_module,
+        "OPENROUTER_API_KEY",
+        "must-not-be-persisted",
+    )
+
+    profile = monitoring_views._default_release_runtime_profile()
+
+    assert profile == {
+        "environment": expected,
+        "snapshot_reader": {
+            "manifest_schema_version": monitoring_views.fixed_snapshot.MANIFEST_SCHEMA_VERSION,
+        },
+    }
+    assert "OPENROUTER_API_KEY" not in profile["environment"]
 
 
 def test_login_discards_password_and_refresh_token_is_never_requested() -> None:
@@ -336,6 +417,7 @@ def test_run_action_registers_release_and_syncs_each_lifecycle_state() -> None:
     )
     assert "lifecycle_callback=synchronize_run_lifecycle" in function
     assert "progress_callback=render_run_progress" in function
+    assert "runtime_profile=_default_release_runtime_profile()" in function
     assert 'st.status("실행 준비 중"' in function
     assert "st.progress(" in function
     assert "미완료 Run을 INTERRUPTED로 복구" in source

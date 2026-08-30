@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping
 import streamlit as st
 
 from src.configs import config as config_module
+from src.configs import settings as settings_module
 from src.core import fixed_snapshot, release_assets
 from src.core.monitoring_admin_client import (
     MonitoringAdminClient,
@@ -43,6 +44,9 @@ _WORKSPACE_KEY = "monitoring_operator_workspace"
 _REPRODUCTION_SEED_PREFIX = "monitoring_reproduction_seed_"
 _RAW_REPORT_PREFIX = "monitoring_raw_report_"
 _SNAPSHOT_STATE_PREFIX = "monitoring_snapshot_"
+_RELEASE_STAGE_PATH_KEY = "monitoring_release_stage_path"
+_RELEASE_STAGE_INPUT_KEY = "monitoring_release_stage_path_input"
+_RELEASE_STAGE_INPUT_RESET_KEY = "monitoring_release_stage_path_input_reset"
 _MAX_SNAPSHOT_SEARCH_RESULTS = 100
 _WORKSPACES = ("작업함", "재현 케이스", "버전 비교")
 _ISSUE_STATE_LABELS = {
@@ -136,6 +140,7 @@ def _service(registry: MonitoringRegistry) -> ReleaseScopedMonitoringService:
     return ReleaseScopedMonitoringService(
         registry,
         managed_root=load_operator_api_config().artifact_root,
+        project_root=settings_module.BASE_DIR,
     )
 
 
@@ -1629,16 +1634,21 @@ def _render_case(
 
 def _descriptor_from_record(root: Path, record: Mapping[str, Any]) -> release_assets.ReleaseDescriptor:
     manifest = record["manifest"]
+    manifest_version = int(record.get("manifest_version") or 1)
     return release_assets.ReleaseDescriptor(
         release_manifest_id=str(record["release_manifest_id"]),
         app_version=str(record["app_version"]),
         git_revision=str(manifest.get("git_revision") or "unknown"),
         build_digest=str(manifest.get("build_digest") or record["runtime_bundle_digest"]),
         runtime_bundle_digest=str(record["runtime_bundle_digest"]),
-        runtime_profile_digest=str(manifest.get("runtime_profile_digest") or record["runtime_bundle_digest"]),
+        runtime_profile_digest=str(
+            manifest.get("runtime_profile_digest")
+            or (record["runtime_bundle_digest"] if manifest_version == 1 else "")
+        ),
         runner_contract_version=int(manifest.get("runner_contract_version") or 1),
         snapshot_reader_contract_version=int(manifest.get("snapshot_reader_contract_version") or 1),
         path=(root / str(record["bundle_relpath"])).resolve(),
+        manifest_version=manifest_version,
     )
 
 
@@ -1703,6 +1713,7 @@ def _execute_new_run(
             case_contract_id=str(case["case_contract_id"]),
             release_manifest_id=release_manifest_id,
             side=side,
+            runtime_profile=_default_release_runtime_profile(),
             extra_environment=runner_environment,
             lifecycle_callback=synchronize_run_lifecycle,
             progress_callback=render_run_progress,
@@ -1744,9 +1755,12 @@ def _execute_new_run(
 
 
 def _release_label(release: Mapping[str, Any]) -> str:
+    manifest = release.get("manifest")
+    manifest_body = manifest if isinstance(manifest, Mapping) else {}
+    revision = str(manifest_body.get("git_revision") or "unknown")
     return (
         f"v{release['app_version']} · "
-        f"{str(release['release_manifest_id'])[:16]} · "
+        f"{revision[:12]} · "
         f"{release['lifecycle_status']}"
     )
 
@@ -2305,7 +2319,14 @@ def _asset_warnings(registry: MonitoringRegistry) -> list[str]:
         except (release_assets.ReleaseAssetError, OSError, ValueError) as exc:
             state = f"확인 실패: {exc}"
         if state != "AVAILABLE":
-            warnings.append(f"Release {release['release_manifest_id']}: {state}")
+            label = _release_label(release)
+            if state == "LOCAL_MISSING" and int(release["manifest_version"]) == 2:
+                warnings.append(
+                    f"Release {label}: LOCAL_MISSING — 다음 실행 시 등록된 "
+                    "Git commit에서 cache를 자동 재생성합니다."
+                )
+            else:
+                warnings.append(f"Release {label}: {state}")
     for issue in registry.list_issues():
         for run in registry.list_runs(issue_id=issue["issue_id"]):
             if run["execution_status"] in {"QUEUED", "RUNNING"}:
@@ -2425,95 +2446,130 @@ def _control_projection_warning(
     return _control_drift_message(diff)
 
 
+def _default_release_runtime_profile() -> dict[str, Any]:
+    return {
+        "environment": release_assets.snapshot_runtime_profile_environment(
+            vars(config_module)
+        ),
+        "snapshot_reader": {
+            "manifest_schema_version": fixed_snapshot.MANIFEST_SCHEMA_VERSION,
+        },
+    }
+
+
 def _render_release_registration(registry: MonitoringRegistry) -> None:
     root = load_operator_api_config().artifact_root.resolve()
     st.markdown("**Release 준비·등록**")
     st.caption(
-        "배포에 사용한 app bytes와 runtime을 STAGED로 검증한 뒤에만 불변 Release로 등록합니다. "
-        "현재 checkout을 다시 build하지 않습니다."
+        "README의 app version과 현재 Git commit을 자동으로 식별하고, "
+        "그 commit의 실행 코드를 STAGED cache로 생성해 등록합니다."
     )
+    st.caption(f"자동 package 원본: {settings_module.BASE_DIR}")
+    current_identity: release_assets.GitReleaseIdentity | None = None
+    try:
+        current_identity = release_assets.inspect_current_project_release(
+            settings_module.BASE_DIR
+        )
+    except (OSError, ValueError, release_assets.ReleaseAssetError) as exc:
+        st.warning(
+            "Git Release를 준비할 수 없습니다. 추적 중인 Release 파일을 "
+            f"commit한 뒤 다시 확인하세요: {exc}"
+        )
     with st.form("prepare_release_stage"):
-        app_source = st.text_input("배포 app package 경로")
-        runtime_source = st.text_input("고정 runtime/runner 경로")
-        app_version = st.text_input("app version", placeholder="0.6.2")
-        git_revision = st.text_input("Git revision")
-        runtime_profile_text = st.text_area(
-            "runtime-profile.json",
-            value=json.dumps(
-                {
-                    "environment": {
-                        "GENERATION_MODEL": config_module.GENERATION_MODEL,
-                        "EMBEDDING_MODEL": config_module.EMBEDDING_MODEL,
-                        "SEARCH_TOP_K": config_module.SEARCH_TOP_K,
-                    },
-                    "snapshot_reader": {
-                        "manifest_schema_version": fixed_snapshot.MANIFEST_SCHEMA_VERSION,
-                    },
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+        st.text_input(
+            "app version",
+            value=current_identity.app_version if current_identity else "",
+            disabled=True,
         )
-        runner_text = st.text_area(
-            "runner.json",
-            value=json.dumps(
-                {
-                    "contract_version": 1,
-                    "command": [
-                        "{python}",
-                        "{runtime_root}/reproduction_runner.py",
-                    ],
-                    "artifact_relative_path": "result.json",
-                },
-                indent=2,
-            ),
+        st.text_input(
+            "Git revision",
+            value=current_identity.git_revision if current_identity else "",
+            disabled=True,
         )
-        prepare = st.form_submit_button("STAGED bundle 생성·검증")
-    if prepare:
+        prepare = st.form_submit_button(
+            "STAGED bundle 생성·검증",
+            disabled=current_identity is None,
+        )
+    if prepare and current_identity is not None:
         try:
-            runtime_profile = json.loads(runtime_profile_text)
-            runner = json.loads(runner_text)
-            if not isinstance(runtime_profile, dict) or not isinstance(runner, dict):
-                raise ValueError("profile과 runner는 JSON 객체여야 합니다")
-            stage = release_assets.prepare_release_stage(
+            stage = release_assets.prepare_current_project_release_stage(
                 root,
-                app_source=app_source,
-                runtime_source=runtime_source,
-                runtime_profile=runtime_profile,
-                runner=runner,
-                app_version=app_version.removeprefix("v"),
-                git_revision=git_revision,
+                project_root=settings_module.BASE_DIR,
             )
         except (
-            json.JSONDecodeError,
             ValueError,
             OSError,
             release_assets.ReleaseAssetError,
         ) as exc:
             st.error(f"STAGED bundle을 만들지 못했습니다: {exc}")
         else:
-            st.session_state["monitoring_release_stage_path"] = str(stage)
+            st.session_state[_RELEASE_STAGE_PATH_KEY] = str(stage)
+            st.session_state[_RELEASE_STAGE_INPUT_KEY] = str(stage)
             st.success(f"검증된 STAGED bundle: {stage.name}")
 
-    with st.form("register_release_stage"):
-        stage_path = st.text_input(
-            "STAGED bundle 경로",
-            value=str(st.session_state.get("monitoring_release_stage_path") or ""),
-        )
-        release_tag = st.text_input("공식 tag", placeholder="v0.6.2")
-        expected_revision = st.text_input("확인할 Git revision")
-        register = st.form_submit_button("불변 Release REGISTERED 등록")
-    if register:
+    if st.session_state.pop(_RELEASE_STAGE_INPUT_RESET_KEY, False):
+        st.session_state.pop(_RELEASE_STAGE_INPUT_KEY, None)
+    suggested_stage_path = str(
+        st.session_state.get(_RELEASE_STAGE_PATH_KEY) or ""
+    )
+    if _RELEASE_STAGE_INPUT_KEY not in st.session_state:
+        st.session_state[_RELEASE_STAGE_INPUT_KEY] = suggested_stage_path
+    stage_path = st.text_input(
+        "STAGED bundle 경로",
+        key=_RELEASE_STAGE_INPUT_KEY,
+        help=(
+            "자동 생성된 STAGED가 기본 선택됩니다. 기존 STAGED를 등록하려면 "
+            "관리되는 staging 디렉터리 안의 경로를 입력하세요."
+        ),
+    )
+    staged_release: release_assets.ValidatedRelease | None = None
+    if stage_path:
         try:
-            normalized_version = release_tag.removeprefix("v")
-            existing = registry.find_release_by_version(normalized_version)
+            staged_release = release_assets.validate_managed_release_stage(
+                root,
+                stage_path,
+            )
+        except (OSError, ValueError, release_assets.ReleaseAssetError) as exc:
+            st.warning(f"선택된 STAGED bundle을 검증하지 못했습니다: {exc}")
+
+    register = False
+    if staged_release is None:
+        st.caption("먼저 STAGED bundle을 생성·검증하세요.")
+    else:
+        with st.form("register_release_stage"):
+            st.text_input(
+                "app version",
+                value=staged_release.app_version,
+                disabled=True,
+            )
+            release_tag = f"v{staged_release.app_version}"
+            st.text_input("공식 tag", value=release_tag, disabled=True)
+            st.text_input(
+                "Git revision",
+                value=staged_release.git_revision,
+                disabled=True,
+            )
+            register = st.form_submit_button("불변 Release REGISTERED 등록")
+    if register and staged_release is not None:
+        try:
+            existing = registry.find_release_by_version(
+                staged_release.app_version
+            )
             descriptor = release_assets.register_release_stage(
                 root,
                 stage_path,
                 expected_tag_version=release_tag,
-                expected_git_revision=expected_revision or None,
+                expected_git_revision=staged_release.git_revision,
                 existing_release_manifest_id=(
                     str(existing["release_manifest_id"]) if existing else None
+                ),
+                existing_git_revision=(
+                    str(existing["manifest"].get("git_revision") or "")
+                    if existing
+                    else None
+                ),
+                existing_manifest_version=(
+                    int(existing["manifest_version"]) if existing else None
                 ),
             )
             _service(registry).register_release(
@@ -2528,9 +2584,11 @@ def _render_release_registration(registry: MonitoringRegistry) -> None:
         ) as exc:
             st.error(f"Release를 등록하지 못했습니다: {exc}")
         else:
-            st.session_state.pop("monitoring_release_stage_path", None)
+            st.session_state.pop(_RELEASE_STAGE_PATH_KEY, None)
+            st.session_state[_RELEASE_STAGE_INPUT_RESET_KEY] = True
             st.success(
-                f"REGISTERED v{descriptor.app_version}: {descriptor.release_manifest_id}"
+                f"REGISTERED v{descriptor.app_version} · "
+                f"{descriptor.git_revision[:12]}"
             )
             st.rerun()
 
@@ -2544,47 +2602,12 @@ def _render_release_registration(registry: MonitoringRegistry) -> None:
                     ).value
                 except (release_assets.ReleaseAssetError, OSError, ValueError) as exc:
                     availability = f"확인 실패: {exc}"
+                if (
+                    availability == "LOCAL_MISSING"
+                    and int(release["manifest_version"]) == 2
+                ):
+                    availability += " · 실행 시 Git에서 자동 재생성"
                 st.write(f"{_release_label(release)} · {availability}")
-
-
-def _render_exact_restore(registry: MonitoringRegistry) -> None:
-    root = load_operator_api_config().artifact_root.resolve()
-    with st.form("restore_monitoring_asset"):
-        asset_kind = st.selectbox("복원 자산", ("Release", "FixedSnapshot"))
-        identity = st.text_input("기존 identity")
-        archive_path = st.text_input("exact bytes 백업 경로")
-        restore = st.form_submit_button("hash 검증 후 exact 복원")
-    if not restore:
-        return
-    try:
-        if asset_kind == "Release":
-            record = registry.get_release_manifest(identity)
-            release_assets.restore_release_bundle(
-                root,
-                _descriptor_from_record(root, record),
-                archive_path,
-            )
-        else:
-            restored = fixed_snapshot.restore_fixed_snapshot(
-                archive_path,
-                root / "fixed-snapshots",
-            )
-            if restored.revision_id != identity:
-                raise fixed_snapshot.FixedSnapshotError(
-                    "backup bytes do not match the requested Snapshot identity"
-                )
-            _service(registry).register_fixed_snapshot(restored)
-    except (
-        MonitoringRegistryError,
-        OSError,
-        ValueError,
-        release_assets.ReleaseAssetError,
-        fixed_snapshot.FixedSnapshotError,
-    ) as exc:
-        st.error(f"자산을 복원하지 못했습니다: {exc}")
-    else:
-        st.success("같은 identity의 exact bytes를 복원했습니다.")
-        st.rerun()
 
 
 def _render_asset_settings(
@@ -2592,7 +2615,10 @@ def _render_asset_settings(
 ) -> None:
     with st.expander("설정 · 재현 자산 경고", expanded=False):
         st.write(
-            "평소에는 세 작업공간만 사용합니다. 등록 기록은 있지만 로컬 bytes가 없거나 손상·비호환인 예외만 이곳에 모아 보여줍니다."
+            "평소에는 세 작업공간만 사용합니다. 등록 기록은 있지만 로컬 bytes가 "
+            "없거나 손상·비호환인 예외만 이곳에 모아 보여줍니다. Git Release의 "
+            "누락 cache는 실행 시 등록 commit에서 자동 재생성하며, 손상된 Release와 "
+            "FixedSnapshot은 기존 기록을 덮어쓰지 않습니다."
         )
         warnings = _asset_warnings(registry)
         control_warning = _control_projection_warning(client, registry)
@@ -2643,8 +2669,6 @@ def _render_asset_settings(
                         )
                         st.rerun()
         _render_release_registration(registry)
-        st.markdown("**가용성 복구**")
-        _render_exact_restore(registry)
 
 
 def render_operator_monitoring_page() -> None:

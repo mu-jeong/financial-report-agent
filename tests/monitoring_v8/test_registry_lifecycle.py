@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.core import release_assets
 from src.core.operator_monitoring import (
     ImmutableRecordError,
     MonitoringContractError,
@@ -294,7 +295,7 @@ def test_registry_migrates_legacy_closed_without_guessing_its_outcome(
     assert legacy["status"] == "CLOSED"
     assert sqlite3.connect(db_path).execute(
         "SELECT value FROM monitoring_meta WHERE key = 'schema_version'"
-    ).fetchone() == ("2",)
+    ).fetchone() == ("3",)
 
     categorized = registry.transition_issue(
         "issue-legacy",
@@ -570,6 +571,194 @@ def test_run_lifecycle_terminal_artifact_is_create_only_and_retry_is_new(
     )
     assert retry["run_id"] != first["run_id"]
     assert Path(first["artifact_path"]).read_bytes() == original_bytes
+
+
+def test_run_runtime_profile_is_an_immutable_queued_input(
+    registry: MonitoringRegistry,
+) -> None:
+    issue = _issue(registry)
+    fixture = _ready_fixture(registry, issue["issue_id"])
+    snapshot = _snapshot(registry)
+    case = _ready_case(
+        registry,
+        issue["issue_id"],
+        fixture["fixture_revision_id"],
+        snapshot["fixed_snapshot_revision_id"],
+    )
+    release = _release(registry, "release-v0.6.1", "v0.6.1")
+    runtime_profile = {
+        "environment": {"SEARCH_TOP_K": 7},
+        "snapshot_reader": {"manifest_schema_version": 2},
+    }
+
+    queued = registry.queue_run(
+        issue_id=issue["issue_id"],
+        case_contract_id=case["case_contract_id"],
+        release_manifest_id=release["release_manifest_id"],
+        side="BASELINE",
+        runtime_profile=runtime_profile,
+    )
+
+    assert queued["runtime_profile"] == runtime_profile
+    assert registry.list_runs(issue_id=issue["issue_id"])[0][
+        "runtime_profile"
+    ] == runtime_profile
+    with sqlite3.connect(registry.db_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="run inputs are immutable"):
+            connection.execute(
+                "UPDATE runs SET runtime_profile_json = '{}' WHERE run_id = ?",
+                (queued["run_id"],),
+            )
+
+
+def test_registry_migrates_schema_v2_runs_to_immutable_runtime_profiles(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "monitoring-v2.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE monitoring_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO monitoring_meta(key, value) VALUES ('schema_version', '2');
+            CREATE TABLE release_manifests (
+                release_manifest_id TEXT PRIMARY KEY,
+                release_tag TEXT NOT NULL UNIQUE,
+                app_version TEXT NOT NULL,
+                manifest_version INTEGER NOT NULL,
+                lifecycle_status TEXT NOT NULL,
+                runtime_bundle_digest TEXT NOT NULL UNIQUE,
+                bundle_relpath TEXT NOT NULL UNIQUE,
+                manifest_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO release_manifests VALUES (
+                'release-v2', 'v0.6.2', '0.6.2', 1, 'REGISTERED',
+                'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                'releases/release-v2', '{"runner_contract_version":1}',
+                '2026-08-01T00:00:00+00:00'
+            );
+            CREATE TABLE runs (
+                run_id TEXT PRIMARY KEY,
+                issue_id TEXT NOT NULL,
+                case_contract_id TEXT NOT NULL,
+                release_manifest_id TEXT NOT NULL
+                    REFERENCES release_manifests(release_manifest_id),
+                side TEXT NOT NULL,
+                execution_status TEXT NOT NULL,
+                validity TEXT,
+                artifact_relpath TEXT,
+                artifact_digest TEXT,
+                queued_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT
+            );
+            INSERT INTO runs(
+                run_id, issue_id, case_contract_id, release_manifest_id,
+                side, execution_status, queued_at
+            ) VALUES (
+                'run-v2', 'issue-v2', 'case-v2', 'release-v2',
+                'CANDIDATE', 'QUEUED', '2026-08-01T00:00:00+00:00'
+            );
+            CREATE TRIGGER run_input_no_update
+            BEFORE UPDATE OF issue_id, case_contract_id, release_manifest_id, side
+            ON runs
+            BEGIN
+                SELECT RAISE(ABORT, 'run inputs are immutable');
+            END;
+            """
+        )
+
+    MonitoringRegistry(db_path, artifact_root=tmp_path / "artifacts")
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT value FROM monitoring_meta WHERE key = 'schema_version'"
+        ).fetchone() == ("3",)
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(runs)")
+        }
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'run_input_no_update'"
+        ).fetchone()[0]
+        migrated_profile = connection.execute(
+            "SELECT runtime_profile_json FROM runs WHERE run_id = 'run-v2'"
+        ).fetchone()[0]
+        foreign_key_violations = connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+    assert "runtime_profile_json" in columns
+    assert "runtime_profile_json" in trigger_sql
+    assert migrated_profile == "{}"
+    assert foreign_key_violations == []
+
+
+def test_release_cache_digest_is_integrity_metadata_not_release_identity(
+    registry: MonitoringRegistry,
+) -> None:
+    shared_cache_digest = "d" * 64
+    first_revision = "1" * 40
+    second_revision = "2" * 40
+    first_release_id = release_assets.git_release_manifest_id(
+        "0.6.2", first_revision
+    )
+    second_release_id = release_assets.git_release_manifest_id(
+        "0.6.3", second_revision
+    )
+
+    first = registry.register_release_manifest(
+        release_manifest_id=first_release_id,
+        release_tag="v0.6.2",
+        app_version="0.6.2",
+        manifest_version=2,
+        runtime_bundle_digest=shared_cache_digest,
+        bundle_relpath=f"releases/{first_release_id}",
+        manifest={
+            "schema_version": 2,
+            "app_version": "0.6.2",
+            "git_revision": first_revision,
+            "runner_contract_version": 1,
+        },
+    )
+    second = registry.register_release_manifest(
+        release_manifest_id=second_release_id,
+        release_tag="v0.6.3",
+        app_version="0.6.3",
+        manifest_version=2,
+        runtime_bundle_digest=shared_cache_digest,
+        bundle_relpath=f"releases/{second_release_id}",
+        manifest={
+            "schema_version": 2,
+            "app_version": "0.6.3",
+            "git_revision": second_revision,
+            "runner_contract_version": 1,
+        },
+    )
+
+    assert first["runtime_bundle_digest"] == shared_cache_digest
+    assert second["runtime_bundle_digest"] == shared_cache_digest
+
+
+def test_v2_release_registry_rejects_an_id_not_derived_from_version_and_commit(
+    registry: MonitoringRegistry,
+) -> None:
+    with pytest.raises(MonitoringContractError, match="version and Git commit"):
+        registry.register_release_manifest(
+            release_manifest_id="f" * 64,
+            release_tag="v0.6.2",
+            app_version="0.6.2",
+            manifest_version=2,
+            runtime_bundle_digest="d" * 64,
+            bundle_relpath="releases/" + "f" * 64,
+            manifest={
+                "schema_version": 2,
+                "app_version": "0.6.2",
+                "git_revision": "1" * 40,
+                "runner_contract_version": 1,
+            },
+        )
 
 
 def test_baseline_must_use_the_release_reported_by_the_issue(

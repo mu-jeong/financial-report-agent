@@ -3,11 +3,101 @@
 ## 현재 구현 운영 가이드
 
 원문 작성일: 2026년 7월 26일<br>
-재개정일: 2026년 8월 30일<br>
+재개정일: 2026년 8월 31일<br>
 대상: 제품 운영자 · 개발자 · 품질 검증 담당자
 문서 목적: 사용자 신고 접수, 재현 자산 고정, 릴리스별 실행, 비교 판단, 이슈 종결 계약을 현재 코드 기준으로 설명한다.
 
 > **핵심 결론:** 현재 구현에는 `신고 → Supabase 이슈 → Fixture·FixedSnapshot·Case → Baseline·Candidate Run → Comparison → 이슈 분류`의 기본 루프가 있다. 다만 Comparison 뒤 종결은 운영상 권장 순서이지 서버가 강제하는 선행 조건이 아니며, 이 문서는 hosted 배포 완료를 증명하지 않는다.
+
+### 전체 동작 화면
+
+2026년 8월 31일 Chrome의 `http://localhost:8501/`에서 한 신고를 처음부터 끝까지 따라가며 확인한 실제 화면이다. 운영 화면은 `조치 중` 신고 `b48d0660`, READY Fixture `fixture_a81a9c36`, READY Case `case_b726539165e`, 성공·유효 Baseline `run_e5ac609bae…`, 성공·유효 Candidate `run_d4df70b4df…`의 동일 계보를 사용한다.
+
+아래 캡처는 화면 연결과 저장된 증거를 읽기 전용으로 검증한 기록이다. `신고 제출`, 새 Run 실행, `불변 Comparison 저장`, `상태 변경 저장`은 누르지 않았다. 따라서 마지막 두 화면은 완료 기록이 아니라 각각 Comparison 판단 입력과 Issue 종결의 **저장 전 준비 상태**다.
+
+#### 1. Chat에서 신고 진입
+
+![문제가 발생한 assistant 응답에서 신고 폼을 연 화면](./images/monitoring/loop-01-report-intake.png)
+
+문제가 발생한 특정 응답에서 `신고`를 열어 신고 대상과 응답을 고른다.
+
+#### 2. 신고 분류·동의 범위·전송 미리보기
+
+![신고 분류, 추가 설명, 원격 포함 동의와 제출 내용 미리보기를 확인하는 화면](./images/monitoring/loop-02-report-consent.png)
+
+원격 전송 동의는 기본 해제이며, 운영자에게 보낼 최소 정보와 redaction 결과를 제출 전에 확인한다.
+
+#### 3. 작업함에서 신고 선별
+
+![상태별 신고 건수에서 조치 중인 신고 b48d0660을 선택한 화면](./images/monitoring/loop-03-work-inbox.png)
+
+운영자는 상태 필터와 신고 목록에서 처리할 Issue를 선택한다.
+
+#### 4. 신고 요약과 관측값 확인
+
+![선택한 신고의 응답 속도, 정성 판단 상태, 신고 버전과 경로를 확인하는 화면](./images/monitoring/loop-04-work-triage.png)
+
+응답 속도, 품질 판단 유무, 신고 버전, route와 동의 범위를 함께 확인한다.
+
+#### 5. 현재 근거와 다음 행동 확인
+
+![운영 배포본에서 증상이 재현됐고 버전 비교가 다음 행동임을 보여주는 화면](./images/monitoring/loop-05-next-action.png)
+
+저장된 재현 기록에서 `운영 배포본에서 증상 재현됨`을 확인하고 같은 Case의 Baseline·Candidate 비교로 이동한다.
+
+#### 6. Fixture READY 확인
+
+![질문, 기대 동작과 typed check가 고정된 READY Fixture a81a9c36 화면](./images/monitoring/loop-06-fixture-ready.png)
+
+`fixture_a81a9c36`은 질문과 기대 동작을 고정하고 답변에 `2026`이 포함되는지 검사한다.
+
+#### 7. FixedSnapshot과 ReconstructionLineage 확인
+
+![READY Case b726539165e와 FixedSnapshot revision ID를 확인하는 화면](./images/monitoring/loop-07-snapshot-lineage.png)
+
+`case_b726539165e`가 READY이고 선택한 FixedSnapshot revision 및 `PARTIAL` 운영자 정의 범위가 Case에 고정됐는지 확인한다.
+
+#### 8. 신고 버전 Baseline 실행 기록
+
+![등록된 v0.6.1 Release와 성공하고 판단에 사용할 수 있는 Baseline Run을 확인하는 화면](./images/monitoring/loop-08-baseline-run.png)
+
+신고 버전 `v0.6.1`의 저장된 Baseline Run이 `성공 · 판단에 사용 가능`인지 확인한다.
+
+#### 9. Candidate Release와 실행 진입점
+
+![등록된 v0.6.1.1 Candidate Release와 Baseline 선택 영역을 확인하는 화면](./images/monitoring/loop-09-candidate-run.png)
+
+개선 후보 `v0.6.1.1`을 선택하고 같은 Case에서 실행할 Candidate 진입점과 비교 대상 Baseline을 확인한다. 캡처 중 새 Run은 실행하지 않았다.
+
+#### 10. 같은 Case의 유효 Run 선택
+
+![성공하고 판단에 사용할 수 있는 Baseline과 Candidate Run을 나란히 선택한 화면](./images/monitoring/loop-10-run-comparison.png)
+
+양쪽 모두 한 건의 성공·유효 Run이 선택됐으며 지연 중앙값과 Run identity를 나란히 확인할 수 있다.
+
+#### 11. 답변 내용 비교
+
+![Baseline은 올해를 2025년으로 처리하고 Candidate는 2026년으로 처리한 답변 비교 화면](./images/monitoring/loop-11-answer-comparison.png)
+
+Baseline은 `올해`를 2025년으로 처리했지만 Candidate는 고정 시각에 맞춰 2026년 범위를 사용한다. 두 결과 모두 `PARTIAL` 근거 범위임을 함께 표시한다.
+
+#### 12. typed check와 runtime profile 비교
+
+![Baseline의 ANSWER_CONTAINS 2026 검사는 실패하고 Candidate 검사는 통과한 화면](./images/monitoring/loop-12-check-comparison.png)
+
+같은 `ANSWER_CONTAINS: 2026` 검사가 Baseline에서는 `false`, Candidate에서는 `true`이며 실행 profile도 함께 검토할 수 있다.
+
+#### 13. 정성 Comparison 판단 준비
+
+![개선됨 verdict와 판단 근거를 입력하고 불변 Comparison 저장을 준비하는 화면](./images/monitoring/loop-13-verdict-form.png)
+
+운영자가 정성 verdict와 근거를 기록하는 단계다. 화면은 `개선됨`을 선택한 입력 전 상태이며 Comparison을 저장하지 않았다.
+
+#### 14. Issue 종결 준비
+
+![해결됨으로 종료를 선택하고 상태 변경 사유 입력을 준비하는 화면](./images/monitoring/loop-14-close-issue.png)
+
+Comparison 근거를 검토한 뒤 `해결됨으로 종료`와 변경 사유를 준비한다. 캡처 중 상태 변경을 저장하지 않았으므로 원격 Issue는 계속 `조치 중`이다.
 
 <!-- PAGE BREAK -->
 
@@ -240,7 +330,7 @@ FixedSnapshot은 실행할 때 active DB를 다시 조회하는 필터가 아니
 - 등록 가능한 상태는 검증된 `READY`뿐이다.
 - 실행 시 active catalog/index로 fallback하지 않고 Snapshot 자신의 bytes만 연다.
 
-`AVAILABLE / LOCAL_MISSING / CORRUPT / INCOMPATIBLE`는 저장 lifecycle을 되돌리는 상태가 아니라 현재 bytes에서 계산한 availability다. 복구는 동일 digest의 exact bytes만 허용한다.
+`AVAILABLE / LOCAL_MISSING / CORRUPT / INCOMPATIBLE`는 저장 lifecycle을 되돌리는 상태가 아니라 현재 bytes에서 계산한 availability다. 운영자 UI는 개별 자산의 수동 복구를 제공하지 않는다. Git Release의 `LOCAL_MISSING` cache는 실행 시 등록 commit에서 자동 재생성하고, FixedSnapshot은 새 revision과 Case로 이어간다.
 
 ## 6.3 ReconstructionLineage
 
@@ -268,9 +358,9 @@ Case는 `DRAFT → READY`이고, READY 시 canonical body에서 `case_contract_i
 
 ## 6.5 ReleaseManifest
 
-Release는 Git 이름만 저장한 기록이 아니라 과거 코드를 실행할 수 있는 immutable bundle이다. app bytes, runtime, runtime profile, runner 계약, object hash를 검증해 `REGISTERED`로 게시한다. staging은 `.env` 변형, private-key container·marker, VCS metadata를 거부하며 `.env.example`과 공개 인증서는 허용한다.
+Release의 의미상 identity는 `app version + full Git commit`이다. 시스템은 clean 상태의 README와 Git HEAD에서 두 값을 자동으로 읽고, worktree가 아니라 해당 commit의 추적 파일로 app/runtime cache를 만든다. runner 계약과 object hash를 검증한 뒤 `REGISTERED`로 게시하지만 build·bundle digest는 cache 무결성 metadata일 뿐 identity가 아니다. `.env`, private-key container·marker, VCS metadata는 cache에 포함하지 않으며 `.env.example`과 공개 인증서는 허용한다.
 
-공식 최초 baseline은 `v0.6.1`과 지정된 remote git revision이다. 로컬에만 있었던 `v0.6.0`은 등록하지 않는다. 동일 app version을 다른 bytes로 다시 등록할 수 없고, 손상·누락·reader 비호환이면 Run을 시작하지 않는다.
+공식 최초 baseline은 `v0.6.1`과 지정된 remote git revision이다. 로컬에만 있었던 `v0.6.0`은 등록하지 않는다. 동일 app version을 다른 commit으로 다시 등록할 수 없다. cache가 누락되면 등록 commit에서 자동 재생성하며, Git object가 없거나 재생성 checksum이 다르거나 cache가 손상·reader 비호환이면 Run을 시작하지 않는다. 과거 schema v1 bundle은 그대로 읽지만 누락 시 자동 재생성하지 않는다.
 
 # 7. Run과 Comparison
 
@@ -288,7 +378,7 @@ Baseline은 해당 Issue가 신고된 release를 사용해야 한다. 현재 UI�
 QUEUED → RUNNING → SUCCEEDED | FAILED | CANCELLED | INTERRUPTED
 ```
 
-Issue, Case, Release, side는 queue 뒤 변경할 수 없다. terminal 전이는 result artifact를 create-only 방식으로 먼저 만들고 digest와 상대 경로를 registry에 연결한다. 로컬 terminal record를 불변 저장한 뒤 원격 terminal projection을 best-effort로 동기화하며, 원격 실패는 로컬 결과를 되돌리지 않고 경고로 남긴다. 반면 `QUEUED`·`RUNNING` projection 실패는 실행을 중단한다. terminal Run은 덮어쓰지 않는다.
+Issue, Case, Release, side, runtime profile은 queue 뒤 변경할 수 없다. terminal 전이는 result artifact를 create-only 방식으로 먼저 만들고 digest와 상대 경로를 registry에 연결한다. 로컬 terminal record를 불변 저장한 뒤 원격 terminal projection을 best-effort로 동기화하며, 원격 실패는 로컬 결과를 되돌리지 않고 경고로 남긴다. 반면 `QUEUED`·`RUNNING` projection 실패는 실행을 중단한다. terminal Run은 덮어쓰지 않는다.
 
 성공 Run은 다음 증거를 요구한다.
 
@@ -300,7 +390,7 @@ Issue, Case, Release, side는 queue 뒤 변경할 수 없다. terminal 전이는
 - latency
 - Case의 evidence qualifier
 
-registered runtime profile과 실제 runner profile이 다르면 실행이 성공했어도 `INVALID`다. 공식 비교에는 `SUCCEEDED + VALID` Run만 사용할 수 있다.
+queue에 고정한 runtime profile과 실제 runner profile이 다르면 실행이 성공했어도 `INVALID`다. 공식 비교에는 `SUCCEEDED + VALID` Run만 사용할 수 있다.
 
 ## 7.3 반복 실행
 
@@ -424,11 +514,12 @@ Chat graph의 저장 schema, 렌더링, legacy 호환과 화면 세부 계약은
 | `raw_unavailable` | 원문 삭제·보존 만료·저장 부재 | 요약만으로 Fixture를 확정하지 말고 부족한 근거를 명시 |
 | control drift | 원격 identity·digest·revision이 로컬과 불일치 | UI에서 새 Run·전환 요청을 중단하고 exact 로컬 artifact와 projection을 대조 |
 | active catalog 불가 | Snapshot 후보 원천을 신뢰할 수 없음 | active publication 복구 후 다시 목록을 읽고 fallback 금지 |
-| Snapshot missing·corrupt·incompatible | READY identity의 현재 bytes를 실행할 수 없음 | 동일 digest backup으로 exact restore 또는 새 Case revision |
-| Release missing·corrupt·incompatible | registered release를 실행할 수 없음 | 같은 manifest bytes를 exact restore; 다른 bytes로 같은 version 대체 금지 |
+| Snapshot missing·corrupt·incompatible | READY identity의 현재 bytes를 실행할 수 없음 | 현재 자료로 새 Snapshot revision을 만들고 새 Case revision에 연결 |
+| Release cache missing | registered Git release의 로컬 실행 cache가 없음 | 등록된 version·commit에서 자동 재생성하고 checksum 검증; Git object가 없으면 실행 차단 |
+| Release corrupt·incompatible | cache checksum 또는 reader 계약 불일치 | 기존 cache를 덮어쓰지 않고 원인을 확인한 뒤 새 version·commit으로 등록 |
 | 미완료 Run | 이전 process가 terminal artifact를 남기지 못함 | 다른 process가 없음을 확인한 뒤 `INTERRUPTED + INVALID`로 봉인 |
 | runner 실패·timeout | 격리 실행이 정상 artifact를 만들지 못함 | typed error와 제한된 메시지를 보존하고 원인 수정 후 새 Run |
-| artifact digest mismatch | 파일 손상 또는 교체 | 결과를 사용하지 말고 exact 복원; terminal record 덮어쓰기 금지 |
+| artifact digest mismatch | 파일 손상 또는 교체 | 결과를 사용하지 않고 원인을 수정한 뒤 새 Run 실행; terminal record 덮어쓰기 금지 |
 
 `method_not_allowed`는 클라이언트 method를 GET으로 바꾸는 문제가 아니다. 현재 lifecycle API는 `/issues/{id}/start|resolve|dismiss|reopen`에 POST를 사용한다. 서버가 이 route를 모르면 Function·migration 배포 버전이 맞는지 확인해야 한다.
 

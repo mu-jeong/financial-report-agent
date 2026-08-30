@@ -442,59 +442,6 @@ def derive_fixed_snapshot_availability(
     return FixedSnapshotAvailability.AVAILABLE
 
 
-def restore_fixed_snapshot(
-    archived_snapshot: str | Path,
-    managed_root: str | Path,
-    *,
-    reader_contract: str = DEFAULT_READER_CONTRACT,
-) -> FixedSnapshot:
-    """Restore exact validated artifact bytes without changing revision identity."""
-
-    archive = Path(archived_snapshot).resolve(strict=True)
-    source = _open_artifact_path(
-        archive,
-        expected_reader_contract=reader_contract,
-    )
-    root = _prepare_managed_root(managed_root)
-    final_path = _managed_revision_path(root, source.revision_id)
-    if final_path.exists():
-        existing = _open_artifact_path(
-            final_path,
-            expected_reader_contract=reader_contract,
-        )
-        return FixedSnapshot(existing.revision_id, existing.path, existing.manifest)
-
-    temporary = Path(tempfile.mkdtemp(prefix=".temp-restore-", dir=root))
-    try:
-        for filename in (CATALOG_FILENAME, INDEX_FILENAME, MANIFEST_FILENAME):
-            shutil.copyfile(archive / filename, temporary / filename)
-        copied = _open_artifact_path(
-            temporary,
-            expected_reader_contract=reader_contract,
-        )
-        if copied.revision_id != source.revision_id:
-            raise FixedSnapshotError("restored bytes changed revision identity")
-        try:
-            temporary.rename(final_path)
-        except OSError as exc:
-            if not final_path.exists():
-                raise FixedSnapshotError(f"atomic restore failed: {exc}") from exc
-            existing = _open_artifact_path(
-                final_path,
-                expected_reader_contract=reader_contract,
-            )
-            return FixedSnapshot(existing.revision_id, existing.path, existing.manifest)
-        temporary = final_path
-        restored = _open_artifact_path(
-            final_path,
-            expected_reader_contract=reader_contract,
-        )
-        return FixedSnapshot(restored.revision_id, restored.path, restored.manifest)
-    finally:
-        if temporary.exists() and temporary.name.startswith(".temp-restore-"):
-            _remove_managed_temporary(root, temporary)
-
-
 def _read_projection_selection(
     catalog_path: Path,
     snapshot_path: Path,

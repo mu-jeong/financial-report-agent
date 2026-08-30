@@ -186,11 +186,17 @@ class ReleaseScopedMonitoringService:
         registry: MonitoringRegistry,
         *,
         managed_root: str | Path,
+        project_root: str | Path | None = None,
         snapshot_availability: Callable[[str | Path, str], Any] | None = None,
     ) -> None:
         self.registry = registry
         self.managed_root = Path(managed_root).expanduser().resolve()
         self.managed_root.mkdir(parents=True, exist_ok=True)
+        self.project_root = (
+            Path(project_root).expanduser().resolve()
+            if project_root is not None
+            else None
+        )
         self._snapshot_availability = (
             snapshot_availability or fixed_snapshot.derive_fixed_snapshot_availability
         )
@@ -423,7 +429,6 @@ class ReleaseScopedMonitoringService:
         manifest.update(
             {
                 "runner_contract_version": descriptor.runner_contract_version,
-                "runtime_profile_digest": descriptor.runtime_profile_digest,
                 "build_digest": descriptor.build_digest,
                 "git_revision": descriptor.git_revision,
                 "snapshot_reader_contract_version": (
@@ -431,11 +436,15 @@ class ReleaseScopedMonitoringService:
                 ),
             }
         )
+        if descriptor.manifest_version == release_assets.RELEASE_SCHEMA_VERSION:
+            manifest["runtime_profile_digest"] = descriptor.runtime_profile_digest
+        else:
+            manifest.pop("runtime_profile_digest", None)
         return self.registry.register_release_manifest(
             release_manifest_id=descriptor.release_manifest_id,
             release_tag=release_tag,
             app_version=descriptor.app_version,
-            manifest_version=1,
+            manifest_version=descriptor.manifest_version,
             runtime_bundle_digest=descriptor.runtime_bundle_digest,
             bundle_relpath=relative.as_posix(),
             manifest=manifest,
@@ -460,6 +469,7 @@ class ReleaseScopedMonitoringService:
                 manifest.get("snapshot_reader_contract_version") or 0
             ),
             path=self.managed_root / record["bundle_relpath"],
+            manifest_version=int(record["manifest_version"]),
         )
 
     def build_control_projection(
@@ -615,7 +625,11 @@ class ReleaseScopedMonitoringService:
                     "record_kind": "RELEASE",
                     "record_id": release_id,
                     "lifecycle_status": "REGISTERED",
-                    "content_digest": str(release["runtime_bundle_digest"]),
+                    "content_digest": (
+                        release_id
+                        if int(release["manifest_version"]) == 2
+                        else str(release["runtime_bundle_digest"])
+                    ),
                     "availability": availability,
                     "references": {},
                     "attributes": {},
@@ -765,6 +779,7 @@ class ReleaseScopedMonitoringService:
         self,
         descriptor: release_assets.ReleaseDescriptor,
         snapshot_record: Mapping[str, Any],
+        runtime_profile: Mapping[str, Any],
     ) -> dict[str, Any]:
         manifest = snapshot_record.get("manifest")
         manifest_body = manifest if isinstance(manifest, Mapping) else {}
@@ -777,7 +792,7 @@ class ReleaseScopedMonitoringService:
             raise MonitoringServiceError(
                 "Release and FixedSnapshot reader contracts are incompatible"
             )
-        profile = self._registered_runtime_profile(descriptor)
+        profile = dict(runtime_profile)
         reader = profile.get("snapshot_reader")
         if reader is not None and not isinstance(reader, Mapping):
             raise MonitoringServiceError(
@@ -864,6 +879,7 @@ class ReleaseScopedMonitoringService:
         case_contract_id: str,
         release_manifest_id: str,
         side: str,
+        runtime_profile: Mapping[str, Any] | None = None,
         timeout_seconds: float = 300.0,
         extra_environment: Mapping[str, str] | None = None,
         lifecycle_callback: Callable[[Mapping[str, Any]], None] | None = None,
@@ -936,12 +952,35 @@ class ReleaseScopedMonitoringService:
             snapshot_path = self._assert_snapshot_available(snapshot)
             descriptor = self._release_descriptor(release_manifest_id)
             release_status = release_assets.inspect_release(descriptor)
+            if (
+                release_status is release_assets.ReleaseAvailability.LOCAL_MISSING
+                and descriptor.manifest_version
+                == release_assets.GIT_RELEASE_SCHEMA_VERSION
+                and self.project_root is not None
+            ):
+                descriptor = release_assets.rebuild_release_cache_from_git(
+                    self.managed_root,
+                    project_root=self.project_root,
+                    descriptor=descriptor,
+                )
+                release_status = release_assets.inspect_release(descriptor)
             if release_status is not release_assets.ReleaseAvailability.AVAILABLE:
                 raise MonitoringServiceError(
                     f"Release bundle is unavailable: {release_status.value}"
                 )
-            registered_profile = self._assert_release_snapshot_compatible(
-                descriptor, snapshot
+            if runtime_profile is not None:
+                selected_profile = dict(runtime_profile)
+            elif descriptor.manifest_version == release_assets.RELEASE_SCHEMA_VERSION:
+                selected_profile = self._registered_runtime_profile(descriptor)
+            else:
+                raise MonitoringServiceError(
+                    "Git Release execution requires an explicit Run profile"
+                )
+            release_assets.validate_runtime_profile(selected_profile)
+            selected_profile = self._assert_release_snapshot_compatible(
+                descriptor,
+                snapshot,
+                selected_profile,
             )
         except BaseException as exc:
             report_progress(
@@ -960,6 +999,7 @@ class ReleaseScopedMonitoringService:
             case_contract_id=case_contract_id,
             release_manifest_id=release_manifest_id,
             side=side,
+            runtime_profile=selected_profile,
         )
         report_progress(
             "QUEUED",
@@ -997,6 +1037,7 @@ class ReleaseScopedMonitoringService:
                 },
                 timeout_seconds=timeout_seconds,
                 extra_environment=extra_environment,
+                runtime_profile=selected_profile,
             )
             runner_artifact = json.loads(
                 execution.artifact_path.read_text(encoding="utf-8")
@@ -1021,10 +1062,10 @@ class ReleaseScopedMonitoringService:
                 terminal_status = "SUCCEEDED"
                 validity = "VALID"
                 invalid_reason = None
-                if actual_profile != registered_profile:
+                if actual_profile != queued["runtime_profile"]:
                     validity = "INVALID"
                     invalid_reason = (
-                        "runner runtime profile differs from registered bytes"
+                        "runner runtime profile differs from queued Run input"
                     )
                 artifact = {
                     "raw_answer": runner_artifact.get("raw_answer", ""),

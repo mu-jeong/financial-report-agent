@@ -20,7 +20,6 @@ from src.core.fixed_snapshot import (
     propose_report_scope,
     propose_report_scope_from_documents,
     resolve_active_snapshot_sources,
-    restore_fixed_snapshot,
 )
 from src.retrieval.delta_schema import install_delta_schema
 from src.retrieval.schema import install_schema
@@ -231,7 +230,7 @@ def test_availability_detects_missing_corrupt_and_incompatible(tmp_path: Path):
     ) is FixedSnapshotAvailability.LOCAL_MISSING
 
 
-def test_exact_restore_keeps_revision_and_different_bytes_get_new_revision(tmp_path: Path):
+def test_snapshot_revision_identity_is_content_addressed(tmp_path: Path):
     catalog, source_index, report_uids, _ = _native_source(tmp_path)
     managed_root = tmp_path / "managed"
     first = create_fixed_snapshot(
@@ -245,15 +244,6 @@ def test_exact_restore_keeps_revision_and_different_bytes_get_new_revision(tmp_p
     )
     assert repeated.revision_id == first.revision_id
     assert first.revision_id != second.revision_id
-
-    backup = tmp_path / "backup"
-    shutil.copytree(first.path, backup)
-    shutil.rmtree(first.path)
-    restored = restore_fixed_snapshot(backup, managed_root)
-    assert restored.revision_id == first.revision_id
-    assert derive_fixed_snapshot_availability(
-        managed_root, first.revision_id
-    ) is FixedSnapshotAvailability.AVAILABLE
 
 
 def test_selection_and_managed_root_escape_fail_closed(tmp_path: Path):

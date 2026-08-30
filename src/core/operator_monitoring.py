@@ -21,7 +21,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from src.core.artifact_io import strict_json_loads
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ISSUE_STATUSES = frozenset(
     {"OPEN", "IN_PROGRESS", "RESOLVED", "NOT_ISSUE", "CLOSED"}
 )
@@ -57,6 +57,7 @@ VALID_CHECK_TYPES = frozenset(
     }
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_FULL_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _EVIDENCE_ROLES = frozenset({"OBSERVED_RESULT", "CONTEXT_USED", "CITED"})
 
 
@@ -208,7 +209,7 @@ CREATE TABLE IF NOT EXISTS release_manifests (
     app_version TEXT NOT NULL,
     manifest_version INTEGER NOT NULL,
     lifecycle_status TEXT NOT NULL CHECK (lifecycle_status = 'REGISTERED'),
-    runtime_bundle_digest TEXT NOT NULL UNIQUE,
+    runtime_bundle_digest TEXT NOT NULL,
     bundle_relpath TEXT NOT NULL UNIQUE,
     manifest_json TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -220,6 +221,7 @@ CREATE TABLE IF NOT EXISTS runs (
     case_contract_id TEXT NOT NULL REFERENCES reproduction_case_revisions(case_contract_id),
     release_manifest_id TEXT NOT NULL REFERENCES release_manifests(release_manifest_id),
     side TEXT NOT NULL CHECK (side IN ('BASELINE', 'CANDIDATE')),
+    runtime_profile_json TEXT NOT NULL,
     execution_status TEXT NOT NULL CHECK (
         execution_status IN (
             'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'INTERRUPTED'
@@ -327,7 +329,8 @@ BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS run_input_no_update
-BEFORE UPDATE OF issue_id, case_contract_id, release_manifest_id, side ON runs
+BEFORE UPDATE OF issue_id, case_contract_id, release_manifest_id, side,
+                 runtime_profile_json ON runs
 BEGIN
     SELECT RAISE(ABORT, 'run inputs are immutable');
 END;
@@ -511,16 +514,96 @@ class MonitoringRegistry:
                     "INSERT INTO monitoring_meta(key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
-            elif int(row["value"]) == 1 and SCHEMA_VERSION == 2:
+                return
+
+            version = int(row["value"])
+            if version == 1:
                 connection.executescript(_MIGRATE_SCHEMA_V1_TO_V2_SQL)
-                violations = connection.execute("PRAGMA foreign_key_check").fetchall()
-                if violations:
-                    raise MonitoringContractError(
-                        "monitoring registry migration left invalid references"
+                version = 2
+            if version == 2:
+                columns = {
+                    str(column["name"])
+                    for column in connection.execute("PRAGMA table_info(runs)")
+                }
+                add_runtime_profile = (
+                    ""
+                    if "runtime_profile_json" in columns
+                    else (
+                        "ALTER TABLE runs ADD COLUMN runtime_profile_json "
+                        "TEXT NOT NULL DEFAULT '{}';"
                     )
-            elif int(row["value"]) != SCHEMA_VERSION:
+                )
+                connection.executescript(
+                    f"""
+                    PRAGMA foreign_keys = OFF;
+                    BEGIN IMMEDIATE;
+
+                    DROP TRIGGER IF EXISTS release_no_update;
+                    DROP TRIGGER IF EXISTS release_no_delete;
+                    DROP TABLE IF EXISTS release_manifests_v3;
+                    CREATE TABLE release_manifests_v3 (
+                        release_manifest_id TEXT PRIMARY KEY,
+                        release_tag TEXT NOT NULL UNIQUE,
+                        app_version TEXT NOT NULL,
+                        manifest_version INTEGER NOT NULL,
+                        lifecycle_status TEXT NOT NULL
+                            CHECK (lifecycle_status = 'REGISTERED'),
+                        runtime_bundle_digest TEXT NOT NULL,
+                        bundle_relpath TEXT NOT NULL UNIQUE,
+                        manifest_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    INSERT INTO release_manifests_v3(
+                        release_manifest_id, release_tag, app_version,
+                        manifest_version, lifecycle_status,
+                        runtime_bundle_digest, bundle_relpath, manifest_json,
+                        created_at
+                    )
+                    SELECT
+                        release_manifest_id, release_tag, app_version,
+                        manifest_version, lifecycle_status,
+                        runtime_bundle_digest, bundle_relpath, manifest_json,
+                        created_at
+                    FROM release_manifests;
+                    DROP TABLE release_manifests;
+                    ALTER TABLE release_manifests_v3
+                        RENAME TO release_manifests;
+                    CREATE TRIGGER release_no_update
+                    BEFORE UPDATE ON release_manifests
+                    BEGIN
+                        SELECT RAISE(ABORT, 'registered releases are immutable');
+                    END;
+                    CREATE TRIGGER release_no_delete
+                    BEFORE DELETE ON release_manifests
+                    BEGIN
+                        SELECT RAISE(ABORT, 'registered releases cannot be deleted');
+                    END;
+
+                    DROP TRIGGER IF EXISTS run_input_no_update;
+                    {add_runtime_profile}
+                    CREATE TRIGGER run_input_no_update
+                    BEFORE UPDATE OF issue_id, case_contract_id,
+                                     release_manifest_id, side,
+                                     runtime_profile_json ON runs
+                    BEGIN
+                        SELECT RAISE(ABORT, 'run inputs are immutable');
+                    END;
+                    UPDATE monitoring_meta
+                       SET value = '3'
+                     WHERE key = 'schema_version';
+                    COMMIT;
+                    PRAGMA foreign_keys = ON;
+                    """
+                )
+                version = 3
+            if version != SCHEMA_VERSION:
                 raise MonitoringContractError(
                     f"unsupported monitoring registry schema: {row['value']}"
+                )
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise MonitoringContractError(
+                    "monitoring registry migration left invalid references"
                 )
 
     @staticmethod
@@ -1385,8 +1468,9 @@ class MonitoringRegistry:
         normalized = tag.removeprefix("v")
         if normalized != version:
             raise MonitoringContractError("release tag and app_version must match")
-        if int(manifest_version) != 1:
-            raise MonitoringContractError("manifest_version must be 1")
+        normalized_manifest_version = int(manifest_version)
+        if normalized_manifest_version not in {1, 2}:
+            raise MonitoringContractError("manifest_version must be 1 or 2")
         digest = _nonempty_text(runtime_bundle_digest, label="runtime_bundle_digest")
         if len(digest) != 64:
             raise MonitoringContractError("runtime_bundle_digest must be sha256")
@@ -1394,6 +1478,39 @@ class MonitoringRegistry:
         if Path(relpath).is_absolute() or ".." in Path(relpath).parts:
             raise MonitoringContractError("Release bundle_relpath must stay relative")
         manifest_body = _json_object(manifest, label="release manifest")
+        declared_schema = manifest_body.get("schema_version")
+        if declared_schema is not None:
+            try:
+                if int(declared_schema) != normalized_manifest_version:
+                    raise MonitoringContractError(
+                        "release manifest schema does not match manifest_version"
+                    )
+            except (TypeError, ValueError) as exc:
+                raise MonitoringContractError(
+                    "release manifest schema is invalid"
+                ) from exc
+        if normalized_manifest_version == 2:
+            manifest_app_version = str(
+                manifest_body.get("app_version") or ""
+            ).removeprefix("v")
+            git_revision = str(
+                manifest_body.get("git_revision") or ""
+            ).casefold()
+            expected_release_id = _json_digest(
+                {
+                    "identity_schema_version": 2,
+                    "app_version": version,
+                    "git_revision": git_revision,
+                }
+            )
+            if (
+                manifest_app_version != version
+                or not _FULL_GIT_REVISION_RE.fullmatch(git_revision)
+                or release_id != expected_release_id
+            ):
+                raise MonitoringContractError(
+                    "v2 Release identity must derive from app version and Git commit"
+                )
         if int(manifest_body.get("runner_contract_version") or 0) != 1:
             raise MonitoringContractError("runner_contract_version must be 1")
         with self._transaction() as connection:
@@ -1423,7 +1540,7 @@ class MonitoringRegistry:
                     release_id,
                     tag,
                     version,
-                    int(manifest_version),
+                    normalized_manifest_version,
                     digest,
                     relpath,
                     _canonical_json(manifest_body),
@@ -1465,10 +1582,15 @@ class MonitoringRegistry:
         case_contract_id: str,
         release_manifest_id: str,
         side: str,
+        runtime_profile: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_side = str(side).upper()
         if normalized_side not in VALID_RUN_SIDES:
             raise MonitoringContractError("Run side must be BASELINE or CANDIDATE")
+        profile = _json_object(
+            runtime_profile or {},
+            label="runtime profile",
+        )
         run_id = _opaque_id("run")
         with self._transaction() as connection:
             issue = self._fetch_one(
@@ -1506,8 +1628,8 @@ class MonitoringRegistry:
                 """
                 INSERT INTO runs(
                     run_id, issue_id, case_contract_id, release_manifest_id,
-                    side, execution_status, queued_at
-                ) VALUES (?, ?, ?, ?, ?, 'QUEUED', ?)
+                    side, runtime_profile_json, execution_status, queued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?)
                 """,
                 (
                     run_id,
@@ -1515,6 +1637,7 @@ class MonitoringRegistry:
                     case_contract_id,
                     release_manifest_id,
                     normalized_side,
+                    _canonical_json(profile),
                     _utc_now(),
                 ),
             )
@@ -1528,7 +1651,7 @@ class MonitoringRegistry:
                 (run_id,),
                 label="Run",
             )
-            return dict(row)
+            return self._decode_row(row, "runtime_profile_json")
 
     def start_run(self, run_id: str) -> dict[str, Any]:
         with self._transaction() as connection:
@@ -1797,7 +1920,7 @@ class MonitoringRegistry:
                 f"SELECT * FROM runs WHERE {' AND '.join(clauses)} ORDER BY queued_at ASC, run_id ASC",
                 tuple(parameters),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._decode_row(row, "runtime_profile_json") for row in rows]
 
     def create_comparison(
         self,
