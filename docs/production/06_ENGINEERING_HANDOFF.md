@@ -10,9 +10,11 @@
 
 > 현재 PoC/MVP 저장소의 개발 완료 목록이 아니다. 별도 운영판을 착수할 때 검토할 구현 후보와 검증 근거를 정리한 인계 초안이다.
 
+> 현재 구현 완료 범위는 [사용자 신고 기반 개선 루프](../IMPROVEMENT_LOOP.md)를 우선한다. 아래 상태표와 work package는 promotion·installer까지 확장하기 위한 2026-08-09 시점의 인계 기준선이다.
+
 ## 1. 인계 목적
 
-이 문서는 기획 정책을 구현 가능한 작업과 검증 증거로 연결한다. Supabase 이슈 접수의 구현된 서버·outbox 조각과 아직 구현되지 않은 operator/release-manifest 항목을 분리해 표현한다.
+이 문서는 기획 정책을 구현 가능한 작업과 검증 증거로 연결한다. operator/release-scoped 재현 조각은 현재 구현에 포함됐으며, 이 문서는 그 이후의 일반 관측·qualification·promotion·배포 범위를 중심으로 읽는다.
 
 개발자는 다음 원칙으로 내용을 보강한다.
 
@@ -38,8 +40,8 @@
 | 질문 임베딩·생성 제공자 | 원격 의존 방식으로 구현됨 | [`src/llms/embeddings.py`](../../src/llms/embeddings.py), [`src/llms/factory.py`](../../src/llms/factory.py) | 완전한 오프라인이 아님; 제공자 장애 경험과 상태 보존 검증 |
 | Supabase 이슈 수집 | 서버/클라이언트 1단계 hosted 검증 완료 | [`supabase/functions/issue-report-ingest`](../../supabase/functions/issue-report-ingest), [`supabase/migrations/202608090001_issue_report_ingest.sql`](../../supabase/migrations/202608090001_issue_report_ingest.sql), [`supabase/migrations/202608090002_schedule_issue_report_retention.sql`](../../supabase/migrations/202608090002_schedule_issue_report_retention.sql), [`supabase/migrations/202608090003_minimize_issue_report_payload.sql`](../../supabase/migrations/202608090003_minimize_issue_report_payload.sql), [`src/core/issue_report_outbox.py`](../../src/core/issue_report_outbox.py) | 일반 사건 수집, 운영자 경계 |
 | retry-only 신고 전송 대기함 | 1단계 구현 | [`src/core/issue_report_outbox.py`](../../src/core/issue_report_outbox.py), [`tests/test_issue_report_outbox.py`](../../tests/test_issue_report_outbox.py) | hosted soak, 운영자용 queue health, 일반 관측 이벤트 확장 |
-| 운영자 원격 화면 | 미구현 | 로컬 관측 화면만 존재 | 인증된 Supabase 조회·분류 |
-| 프로그램·수집 배포 명세 | 미구현 | 저장소에 정규 계약 없음 | 클라이언트 설치 파일과 서버 배포 식별 분리 |
+| 운영자 원격 화면 | 현재 구현에 포함 | [`apps/gui/operator_monitoring_views.py`](../../apps/gui/operator_monitoring_views.py), [`src/core/monitoring_admin_client.py`](../../src/core/monitoring_admin_client.py) | hosted 최신 배포·장기 운영 검증 |
+| 재현용 ReleaseManifest | 현재 구현에 포함 | [`src/core/release_assets.py`](../../src/core/release_assets.py), [`src/core/operator_monitoring.py`](../../src/core/operator_monitoring.py) | installer·promotion manifest와 분리 유지 |
 | 공개 설치·활성화·복구 | 미정의 | 중앙 원격 제어 경로 없음 | 수동 배포·설치·복구 계약 |
 
 ## 3. 우선순위와 의존성

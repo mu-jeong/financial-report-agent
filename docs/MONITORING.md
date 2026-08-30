@@ -1,12 +1,26 @@
 # Monitoring Mode (Native V2)
 
-Monitoring Mode는 전체 운영 상태와 개별 대화 turn을 서로 다른 깊이로 확인하는 개발자용 화면이다. `.env`의 `MONITORING_MODE=true`일 때만 노출된다.
+> 사용자 신고부터 재현·릴리스 비교·이슈 분류까지의 현재 구현 권위 문서는 [사용자 신고 기반 개선 루프](IMPROVEMENT_LOOP.md)다. 이 문서는 Monitoring 화면과 개별 Chat 지표·trace의 세부 계약을 설명한다.
+
+> 2026-08-29 운영 계약: 현재 최상위 `Monitoring`은 한 명의 admin이 사용하는 production 전용 신고 재현 화면이다. 이 문서 아래쪽의 응답 지표·trace 설명은 `Chat > 개별 Chat Monitoring`과 기존 진단 함수의 계약으로 남아 있으며, 더 이상 별도의 전역 개발자 Monitoring 메뉴를 뜻하지 않는다.
+
+`MONITORING_MODE=true`이면 로컬 `Chat > 개별 Chat Monitoring`과 `개선 실험`은 사용할 수 있다. 최상위 운영자 `Monitoring`은 이 값만으로 열리지 않는다. `DEPLOYMENT_ENVIRONMENT=production`이고 Supabase URL, publishable key, 인증된 operator Edge Function URL, local managed root가 모두 유효해야 메뉴가 나타난다. 서버는 Supabase Auth 사용자와 `private.monitoring_admins.active`를 다시 확인한다.
+
+## 0. 운영자 Monitoring 범위
+
+최상위 `Monitoring`은 `작업함`, `재현 케이스`, `버전 비교` 세 화면으로 신고 확인, 재현 자산 준비, Baseline/Candidate 결과 비교를 제공한다. 자산 복구와 control drift·cleanup 경고는 별도 업무 화면을 만들지 않고 설정 expander에 표시한다.
+
+신고 접수부터 Issue 종결까지의 전체 순서는 [현재 구현된 전체 흐름](IMPROVEMENT_LOOP.md#2-현재-구현된-전체-흐름)을, 저장 권위는 [저장소와 권위의 분리](IMPROVEMENT_LOOP.md#3-저장소와-권위의-분리)를 따른다. 상태 전이·재현 자산·Run·Comparison의 불변조건은 [production Issue lifecycle](IMPROVEMENT_LOOP.md#5-production-issue-lifecycle)부터 9장까지가 기준이다. 이 문서는 그 계약을 반복하지 않고 화면에서 어떤 상태와 증거를 어떻게 보여주는지만 설명한다.
+
+작업함은 최근 신고 최대 200건의 상태별 건수와 목록을 보여준다. 신고를 선택하면 동의된 원문을 자동 조회해 최초 열람을 감사하고, Fixture/Snapshot 제안에 필요한 최소 seed만 현재 session에 둔다. 상태 변경 화면은 현재 허용된 다음 상태만 제시하고 근거 사유를 요구한다.
+
+Baseline/Candidate 실행 요청 중에는 `사전 점검 → 자산 검증 → 대기열 등록 → 모델 실행 → 결과 검증 → 결과 저장`의 실제 단계와 완료 단계 수를 표시한다. 브라우저를 다시 열었을 때는 registry의 Run 상태를 다시 읽으며, 성공 결과와 저장된 실패 정보를 같은 영역에 표시한다.
 
 활성 화면과 새 평가 산출물은 Native V2만 기준으로 삼는다. 스키마와 hash가 유효하지 않은 평가 run은 활성 화면에서 제외한다.
 
 ## 1. 화면 원칙
 
-평상시 화면에는 다음 두 지표만 표시한다.
+호환을 위해 남겨 둔 로컬 집계 화면에는 다음 두 지표만 표시한다. 현재 최상위 `Monitoring`은 이 집계 화면을 호출하지 않는다.
 
 | 지표 | 정의 |
 | --- | --- |
@@ -15,10 +29,10 @@ Monitoring Mode는 전체 운영 상태와 개별 대화 turn을 서로 다른 �
 
 속도 표본이나 승인된 V2 평가 run이 없으면 `측정 전`으로 표시한다. 데이터가 없다는 사실을 0초나 정확도 0%로 오해하지 않게 하기 위한 계약이다.
 
-나머지 정보는 기본 지표 아래의 용도별 가로 내비게이션에서 하나씩 선택한다. `운영 모니터링`과 `성능 개선 실험`을 먼저 분리하고, 선택한 그룹 안에서 세부 화면을 다시 고른다. 선택하지 않은 route, source, snapshot, parser 비교는 렌더링하지 않는다.
+이 로컬 집계 helper의 나머지 정보는 기본 지표 아래의 용도별 가로 내비게이션에서 하나씩 선택한다. `운영 모니터링`과 `성능 개선 실험`을 먼저 분리하고, 선택한 그룹 안에서 세부 화면을 다시 고른다. 선택하지 않은 route, source, snapshot, parser 비교는 렌더링하지 않는다. 새 최상위 `개선 실험`은 이 묶음을 다시 노출하지 않고 PDF 파싱 비교만 직접 렌더링한다.
 
 ```text
-Monitoring
+로컬 집계 helper (top-level 미노출)
 ├─ 응답 속도 (P95)
 ├─ 답변 정확도 (correctness-only)
 └─ 용도별 상단 내비게이션
@@ -41,13 +55,17 @@ Monitoring
 Sidebar
 ├─ Chat
 │  ├─ Chat
-│  └─ 답변 모니터링
-└─ Monitoring
+│  └─ 개별 Chat Monitoring
+├─ Monitoring
+└─ 개선 실험
 ```
 
-- `Chat > 답변 모니터링`은 선택한 응답의 `총시간`, 실제 검색 실행 방식, 요청 대상별 근거 확보, 인용 연결 상태를 먼저 보여준다. 대상별 검색시간과 사용 문서를 그 아래에 두고, 현재 대화 평균·backend 평균·응답별 시간 추이는 `대화 전체 속도 추이`에 접어 둔다. compact state, 검색 k, prompt chunk 같은 구현 상세는 `기술 세부정보`를 명시적으로 선택했을 때만 렌더링한다.
-- `Monitoring`은 모든 대화의 속도, 공통 정확도, Native V2 검색 자료 상태와 문제 처리 도구를 다룬다.
+- `Chat > 개별 Chat Monitoring`은 로그인한 운영 신고함이 아니라 현재 사용자의 대화 한 건만 보는 로컬 진단이다. 응답을 선택하면 좌측에 저장된 compact 실행 단계 그래프가 나타나고 우측은 기본적으로 `총시간`, 실제 검색 실행 방식, 요청 대상별 근거 확보, 인용 연결 상태를 보여준다. 좌측 노드를 선택하면 우측을 해당 단계의 상태·계측·입출력 요약으로 전환한다. 대상별 검색시간과 사용 문서는 전체 지표에 두고, 현재 대화 평균·backend 평균·응답별 시간 추이는 `대화 전체 속도 추이`에 접어 둔다. compact state, 검색 k, prompt chunk 같은 구현 상세는 `기술 세부정보`를 명시적으로 선택했을 때만 렌더링한다.
+- 최상위 `Monitoring`은 production 관리자만 접근하는 신고 작업함·재현 케이스·버전 비교를 다룬다. 모든 대화의 로컬 집계 화면은 더 이상 상위 메뉴로 노출하지 않는다.
+- 최상위 `개선 실험`은 운영 신고 처리와 분리된 로컬 실험 화면이며 사이드바에서만 진입한다. Chat 내부에는 같은 버튼이나 탭을 중복 노출하지 않는다. 현재는 같은 PDF 표본을 여러 파싱 엔진으로 실행해 추출 품질 지표와 결과 파일을 비교하는 기능만 제공한다.
 - `MONITORING_MODE=false`이거나 설정이 없으면 일반 Chat 화면만 렌더링한다.
+
+아래 3장 이후의 지표·trace 설명은 `Chat > 개별 Chat Monitoring`과 재사용되는 로컬 집계 함수의 세부 계약이다. Supabase 신고 원문이나 운영자 제어 기록을 이 경로에서 조회한다는 뜻이 아니다.
 
 ## 3. 기본 지표와 turn 근거
 
@@ -141,12 +159,26 @@ Vector DB 사용 근거는 최종 prompt에 들어간 passage만 기록한다. N
 
 ### 응답 원인 확인
 
-전체 Monitoring은 기존 trace drill-down을 유지한다. `Chat > 답변 모니터링`은 assistant 응답을 선택하면 다음 순서로 표시한다.
+`Chat > 개별 Chat Monitoring`에서 assistant 응답을 선택하면 좌측 그래프와 우측 상세 패널을 함께 표시한다. 신규 응답은 실행 당시 compiled LangGraph의 `xray=True` topology와 실제 task event를 응답 metadata에 스냅샷으로 저장하며, 화면은 이 데이터만으로 노드와 edge를 구성한다.
 
-- 기본: 총시간, 검색 실행 방식, 대상별 근거, 인용 연결
-- 기본: 실제로 측정된 구간만 있는 병목 표와 비교 대상별 검색 상태
-- 기본: 입력·출력 토큰, 최초 토큰, 실제 provider, 출력 토큰/초
-- 기본: 답변에 사용된 문서
+- `graph_schema_version`: 저장 계약 버전. 현재 버전은 `1`
+- `graph_manifest`: graph ID, topology revision, 노드, 일반/조건부 edge. 회사 비교 subgraph도 펼쳐서 저장
+- `node_runs`: 실행 순서, 노드 ID, invocation 회차, 완료/실패/중단 상태, trace 시작 기준 상대 시각, 실측 시간, 결과 key 이름만 저장
+- 질문, node input, node result 값, 답변 본문은 graph trace에 중복 저장하지 않음
+- 코드의 graph topology가 바뀌면 이후 응답은 새 manifest와 revision을 자동 저장하고, 과거 응답은 당시 스냅샷을 그대로 표시
+- edge는 실행 당시 topology만 나타내며 실제 통과 여부를 추정해 강조하지 않음
+- 같은 노드가 병렬 실행되면 화면의 노드 시간은 최초 시작부터 최종 종료까지의 wall-clock 구간이며, 개별 invocation 시간 합계는 별도 보조 정보로 표시
+- 제한 시간을 넘긴 응답도 deadline까지 수집한 manifest와 NodeRun을 저장하고 실행 중이던 NodeRun은 `interrupted`로 봉인
+- 현재 지원하지 않는 schema 또는 손상된 graph trace는 명시적 오류로 표시하고 6단계 그래프로 대체하지 않음
+- topology/stream 관측 계약이 깨진 경우에도 답변 자체는 유지하되 `graph_manifest.capture_error`를 저장해 신규 응답을 legacy로 오인하지 않음
+- 위 필드가 없는 기존 응답은 `input`, `query_rewrite`, `search_scope`, `routing`, `retrieval`, `answer` 6단계 호환 그래프로 표시
+
+- 좌측 기본 선택: `전체 지표`; 단계 노드를 선택하면 우측이 노드 상세로 전환
+- 우측 전체 지표: 총시간, 검색 실행 방식, 대상별 근거, 인용 연결
+- 우측 전체 지표: 실제로 측정된 구간만 있는 병목 표와 비교 대상별 검색 상태
+- 우측 전체 지표: 입력·출력 토큰, 최초 토큰, 실제 provider, 출력 토큰/초
+- 우측 전체 지표: 답변에 사용된 문서
+- 우측 노드 상세: 저장된 NodeRun 상태·시간·결과 key, 연결 edge와 기존 단계별 검색 근거
 - 접힘: 현재 대화 평균과 backend별 시간 추이
 - 접힘: 직전 성공 응답과의 차이
 - 명시적 선택: `기술 세부정보`를 선택했을 때만 query rewrite, scope, routing, retrieval/rerank, 검색 k, answer/citation, prompt chunk, compact state를 렌더링
@@ -188,7 +220,7 @@ PDF 추출 엔진 비교는 문제 문서가 의심될 때만 연다. 파일별 
 
 ### 문제 신고 경계
 
-Monitoring은 신고 목록이나 회귀 후보 lifecycle을 렌더링하지 않는다. 문제 신고는 Chat 화면에서 사용자가 동의한 항목만 redaction한 뒤 별도 SQLite outbox에 기록하고 Supabase 수신함으로 비동기 전송한다. 과거 로컬 issue artifact와 candidate API는 호환·연구용 backend로 남아 있지만 활성 Monitoring 화면의 discovery 대상은 아니다.
+`Chat > 개별 Chat Monitoring`과 아래의 legacy 집계 helper는 Supabase 신고 목록이나 production Issue lifecycle을 렌더링하지 않는다. 문제 신고는 Chat 화면에서 사용자가 동의한 항목만 redaction한 뒤 별도 SQLite outbox에 기록하고 Supabase 수신함으로 비동기 전송한다. 최상위 `Monitoring`만 인증된 신고 목록과 lifecycle을 다루며, 과거 `src/core/monitoring.py`의 로컬 candidate API는 호환·연구용 backend로 남아 있지만 production 작업함의 discovery 대상은 아니다.
 
 ## 5. V2 데이터 경계
 
@@ -197,7 +229,7 @@ Monitoring은 신고 목록이나 회귀 후보 lifecycle을 렌더링하지 않
 1. 검색 상태는 `catalog.sqlite3`, active base snapshot과 ready delta segment를 기준으로 계산한다.
 2. 무결성 검사는 V2 snapshot, membership, manifest, runtime, cleanup backlog만 본다.
 3. 정확도는 스키마·hash·실제 runtime provenance가 모두 검증된 Native V2 run만 집계한다.
-4. 신고와 회귀 후보는 활성 Monitoring 화면에서 discovery하지 않는다.
+4. 이 절의 legacy 로컬 집계 화면은 신고와 회귀 후보를 discovery하지 않는다. production 최상위 `Monitoring`은 별도 인증 경계에서 Supabase Issue를 조회한다.
 5. 계약이 유효하지 않은 평가 산출물은 현재 지표로 집계하지 않는다.
 
 ## 6. 주요 구현 파일
@@ -205,47 +237,22 @@ Monitoring은 신고 목록이나 회귀 후보 lifecycle을 렌더링하지 않
 | 영역 | 파일 |
 | --- | --- |
 | Streamlit 진입 및 page 선택 | `apps/gui/app.py`, `apps/gui/sidebar_views.py` |
-| Monitoring 화면 | `apps/gui/monitoring_views.py` |
+| production 운영자 Monitoring | `apps/gui/operator_monitoring_views.py`, `src/core/monitoring_admin_client.py` |
+| 재현 registry와 service | `src/core/operator_monitoring.py`, `src/core/operator_monitoring_service.py` |
+| FixedSnapshot·Release·runner | `src/core/fixed_snapshot.py`, `src/core/release_assets.py`, `apps/cli/reproduction_runner.py` |
+| 개별 Chat Monitoring | `apps/gui/monitoring_views.py`, `src/core/graph_observability.py` |
 | 시간·정확도·trace·V2 무결성 집계 | `src/core/monitoring.py` |
 | Chat 문제 신고 payload와 outbox | `src/core/issue_report_store.py`, `src/core/issue_report_outbox.py` |
 | Native V2 상태 | `src/core/status.py` |
 | 응답 metadata 생성 | `src/graphs/state.py`, `src/nodes/*` |
 
-## 7. 실행과 검증
+## 7. 화면 진입 조건
 
-```env
-MONITORING_MODE=true
-```
+production 운영자 화면은 `MONITORING_MODE=true`만으로 열리지 않는다. `DEPLOYMENT_ENVIRONMENT=production`, Supabase project URL·publishable key·operator Function URL, `MONITORING_ARTIFACT_ROOT`가 모두 필요하다. 전체 설정과 배포 검증은 [사용자 신고 기반 개선 루프](IMPROVEMENT_LOOP.md#13-검증과-배포-판정)를 따른다.
 
 ```bash
 streamlit run apps/gui/app.py
 ```
-
-핵심 회귀 테스트:
-
-```bash
-python -m pytest -q tests/test_monitoring.py tests/test_gui_view_contracts.py
-```
-
-검증 계약은 다음을 포함한다.
-
-- P95와 표본 수 집계
-- 개별 Chat의 최근/평균 응답시간과 RDB/Vector DB 평균 호출시간 집계
-- 개별 Chat turn별 compact state, 단계별 k, 사용 chunk·문서 식별정보 노출
-- 과거 trace는 근거가 없는 state 단계를 완료로 추정하지 않음
-- RDB 참고 문서와 Vector DB prompt chunk를 분리
-- `report_uid` 우선 문서 그룹 및 안정적 ID 미측정 상태
-- chunk/PDF/provider 본문을 turn observability metadata에 복제하지 않음
-- 근거 연결 상태와 의미 정확도를 분리
-- Native V2 provenance가 없는 응답의 latency 제외
-- latency가 정확도에 섞이지 않음
-- self-labeled/tampered run 및 runtime revision 불일치 차단
-- 평가 자료가 없을 때 `측정 전`
-- 기본 화면의 두 지표와 용도별 상단 내비게이션
-- 활성 UI는 Native V2 catalog/snapshot만 사용
-- 스키마·hash가 유효하지 않은 evaluation run의 집계 제외
-- Native V2 무결성 및 cleanup backlog 표시
-- Native V2가 없을 때 다른 DB/vector 상태를 읽거나 렌더하지 않음
 
 ## 8. 현재 한계
 
