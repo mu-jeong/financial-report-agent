@@ -12,25 +12,25 @@
 
 ### 상태별 작업함과 신고 선택
 
-![운영 Monitoring 작업함에서 상태별 신고 건수와 조치 중인 신고 b48d0660을 선택한 화면](./images/monitoring/loop-03-work-inbox.png)
+![운영 Monitoring 작업함에서 상태별 신고 건수와 조치 중인 신고 b48d0660을 선택한 화면](../images/monitoring/loop-03-work-inbox.png)
 
 최근 신고의 상태별 건수와 필터를 확인하고, 재현·비교 기록이 연결된 신고를 한 건 선택한다.
 
 ### 신고 요약과 관측값
 
-![선택한 신고의 응답 속도, 품질 판단 상태, 신고 버전과 경로를 확인하는 화면](./images/monitoring/loop-04-work-triage.png)
+![선택한 신고의 응답 속도, 품질 판단 상태, 신고 버전과 경로를 확인하는 화면](../images/monitoring/loop-04-work-triage.png)
 
 작업함은 선택한 신고의 응답 속도, 정성 판단 유무, 신고 버전, 실행 경로와 동의 범위를 한 화면에 보여준다.
 
 ### 현재 근거와 다음 할 일
 
-![운영 배포본에서 증상이 재현됐고 같은 케이스의 Baseline과 Candidate 비교가 다음 행동임을 보여주는 화면](./images/monitoring/loop-05-next-action.png)
+![운영 배포본에서 증상이 재현됐고 같은 케이스의 Baseline과 Candidate 비교가 다음 행동임을 보여주는 화면](../images/monitoring/loop-05-next-action.png)
 
 로컬 registry의 재현·비교 기록에서 파생한 진행 상태를 보여주고, 운영자가 이어서 수행할 작업을 안내한다.
 
 ### 이슈 종결 준비
 
-![해결됨으로 종료를 선택하고 상태 변경 사유를 기록하도록 준비된 화면](./images/monitoring/loop-14-close-issue.png)
+![해결됨으로 종료를 선택하고 상태 변경 사유를 기록하도록 준비된 화면](../images/monitoring/loop-14-close-issue.png)
 
 비교 근거를 검토한 뒤 허용된 다음 상태와 사유를 선택한다. 위 화면은 `해결됨으로 종료`를 선택한 저장 전 상태이며 실제 Issue 상태는 변경하지 않았다. 신고 접수부터 Fixture·Snapshot·Run·Comparison까지의 전체 화면 순서는 [사용자 신고 기반 개선 루프의 전체 동작 화면](IMPROVEMENT_LOOP.md#전체-동작-화면)을 따른다.
 

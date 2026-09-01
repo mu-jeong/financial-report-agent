@@ -17,85 +17,85 @@
 
 #### 1. Chat에서 신고 진입
 
-![문제가 발생한 assistant 응답에서 신고 폼을 연 화면](./images/monitoring/loop-01-report-intake.png)
+![문제가 발생한 assistant 응답에서 신고 폼을 연 화면](../images/monitoring/loop-01-report-intake.png)
 
 문제가 발생한 특정 응답에서 `신고`를 열어 신고 대상과 응답을 고른다.
 
 #### 2. 신고 분류·동의 범위·전송 미리보기
 
-![신고 분류, 추가 설명, 원격 포함 동의와 제출 내용 미리보기를 확인하는 화면](./images/monitoring/loop-02-report-consent.png)
+![신고 분류, 추가 설명, 원격 포함 동의와 제출 내용 미리보기를 확인하는 화면](../images/monitoring/loop-02-report-consent.png)
 
 원격 전송 동의는 기본 해제이며, 운영자에게 보낼 최소 정보와 redaction 결과를 제출 전에 확인한다.
 
 #### 3. 작업함에서 신고 선별
 
-![상태별 신고 건수에서 조치 중인 신고 b48d0660을 선택한 화면](./images/monitoring/loop-03-work-inbox.png)
+![상태별 신고 건수에서 조치 중인 신고 b48d0660을 선택한 화면](../images/monitoring/loop-03-work-inbox.png)
 
 운영자는 상태 필터와 신고 목록에서 처리할 Issue를 선택한다.
 
 #### 4. 신고 요약과 관측값 확인
 
-![선택한 신고의 응답 속도, 정성 판단 상태, 신고 버전과 경로를 확인하는 화면](./images/monitoring/loop-04-work-triage.png)
+![선택한 신고의 응답 속도, 정성 판단 상태, 신고 버전과 경로를 확인하는 화면](../images/monitoring/loop-04-work-triage.png)
 
 응답 속도, 품질 판단 유무, 신고 버전, route와 동의 범위를 함께 확인한다.
 
 #### 5. 현재 근거와 다음 행동 확인
 
-![운영 배포본에서 증상이 재현됐고 버전 비교가 다음 행동임을 보여주는 화면](./images/monitoring/loop-05-next-action.png)
+![운영 배포본에서 증상이 재현됐고 버전 비교가 다음 행동임을 보여주는 화면](../images/monitoring/loop-05-next-action.png)
 
 저장된 재현 기록에서 `운영 배포본에서 증상 재현됨`을 확인하고 같은 Case의 Baseline·Candidate 비교로 이동한다.
 
 #### 6. Fixture READY 확인
 
-![질문, 기대 동작과 typed check가 고정된 READY Fixture a81a9c36 화면](./images/monitoring/loop-06-fixture-ready.png)
+![질문, 기대 동작과 typed check가 고정된 READY Fixture a81a9c36 화면](../images/monitoring/loop-06-fixture-ready.png)
 
 `fixture_a81a9c36`은 질문과 기대 동작을 고정하고 답변에 `2026`이 포함되는지 검사한다.
 
 #### 7. FixedSnapshot과 ReconstructionLineage 확인
 
-![READY Case b726539165e와 FixedSnapshot revision ID를 확인하는 화면](./images/monitoring/loop-07-snapshot-lineage.png)
+![READY Case b726539165e와 FixedSnapshot revision ID를 확인하는 화면](../images/monitoring/loop-07-snapshot-lineage.png)
 
 `case_b726539165e`가 READY이고 선택한 FixedSnapshot revision 및 `PARTIAL` 운영자 정의 범위가 Case에 고정됐는지 확인한다.
 
 #### 8. 신고 버전 Baseline 실행 기록
 
-![등록된 v0.6.1 Release와 성공하고 판단에 사용할 수 있는 Baseline Run을 확인하는 화면](./images/monitoring/loop-08-baseline-run.png)
+![등록된 v0.6.1 Release와 성공하고 판단에 사용할 수 있는 Baseline Run을 확인하는 화면](../images/monitoring/loop-08-baseline-run.png)
 
 신고 버전 `v0.6.1`의 저장된 Baseline Run이 `성공 · 판단에 사용 가능`인지 확인한다.
 
 #### 9. Candidate Release와 실행 진입점
 
-![등록된 v0.6.1.1 Candidate Release와 Baseline 선택 영역을 확인하는 화면](./images/monitoring/loop-09-candidate-run.png)
+![등록된 v0.6.1.1 Candidate Release와 Baseline 선택 영역을 확인하는 화면](../images/monitoring/loop-09-candidate-run.png)
 
 개선 후보 `v0.6.1.1`을 선택하고 같은 Case에서 실행할 Candidate 진입점과 비교 대상 Baseline을 확인한다. 캡처 중 새 Run은 실행하지 않았다.
 
 #### 10. 같은 Case의 유효 Run 선택
 
-![성공하고 판단에 사용할 수 있는 Baseline과 Candidate Run을 나란히 선택한 화면](./images/monitoring/loop-10-run-comparison.png)
+![성공하고 판단에 사용할 수 있는 Baseline과 Candidate Run을 나란히 선택한 화면](../images/monitoring/loop-10-run-comparison.png)
 
 양쪽 모두 한 건의 성공·유효 Run이 선택됐으며 지연 중앙값과 Run identity를 나란히 확인할 수 있다.
 
 #### 11. 답변 내용 비교
 
-![Baseline은 올해를 2025년으로 처리하고 Candidate는 2026년으로 처리한 답변 비교 화면](./images/monitoring/loop-11-answer-comparison.png)
+![Baseline은 올해를 2025년으로 처리하고 Candidate는 2026년으로 처리한 답변 비교 화면](../images/monitoring/loop-11-answer-comparison.png)
 
 Baseline은 `올해`를 2025년으로 처리했지만 Candidate는 고정 시각에 맞춰 2026년 범위를 사용한다. 두 결과 모두 `PARTIAL` 근거 범위임을 함께 표시한다.
 
 #### 12. typed check와 runtime profile 비교
 
-![Baseline의 ANSWER_CONTAINS 2026 검사는 실패하고 Candidate 검사는 통과한 화면](./images/monitoring/loop-12-check-comparison.png)
+![Baseline의 ANSWER_CONTAINS 2026 검사는 실패하고 Candidate 검사는 통과한 화면](../images/monitoring/loop-12-check-comparison.png)
 
 같은 `ANSWER_CONTAINS: 2026` 검사가 Baseline에서는 `false`, Candidate에서는 `true`이며 실행 profile도 함께 검토할 수 있다.
 
 #### 13. 정성 Comparison 판단 준비
 
-![개선됨 verdict와 판단 근거를 입력하고 불변 Comparison 저장을 준비하는 화면](./images/monitoring/loop-13-verdict-form.png)
+![개선됨 verdict와 판단 근거를 입력하고 불변 Comparison 저장을 준비하는 화면](../images/monitoring/loop-13-verdict-form.png)
 
 운영자가 정성 verdict와 근거를 기록하는 단계다. 화면은 `개선됨`을 선택한 입력 전 상태이며 Comparison을 저장하지 않았다.
 
 #### 14. Issue 종결 준비
 
-![해결됨으로 종료를 선택하고 상태 변경 사유 입력을 준비하는 화면](./images/monitoring/loop-14-close-issue.png)
+![해결됨으로 종료를 선택하고 상태 변경 사유 입력을 준비하는 화면](../images/monitoring/loop-14-close-issue.png)
 
 Comparison 근거를 검토한 뒤 `해결됨으로 종료`와 변경 사유를 준비한다. 캡처 중 상태 변경을 저장하지 않았으므로 원격 Issue는 계속 `조치 중`이다.
 
@@ -425,6 +425,13 @@ Comparison에는 note와 actor가 필요하며 생성 후 변경하지 않는다
 2. 활성 `private.monitoring_admins` 사용자로 로그인한다.
 3. access token은 현재 session memory에서만 사용하고, 비밀번호와 refresh token은 남기지 않는다.
 
+초기 운영자는 Supabase Dashboard에서 초대 또는 생성한 Auth 사용자 UUID를 `private.monitoring_admins`에 active 행으로 등록해야 한다. 이 작업은 운영 DB 권한이 있는 배포 담당자가 migration 적용 후 한 번 수행하며, 앱 UI에서는 관리자 추가·권한 변경을 제공하지 않는다.
+
+```sql
+insert into private.monitoring_admins (user_id)
+values ('<auth.users.id>');
+```
+
 설정이 일부만 있거나 인증 경계가 불완전하면 Monitoring 메뉴 자체를 노출하지 않는다. 화면 숨김이 보안 경계가 아니므로 Edge Function이 JWT와 active admin membership을 다시 검사한다.
 
 ## 8.2 작업함
@@ -574,8 +581,6 @@ Chat graph의 저장 schema, 렌더링, legacy 호환과 화면 세부 계약은
 | node 회귀 비교 | official Run 간 graph topology·NodeRun 시간 비교 미구현 |
 | 사용자 후속 알림 | 해결 결과를 신고 사용자에게 전달하는 경로 미구현 |
 
-미래 목표는 `docs/production/05_IMPROVEMENT_AND_RELEASE_LOOP.md`에서 관리하되, 그 문서의 target state를 현재 구현처럼 표현하지 않는다.
-
 # 13. 검증과 배포 판정
 
 ## 13.1 로컬 구현 검증
@@ -605,7 +610,7 @@ python -m pytest -q
 6. control record create/update/conflict와 projection drift 차단 확인
 7. 실제 managed artifact root에서 Snapshot·Release·Run restore smoke 확인
 
-배포 절차는 `docs/production/05_ISSUE_REPORT_INGEST_DEPLOYMENT.md`와 현재 migration·Function source를 함께 사용한다. 배포 대상이 과거 문서의 endpoint 계약을 따르는지 추측하지 않는다.
+배포 절차는 현재 migration·Function source를 기준으로 하며, 배포 대상이 과거 문서의 endpoint 계약을 따르는지 추측하지 않는다.
 
 ## 13.3 문서 완료 기준
 
@@ -635,9 +640,8 @@ python -m pytest -q
 
 ## 14.2 관련 문서의 역할
 
-- `docs/MONITORING.md`: 운영자 화면 및 개별 Chat 지표·trace 상세
-- `docs/ARCHITECTURE.md`: 전체 데이터 흐름과 graph observability 구조
-- `docs/production/05_IMPROVEMENT_AND_RELEASE_LOOP.md`: 미래 promotion·배포 목표
+- `MONITORING.md`: 운영자 화면 및 개별 Chat 지표·trace 상세
+- `../architecture/ARCHITECTURE.md`: 전체 데이터 흐름과 graph observability 구조
 - `.omx/plans/user-feedback-error-improvement-loop-2026-07-26.md`: 초기 계획 이력
 - `.omx/plans/release-scoped-monitoring-fixture-snapshot-mvp-2026-08-17.md`: 재현 MVP 의사결정 이력
 

@@ -31,7 +31,7 @@ report_crawler → data/downloaded/*.pdf → embed_pipeline
   → native catalog + immutable composite reader → answer + references
 ```
 
-Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 별도 Python 프로세스로 실행합니다. 이미 완료된 날짜/카테고리 조합을 제외한 날짜 범위만 crawler에 전달합니다. 임베딩 파이프라인은 전체 source inventory를 한 번 스캔한 뒤 신규·변경 PDF만 파싱·임베딩합니다. 성공한 문서는 batch commit 직후 검색 가능하고, 마지막 compaction은 base와 batch vector를 재임베딩하지 않고 재배치합니다. 진행 상태는 `logs/data_update_jobs/status.json`에 기록되며 GUI는 fragment로 이 파일을 주기적으로 읽습니다. 저장 구조와 장애 복구 계약은 [`CONTINUOUS_UPDATES.md`](CONTINUOUS_UPDATES.md)에 정리합니다.
+Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 별도 Python 프로세스로 실행합니다. 이미 완료된 날짜/카테고리 조합을 제외한 날짜 범위만 crawler에 전달합니다. 임베딩 파이프라인은 전체 source inventory를 한 번 스캔한 뒤 신규·변경 PDF만 파싱·임베딩합니다. 성공한 문서는 batch commit 직후 검색 가능하고, 마지막 compaction은 base와 batch vector를 재임베딩하지 않고 재배치합니다. 진행 상태는 `logs/data_update_jobs/status.json`에 기록되며 GUI는 fragment로 이 파일을 주기적으로 읽습니다. 저장 구조와 장애 복구 계약은 [`CONTINUOUS_UPDATES.md`](../operations/CONTINUOUS_UPDATES.md)에 정리합니다.
 
 ## 3. 수집 계층
 
@@ -56,7 +56,7 @@ Profile 변경은 incremental writer가 거부합니다. `tools\recovery\REBUILD
 
 ## 5. 검색 계층
 
-![현재 LangGraph 실행 구조](./langgraph_diagram.png)
+![현재 LangGraph 실행 구조](../langgraph_diagram.png)
 
 이 다이어그램은 compiled main graph를 `xray=True`로 펼쳐 회사 비교 subgraph까지 포함한 현재 실행 구조입니다. 점선은 조건부 전이입니다.
 
@@ -181,4 +181,4 @@ python -m compileall -q apps src scripts
 python -m pytest -q
 ```
 
-활성 Native V2의 profile을 변경하는 전체 successor 절차는 [Native V2 전체 재구축](migrations/v2/V2_REBUILD.md)을 참고합니다.
+활성 Native V2의 profile을 변경하는 전체 successor 절차는 [Native V2 전체 재구축](../reference/migrations/v2/V2_REBUILD.md)을 참고합니다.

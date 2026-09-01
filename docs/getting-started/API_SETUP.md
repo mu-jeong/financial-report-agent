@@ -111,7 +111,7 @@ Native V2의 chunk overlap은 별도 환경 설정이 아니라 각 parent·chil
 
 Native V2가 활성 상태일 때는 `DATA_ROOT/retrieval/v2`를 수동으로 삭제하거나 수정하지 마세요. 일반 updater는 활성 profile과 모델·추출기·chunk 설정이 다르면 fail closed로 중단하며, 같은 profile에서는 전체 source inventory를 비교해 변경된 PDF만 처리합니다.
 
-Profile 전체를 변경해야 하면 앱과 데이터 업데이트 창을 닫고 `tools\recovery\REBUILD_V2.bat --check`로 현재 상태를 확인한 뒤 검증된 full-corpus successor를 만드세요. 자세한 절차는 [Native V2 전체 재구축](migrations/v2/V2_REBUILD.md)을 참고하세요.
+Profile 전체를 변경해야 하면 앱과 데이터 업데이트 창을 닫고 `tools\recovery\REBUILD_V2.bat --check`로 현재 상태를 확인한 뒤 검증된 full-corpus successor를 만드세요. 자세한 절차는 [Native V2 전체 재구축](../reference/migrations/v2/V2_REBUILD.md)을 참고하세요.
 
 ## 보안 주의사항
 

@@ -2,9 +2,7 @@
 
 이 문서는 프로젝트의 주요 변경 사항을 간단히 기록합니다.
 
-## Unreleased
-
-## v0.6.1.1 - 2026-08-30
+## v0.6.2 - 2026-08-31
 
 ### Fixed
 
@@ -12,6 +10,9 @@
 
 ### Changed
 
+- 문서 구조를 정리해 `docs/`를 설치·설정(getting-started), 구조(architecture), 운영(operations), 참고 자료(reference)로 나누고, `docs/README.md` 문서 지도를 추가했습니다.
+- 루트 README를 앱 소개·Quick Start·문서 지도 중심으로 간추리고 상세 내용은 하위 문서로 이동했습니다.
+- 미래 운영판 기획 초안(`docs/roadmap/`)을 제거했습니다.
 - Release identity를 README app version과 full Git commit으로 단순화하고 두 값을 clean Git 상태에서 자동으로 읽도록 변경했습니다.
 - STAGED Release cache를 worktree가 아닌 등록 commit의 추적 파일에서 만들며 `.env`와 비밀 파일을 포함하지 않도록 변경했습니다.
 - runtime profile을 Release identity에서 분리해 Run queue 시점의 불변 입력으로 저장하고 실행 artifact와 대조하도록 변경했습니다.

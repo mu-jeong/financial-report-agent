@@ -131,4 +131,4 @@ tools\recovery\REBUILD_V2.bat --check
 tools\recovery\REBUILD_V2.bat
 ```
 
-현재 활성 데이터는 `DATA_ROOT/retrieval/v2` 아래에 유지되며, 새 snapshot은 검증을 통과한 뒤에만 활성화됩니다. 자세한 절차는 [Native V2 전체 재구축](migrations/v2/V2_REBUILD.md)을 참고하세요.
+현재 활성 데이터는 `DATA_ROOT/retrieval/v2` 아래에 유지되며, 새 snapshot은 검증을 통과한 뒤에만 활성화됩니다. 자세한 절차는 [Native V2 전체 재구축](../reference/migrations/v2/V2_REBUILD.md)을 참고하세요.

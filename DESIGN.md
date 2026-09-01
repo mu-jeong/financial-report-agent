@@ -5,7 +5,7 @@
 - Status: Active
 - Last refreshed: 2026-08-30
 - Primary product surfaces: Streamlit chat, per-answer diagnostics, authenticated operator Monitoring, improvement experiments, data update controls
-- Evidence reviewed: `README.md`, `docs/MONITORING.md`, `docs/ARCHITECTURE.md`, `.omx/plans/user-feedback-error-improvement-loop-2026-07-26.md`, `apps/gui/app.py`, `apps/gui/sidebar_views.py`, `apps/gui/monitoring_views.py`, `apps/gui/operator_monitoring_views.py`, `apps/gui/data_views.py`, `src/core/monitoring.py`, `src/core/fixed_snapshot.py`, `src/core/operator_monitoring_service.py`, `src/nodes/vectordb_comparison.py`, `tests/test_gui_view_contracts.py`
+- Evidence reviewed: `README.md`, `docs/operations/MONITORING.md`, `docs/architecture/ARCHITECTURE.md`, `.omx/plans/user-feedback-error-improvement-loop-2026-07-26.md`, `apps/gui/app.py`, `apps/gui/sidebar_views.py`, `apps/gui/monitoring_views.py`, `apps/gui/operator_monitoring_views.py`, `apps/gui/data_views.py`, `src/core/monitoring.py`, `src/core/fixed_snapshot.py`, `src/core/operator_monitoring_service.py`, `src/nodes/vectordb_comparison.py`, `tests/test_gui_view_contracts.py`
 
 ## Brand
 

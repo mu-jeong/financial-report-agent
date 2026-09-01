@@ -4,11 +4,11 @@
 
 초기 준비가 끝난 뒤 앱만 다시 열 때는 `RUN_APP.bat`을 사용하세요. 이 파일은 `.venv`와 `.env`를 확인하고 retrieval runtime의 catalog와 active snapshot을 검증한 뒤 Streamlit GUI를 실행하며, 설치·수집·임베딩은 반복하지 않습니다.
 
-활성 V2의 추출 정책을 배포 기본값으로 바꾸려면 incremental update가 아니라 전체 successor 재구축이 필요합니다. 앱과 데이터 업데이트 창을 모두 닫고 `tools\recovery\REBUILD_V2.bat --check`로 읽기 전용 점검을 수행한 뒤, `tools\recovery\REBUILD_V2.bat`을 실행해 안내에 따라 진행하세요. 자세한 내용은 [Native V2 전체 재구축](migrations/v2/V2_REBUILD.md)을 참고하세요.
+활성 V2의 추출 정책을 배포 기본값으로 바꾸려면 incremental update가 아니라 전체 successor 재구축이 필요합니다. 앱과 데이터 업데이트 창을 모두 닫고 `tools\recovery\REBUILD_V2.bat --check`로 읽기 전용 점검을 수행한 뒤, `tools\recovery\REBUILD_V2.bat`을 실행해 안내에 따라 진행하세요. 자세한 내용은 [Native V2 전체 재구축](../reference/migrations/v2/V2_REBUILD.md)을 참고하세요.
 
 ## 기존 V1 사용자 마이그레이션
 
-`DATA_ROOT`에 V1 `reports.db`와 `vector_db`가 있다면 새 앱을 실행하기 전에 프로젝트 루트의 `MIGRATE_V2.bat`을 실행하세요. 기존 청크와 FAISS 벡터를 Native V2 저장 구조로 옮기므로 전체 PDF 파싱과 전체 임베딩을 다시 수행하지 않습니다. 성공 후 V1 `reports.db`와 `vector_db`는 삭제되지만, 데이터 업데이트와 재구축에 필요한 `downloaded` PDF는 유지됩니다. 자세한 절차와 실패 시 동작은 [V1 → Native V2 사용자 마이그레이션](migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
+`DATA_ROOT`에 V1 `reports.db`와 `vector_db`가 있다면 새 앱을 실행하기 전에 프로젝트 루트의 `MIGRATE_V2.bat`을 실행하세요. 기존 청크와 FAISS 벡터를 Native V2 저장 구조로 옮기므로 전체 PDF 파싱과 전체 임베딩을 다시 수행하지 않습니다. 성공 후 V1 `reports.db`와 `vector_db`는 삭제되지만, 데이터 업데이트와 재구축에 필요한 `downloaded` PDF는 유지됩니다. 자세한 절차와 실패 시 동작은 [V1 → Native V2 사용자 마이그레이션](../reference/migrations/v2/V2_MIGRATION_USER.md)을 참고하세요.
 
 ## 1. 실행 방법
 

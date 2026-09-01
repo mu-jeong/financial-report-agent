@@ -182,7 +182,7 @@ def ensure_env(progress: ProgressTracker | None = None) -> None:
 
     if api_key in API_KEY_PLACEHOLDERS:
         print("\nOpenRouter API 키가 필요합니다.")
-        print("발급 방법: docs/OPENROUTER_API_KEY.md 또는 https://openrouter.ai/settings/keys")
+        print("발급 방법: docs/getting-started/OPENROUTER_API_KEY.md 또는 https://openrouter.ai/settings/keys")
         api_key = input("OpenRouter API 키를 붙여넣고 Enter를 누르세요: ").strip()
         if not api_key:
             raise RuntimeError("OpenRouter API 키가 입력되지 않았습니다.")
@@ -302,11 +302,11 @@ def main(argv: list[str] | None = None) -> int:
     except subprocess.CalledProcessError as exc:
         print("\n[오류] 실행 중인 명령이 실패했습니다.")
         print(f"실패한 명령: {' '.join(map(str, exc.cmd if isinstance(exc.cmd, list) else [exc.cmd]))}")
-        print("문제 해결 문서: docs/QUICK_START.md, docs/OPENROUTER_API_KEY.md")
+        print("문제 해결 문서: docs/getting-started/QUICK_START.md, docs/getting-started/OPENROUTER_API_KEY.md")
         return exc.returncode or 1
     except Exception as exc:
         print(f"\n[오류] {exc}")
-        print("문제 해결 문서: docs/QUICK_START.md, docs/OPENROUTER_API_KEY.md")
+        print("문제 해결 문서: docs/getting-started/QUICK_START.md, docs/getting-started/OPENROUTER_API_KEY.md")
         return 1
 
 
