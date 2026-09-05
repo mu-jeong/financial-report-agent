@@ -8,6 +8,8 @@ import pytest
 from src.core import metadata_filters as metadata_filters_module
 from src.core.metadata_filters import (
     _active_metadata_rows,
+    _pick_ordered_mentioned_targets,
+    _safe_target_aliases,
     filter_docs_with_scores,
     infer_search_filters,
     metadata_matches,
@@ -45,6 +47,30 @@ def _isolate_repository_metadata(monkeypatch):
         "get_metadata_candidates",
         _isolated_metadata_candidates,
     )
+
+
+def test_ordered_mentioned_targets_keeps_exact_target_over_ascii_prefix_alias():
+    targets = ("반도체", "SFA반도체", "통신", "화장품")
+
+    result = _pick_ordered_mentioned_targets(
+        "반도체,통신,화장품에 대한 산업보고서 내용을 각각 정리해서 알려줘",
+        targets,
+    )
+
+    assert result == ["반도체", "통신", "화장품"]
+
+
+def test_ordered_mentioned_targets_prefers_full_company_name_over_shadowed_alias():
+    targets = ("반도체", "SFA반도체", "통신", "화장품")
+
+    result = _pick_ordered_mentioned_targets("SFA반도체 리포트 요약", targets)
+
+    assert result == ["SFA반도체"]
+
+
+def test_safe_target_aliases_derives_korean_suffix_from_ascii_prefix():
+    assert _safe_target_aliases("SFA반도체") == {"sfa반도체", "반도체"}
+    assert _safe_target_aliases("반도체") == {"반도체"}
 
 
 def test_native_metadata_candidates_follow_active_manifest_and_delta_revision(

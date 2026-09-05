@@ -109,9 +109,18 @@ def _pick_ordered_mentioned_targets(query: str, candidates: Iterable[str]) -> li
     normalized_query = _normalize_text(query)
     mentions: list[tuple[int, int, str]] = []
     for alias, owners in alias_owners.items():
-        if len(owners) != 1 or not alias:
+        if not alias:
             continue
-        canonical = next(iter(owners))
+        if len(owners) == 1:
+            canonical = next(iter(owners))
+        else:
+            # An alias that exactly equals one owner's full name wins over
+            # derived aliases. Otherwise "반도체" (industry target) would be
+            # shadowed by the ASCII-prefix alias derived from "SFA반도체".
+            exact = [owner for owner in owners if _normalize_text(owner) == alias]
+            if len(exact) != 1:
+                continue
+            canonical = exact[0]
         start = normalized_query.find(alias)
         while start >= 0:
             mentions.append((start, len(alias), canonical))
