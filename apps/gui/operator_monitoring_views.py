@@ -2730,7 +2730,7 @@ def render_operator_monitoring_page() -> None:
     top, action = st.columns([5, 1])
     with top:
         st.title("운영 Monitoring")
-        st.caption(f"로그인: {session.email} · 신고 → 재현 → 개선 비교 → 종료")
+        st.caption(f"로그인: {session.email}")
     with action:
         if st.button("로그아웃"):
             _clear_session()
