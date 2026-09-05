@@ -3,7 +3,7 @@
 ## 현재 구현 운영 가이드
 
 원문 작성일: 2026년 7월 26일<br>
-재개정일: 2026년 8월 31일<br>
+재개정일: 2026년 9월 5일<br>
 대상: 제품 운영자 · 개발자 · 품질 검증 담당자<br>
 문서 목적: 사용자 신고 접수, 재현 자산 고정, 릴리스별 실행, 비교 판단, 이슈 종결을 현재 코드 기준으로 설명한다.
 
@@ -12,6 +12,8 @@
 ### 전체 동작 화면
 
 2026년 8월 31일 `http://localhost:8501/`에서 한 신고를 처음부터 끝까지 따라간 실제 화면이다. 아래 캡처는 읽기 전용 검증 기록이며, `신고 제출`·새 Run 실행·`불변 Comparison 저장`·`상태 변경 저장`은 누르지 않았다.
+
+> **참고(2026-09-05):** 작업 공간 이름이 `재현 케이스`→`테스트 케이스 설정`, `버전 비교`→`개선 확인`으로 바뀌었고, 개선 확인 화면이 항상 Baseline·Candidate 2열로 시작해 각 열에서 실행·판단·종결한다. 아래 캡처와 단계 명칭은 이름 변경 전 화면이다.
 
 1. Chat에서 신고 진입 — 문제가 발생한 응답에서 `신고`를 연다.
 2. 신고 분류·동의·미리보기 — 원격 동의는 기본 해제, redaction 결과를 제출 전 확인.
@@ -85,7 +87,7 @@ Chat 신고
 
 한 문제를 처리하는 가장 중요한 identity는 `case_contract_id`다. Fixture·Snapshot·고정 시각·evaluator·Lineage 증명이 이 값에 묶이며, 공식 Comparison은 양쪽 Run이 같은 `case_contract_id`일 때만 가능하다.
 
-운영 화면은 세 작업 공간으로 나뉜다: **작업함**(무엇이 신고됐고 어떤 상태인가), **재현 케이스**(어떤 질문·자료로 재현하는가), **버전 비교**(신고 버전과 개선 버전이 어떻게 다른가). 내부 ID·hash는 운영자가 입력하지 않고 시스템이 계산한다.
+운영 화면은 세 작업 공간으로 나뉜다: **작업함**(무엇이 신고됐고 어떤 상태인가), **테스트 케이스 설정**(어떤 질문·자료로 재현하는가), **개선 확인**(Baseline과 Candidate를 나란히 실행·비교하고 개선 여부를 판단·종결한다). 내부 ID·hash는 운영자가 입력하지 않고 시스템이 계산한다.
 
 <!-- PAGE BREAK -->
 
@@ -196,11 +198,11 @@ insert into private.monitoring_admins (user_id) values ('<auth.users.id>');
 
 **작업함:** Issue 선택 → 동의 원문 확인 → 조사 시작 시 사유와 `IN_PROGRESS` → 원문 없으면 `raw_unavailable`(요약을 사실로 승격하지 말 것). 최근 200건이 count 기준이다.
 
-**재현 케이스:** 원문에서 reproduction seed → 기대 동작·check 검토 → Fixture READY → 관찰 UID·filter 제안 확인 → 최종 문서 범위 확정 → FixedSnapshot 생성·Lineage 예외 확인 → Case READY로 `case_contract_id` 확정. `FixedSnapshot READY 생성` 전 add/remove는 session 선택일 뿐 영속 자산이 아니다.
+**테스트 케이스 설정:** 원문에서 reproduction seed → 기대 동작·check 검토 → Fixture READY → 관찰 UID·filter 제안 확인 → 최종 문서 범위 확정 → FixedSnapshot 생성·Lineage 예외 확인 → Case READY로 `case_contract_id` 확정. `FixedSnapshot READY 생성` 전 add/remove는 session 선택일 뿐 영속 자산이 아니다.
 
-**버전 비교:** 신고 release 등록 → Baseline 실행 → 검사·답변·EvidenceRef로 재현 판단 → 미재현이면 질문·범위·Lineage·검사부터 재검토 → candidate Release 등록·같은 Case 실행 → 필요만큼 반복. 미완료 `QUEUED/RUNNING`이 있으면 새 Run 금지, 다른 process가 없을 때만 `INTERRUPTED + INVALID`로 봉인.
+**개선 확인:** 화면이 항상 Baseline·Candidate 2열로 열린다. 각 열의 실행 버튼으로 Baseline(신고 release)과 Candidate(후보 release)를 실행하고, 검사·답변·EvidenceRef로 재현 판단 → 미재현이면 질문·범위·Lineage·검사부터 재검토 → 필요만큼 반복. 미완료 `QUEUED/RUNNING`이 있으면 새 Run 금지, 다른 process가 없을 때만 `INTERRUPTED + INVALID`로 봉인.
 
-**비교·종결:** 같은 Case의 `SUCCEEDED + VALID` 선택 → 답변·근거·check·latency·profile·qualifier 비교 → verdict·note 저장 → `IMPROVED`면 projection 재확인 → 사유와 `RESOLVED`(또는 `NOT_ISSUE`). `RESOLVED`에 Comparison이 hard gate가 아니라는 현재 제한은 11장 참고.
+**비교·종결(개선 확인 탭에서 이어서):** 같은 Case의 `SUCCEEDED + VALID` 선택 → 답변·근거·check·latency·profile·qualifier 비교 → verdict·note 저장 → 그 아래 이슈 종결(`해결됨`/`이슈 아님` + 사유)로 바로 이어지며, `IMPROVED`면 projection 재확인 → 사유와 `RESOLVED`(또는 `NOT_ISSUE`). `RESOLVED`에 Comparison이 hard gate가 아니라는 현재 제한은 11장 참고.
 
 <!-- PAGE BREAK -->
 

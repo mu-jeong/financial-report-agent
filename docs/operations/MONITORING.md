@@ -17,7 +17,7 @@
 
 ## 1. 운영자 Monitoring 범위
 
-최상위 `Monitoring`은 `작업함`, `재현 케이스`, `버전 비교` 세 화면이고, 자산 availability·control drift·cleanup 경고는 설정 expander에 표시한다. 상태 전이·재현 자산·Run·Comparison의 불변조건은 [개선 루프](IMPROVEMENT_LOOP.md)가 기준이며 이 문서는 화면에서 무엇을 어떻게 보여주는지만 설명한다.
+최상위 `Monitoring`은 `작업함`, `테스트 케이스 설정`, `개선 확인` 세 화면이고, 자산 availability·control drift·cleanup 경고는 설정 expander에 표시한다. 상태 전이·재현 자산·Run·Comparison의 불변조건은 [개선 루프](IMPROVEMENT_LOOP.md)가 기준이며 이 문서는 화면에서 무엇을 어떻게 보여주는지만 설명한다.
 
 작업함은 최근 신고 최대 200건의 상태별 건수·목록을 보여주고, 신고 선택 시 동의 원문을 자동 조회해 최초 열람을 감사한다. Baseline/Candidate 실행 중에는 `사전 점검 → 자산 검증 → 대기열 등록 → 실행 → 결과 검증·저장` 단계를 표시한다. 활성 화면과 새 평가 산출물은 Native V2만 기준으로 삼는다.
 
@@ -33,7 +33,7 @@ Sidebar
 ```
 
 - `Chat > 개별 Chat Monitoring`은 자기 대화 한 건만 보는 로컬 진단이다(운영 신고함 아님). 응답 선택 시 좌측에 실행 단계 그래프, 우측에 총시간·검색 방식·대상별 근거·인용 연결을 표시한다.
-- 최상위 `Monitoring`은 production 관리자만 접근하는 신고 작업함·재현 케이스·버전 비교다.
+- 최상위 `Monitoring`은 production 관리자만 접근하는 신고 작업함·테스트 케이스 설정·개선 확인이다.
 - 최상위 `개선 실험`은 Chat 내부에 중복 노출하지 않고 사이드바에서만 진입한다.
 - `MONITORING_MODE=false`이면 일반 Chat 화면만 렌더링한다.
 
