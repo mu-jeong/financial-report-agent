@@ -278,7 +278,7 @@ def test_operator_monitoring_has_exactly_three_top_workspaces() -> None:
         and any(isinstance(target, ast.Name) and target.id == "_WORKSPACES" for target in node.targets)
     )
 
-    assert ast.literal_eval(assignment.value) == ("작업함", "재현 케이스", "버전 비교")
+    assert ast.literal_eval(assignment.value) == ("작업함", "테스트 케이스 설정", "개선 확인")
     assert "설정 · 재현 자산 경고" in source
     assert '"정확도 평가"' not in source
     assert '"문서 읽기 품질 비교"' not in source
@@ -465,8 +465,8 @@ def test_comparison_exposes_required_side_by_side_evidence() -> None:
         "check_result",
         "latency_ms",
         "runtime_profile",
-        "Baseline 필요 시 다시 실행",
-        "Candidate 필요 시 다시 실행",
+        'st.button("Baseline 실행")',
+        'st.button("Candidate 실행"',
         "supersedes_comparison_id",
     ):
         assert required in source

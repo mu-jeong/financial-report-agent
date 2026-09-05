@@ -46,7 +46,7 @@ _REPRODUCTION_SEED_PREFIX = "monitoring_reproduction_seed_"
 _RAW_REPORT_PREFIX = "monitoring_raw_report_"
 _SNAPSHOT_STATE_PREFIX = "monitoring_snapshot_"
 _MAX_SNAPSHOT_SEARCH_RESULTS = 100
-_WORKSPACES = ("작업함", "재현 케이스", "버전 비교")
+_WORKSPACES = ("작업함", "테스트 케이스 설정", "개선 확인")
 _ISSUE_STATE_LABELS = {
     "OPEN": "미확인",
     "IN_PROGRESS": "조치 중",
@@ -81,19 +81,19 @@ _ISSUE_TRANSITIONS = {
 }
 _ISSUE_TERMINAL_TARGETS = frozenset({"RESOLVED", "NOT_ISSUE"})
 _PROGRESS_LABELS = {
-    "NOT_PREPARED": "재현 케이스 준비 전",
+    "NOT_PREPARED": "테스트 케이스 준비 전",
     "NOT_OBSERVED": "아직 증상을 확인하지 못함",
     "REPRODUCED": "운영 배포본에서 증상 재현됨",
-    "NOT_COMPARED": "버전 비교 전",
+    "NOT_COMPARED": "개선 확인 전",
     "IMPROVED": "개선됨",
     "NOT_IMPROVED": "개선되지 않음",
     "REGRESSED": "이전보다 나빠짐",
     "INCONCLUSIVE": "판단 보류",
-    "PREPARE_CASE": "Fixture와 FixedSnapshot으로 재현 케이스를 준비하세요.",
+    "PREPARE_CASE": "Fixture와 FixedSnapshot으로 테스트 케이스를 준비하세요.",
     "RUN_BASELINE": "신고가 발생한 배포 버전으로 Baseline을 실행하세요.",
     "REVIEW_OR_REPEAT_BASELINE": "결과를 검토하고 필요할 때 Baseline을 다시 실행하세요.",
     "RUN_CANDIDATE": "개선 후보 버전으로 Candidate를 실행하세요.",
-    "COMPARE_RUNS": "같은 재현 케이스의 Baseline과 Candidate를 비교하세요.",
+    "COMPARE_RUNS": "같은 테스트 케이스의 Baseline과 Candidate를 비교하세요.",
     "CLOSE_ISSUE": "개선 근거를 확인한 뒤 해결됨 또는 이슈 아님으로 종결하세요.",
     "RUN_AGAIN_OR_REJUDGE": "필요한 만큼 다시 실행하거나 새 판단을 남기세요.",
     "IMPROVE_AND_RERUN": "추가 개선 후 같은 케이스로 Candidate를 다시 실행하세요.",
@@ -506,7 +506,7 @@ def _render_progress(progress: Mapping[str, str]) -> None:
 def _render_work_inbox(client: MonitoringAdminClient, registry: MonitoringRegistry) -> None:
     st.header("작업함")
     st.write(
-        "사용자가 신고한 문제의 요약과 동의된 원문을 함께 확인하고 재현 케이스로 넘기는 곳입니다."
+        "사용자가 신고한 문제의 요약과 동의된 원문을 함께 확인하고 테스트 케이스 설정으로 넘기는 곳입니다."
     )
     all_issues = client.list_issues(state=None, limit=200)
     _render_issue_state_counts(all_issues)
@@ -1521,7 +1521,7 @@ def _render_case(
                 disabled=not manual_basis,
                 placeholder="어떤 정보로 이 문서 범위를 선택했는지 기록하세요.",
             )
-            create_case = st.form_submit_button("재현 케이스 초안 만들기")
+            create_case = st.form_submit_button("테스트 케이스 초안 만들기")
         if create_case:
             try:
                 exceptions = json.loads(exceptions_text)
@@ -1914,11 +1914,11 @@ def _render_run_action(
             with st.expander(_run_option(detail), expanded=index == 0):
                 _render_run_detail(detail, title="Baseline 실행 결과")
     else:
-        st.caption("아직 이 재현 케이스의 Baseline 실행 기록이 없습니다.")
+        st.caption("아직 이 테스트 케이스의 Baseline 실행 기록이 없습니다.")
 
 
 def _render_reproduction(client: MonitoringAdminClient, registry: MonitoringRegistry) -> None:
-    st.header("재현 케이스")
+    st.header("테스트 케이스 설정")
     st.write(
         "한 번 만든 재현 조건을 버전이 바뀌어도 그대로 다시 쓰는 곳입니다. Fixture와 Case는 READY 이후 불변이며, 내용을 바꾸려면 새 revision을 만듭니다."
     )
@@ -2084,7 +2084,7 @@ def _render_saved_comparison(
 
 
 def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegistry) -> None:
-    st.header("버전 비교")
+    st.header("개선 확인")
     st.write(
         "동일한 Fixture와 FixedSnapshot, 즉 같은 case_contract_id에서 실행된 유효한 결과만 나란히 봅니다. 절대 점수로 자동 결론내리지 않고 답변·근거·검사·속도·프로필을 운영자가 정성적으로 판단합니다."
     )
@@ -2094,7 +2094,7 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
         return
     local_issue = _find_local_issue(registry, remote_issue)
     if local_issue is None or not local_issue.get("current_case_contract_id"):
-        st.info("먼저 재현 케이스를 READY로 만들고 Baseline을 실행하세요.")
+        st.info("먼저 테스트 케이스를 READY로 만들고 Baseline을 실행하세요.")
         return
     _synchronize_control_projection(
         client,
@@ -2104,7 +2104,6 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
     )
     case = registry.get_case_by_contract(str(local_issue["current_case_contract_id"]))
 
-    st.subheader("Candidate 실행")
     releases = registry.list_release_manifests()
     baseline_release_id = _reported_release_id(registry, local_issue)
     candidate_releases = [
@@ -2112,48 +2111,6 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
         for item in releases
         if item["release_manifest_id"] != baseline_release_id
     ]
-    candidate_release: str | None = None
-    if candidate_releases:
-        candidate_release = st.selectbox(
-            "개선 후보 Release",
-            [str(item["release_manifest_id"]) for item in candidate_releases],
-            key=f"candidate_release_{local_issue['issue_id']}",
-            format_func=lambda value: _release_label(
-                next(
-                    item
-                    for item in candidate_releases
-                    if item["release_manifest_id"] == value
-                )
-            ),
-        )
-    else:
-        st.warning("신고 버전과 다른 Candidate Release를 먼저 등록하세요.")
-    if st.button("Candidate 새 Run 실행", disabled=candidate_release is None):
-        assert candidate_release is not None
-        try:
-            run = _execute_new_run(
-                client,
-                registry,
-                remote_issue_id=str(remote_issue["issue_id"]),
-                issue=local_issue,
-                case=case,
-                release_manifest_id=candidate_release,
-                side="CANDIDATE",
-            )
-        except (MonitoringRegistryError, MonitoringServiceError, release_assets.ReleaseAssetError, OSError, ValueError) as exc:
-            st.error(f"Candidate 실행 실패: {exc}")
-        else:
-            if run["execution_status"] != "SUCCEEDED":
-                st.error(
-                    f"Candidate 실행이 실패 상태로 저장됐습니다: {run['run_id']}"
-                )
-            elif run["validity"] != "VALID":
-                st.warning(
-                    f"Candidate 실행은 끝났지만 판단에서 제외됐습니다: {run['run_id']}"
-                )
-            else:
-                st.success(f"Candidate Run을 저장했습니다: {run['run_id']}")
-            st.rerun()
 
     runs = registry.list_runs(
         issue_id=str(local_issue["issue_id"]),
@@ -2172,6 +2129,81 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
     baseline = [row for row in valid if row["side"] == "BASELINE"]
     candidate = [row for row in valid if row["side"] == "CANDIDATE"]
 
+    left, right = st.columns(2)
+    with left:
+        st.subheader("개선 전 · Baseline")
+        if baseline:
+            for index, run in enumerate(reversed(baseline[-5:])):
+                with st.expander(_run_option(run), expanded=index == 0):
+                    _render_run_detail(run, title="Baseline Run")
+        else:
+            st.caption("아직 실행된 Baseline이 없습니다.")
+        if st.button("Baseline 실행"):
+            try:
+                _execute_new_run(
+                    client,
+                    registry,
+                    remote_issue_id=str(remote_issue["issue_id"]),
+                    issue=local_issue,
+                    case=case,
+                    release_manifest_id=str(baseline_release_id),
+                    side="BASELINE",
+                )
+            except (MonitoringRegistryError, MonitoringServiceError, release_assets.ReleaseAssetError, OSError, ValueError) as exc:
+                st.error(f"Baseline 실행 실패: {exc}")
+            else:
+                st.rerun()
+    with right:
+        st.subheader("개선 후 · Candidate")
+        candidate_release: str | None = None
+        if candidate_releases:
+            candidate_release = st.selectbox(
+                "개선 후보 Release",
+                [str(item["release_manifest_id"]) for item in candidate_releases],
+                key=f"candidate_release_{local_issue['issue_id']}",
+                format_func=lambda value: _release_label(
+                    next(
+                        item
+                        for item in candidate_releases
+                        if item["release_manifest_id"] == value
+                    )
+                ),
+            )
+        else:
+            st.warning("신고 버전과 다른 Candidate Release를 먼저 등록하세요.")
+        if candidate:
+            for index, run in enumerate(reversed(candidate[-5:])):
+                with st.expander(_run_option(run), expanded=index == 0):
+                    _render_run_detail(run, title="Candidate Run")
+        else:
+            st.caption("아직 실행된 Candidate가 없습니다.")
+        if st.button("Candidate 실행", disabled=candidate_release is None):
+            assert candidate_release is not None
+            try:
+                run = _execute_new_run(
+                    client,
+                    registry,
+                    remote_issue_id=str(remote_issue["issue_id"]),
+                    issue=local_issue,
+                    case=case,
+                    release_manifest_id=candidate_release,
+                    side="CANDIDATE",
+                )
+            except (MonitoringRegistryError, MonitoringServiceError, release_assets.ReleaseAssetError, OSError, ValueError) as exc:
+                st.error(f"Candidate 실행 실패: {exc}")
+            else:
+                if run["execution_status"] != "SUCCEEDED":
+                    st.error(
+                        f"Candidate 실행이 실패 상태로 저장됐습니다: {run['run_id']}"
+                    )
+                elif run["validity"] != "VALID":
+                    st.warning(
+                        f"Candidate 실행은 끝났지만 판단에서 제외됐습니다: {run['run_id']}"
+                    )
+                else:
+                    st.success(f"Candidate Run을 저장했습니다: {run['run_id']}")
+                st.rerun()
+
     if invalid:
         with st.expander(
             f"판단에서 제외된 대기·실패·무효 Run {len(invalid)}건",
@@ -2187,18 +2219,9 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
                     _render_run_detail(detail, title="판단 제외 Run")
 
     if not baseline or not candidate:
-        st.info("SUCCEEDED + VALID Baseline과 Candidate가 각각 하나 이상 필요합니다.")
-        if baseline:
-            st.markdown("**확인 가능한 Baseline 결과**")
-            for index, run in enumerate(reversed(baseline[-5:])):
-                with st.expander(_run_option(run), expanded=index == 0):
-                    _render_run_detail(run, title="Baseline Run")
-        if candidate:
-            st.markdown("**확인 가능한 Candidate 결과**")
-            for index, run in enumerate(reversed(candidate[-5:])):
-                with st.expander(_run_option(run), expanded=index == 0):
-                    _render_run_detail(run, title="Candidate Run")
+        st.info("개선 전·후 버전(SUCCEEDED + VALID)이 각각 하나 이상 필요합니다.")
         return
+
     baseline_ids = st.multiselect(
         "비교할 Baseline Run",
         [row["run_id"] for row in baseline],
@@ -2230,59 +2253,26 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
         baseline_run_ids=baseline_ids,
         candidate_run_ids=candidate_ids,
     )
-    left, right = st.columns(2)
-    with left:
-        st.subheader("이전 버전 · Baseline")
-        st.metric("선택 Run", view["baseline"]["valid_run_count"])
+    st.markdown("**실행 지연 비교**")
+    latency_left, latency_right = st.columns(2)
+    with latency_left:
+        st.metric(
+            "Baseline 지연 중앙값",
+            f"{view['baseline']['latency_median_ms']:,.1f} ms",
+        )
         st.caption(
-            f"지연 중앙값 {view['baseline']['latency_median_ms']:,.1f} ms · "
             f"범위 {view['baseline']['latency_range_ms'][0]:,.1f}~"
             f"{view['baseline']['latency_range_ms'][1]:,.1f} ms"
         )
-        for run in selected_baseline:
-            with st.expander(_run_option(run), expanded=len(selected_baseline) == 1):
-                _render_run_detail(run, title="Baseline Run")
-        if st.button("Baseline 필요 시 다시 실행"):
-            try:
-                _execute_new_run(
-                    client,
-                    registry,
-                    remote_issue_id=str(remote_issue["issue_id"]),
-                    issue=local_issue,
-                    case=case,
-                    release_manifest_id=str(selected_baseline[-1]["release_manifest_id"]),
-                    side="BASELINE",
-                )
-            except (MonitoringRegistryError, MonitoringServiceError, release_assets.ReleaseAssetError, OSError, ValueError) as exc:
-                st.error(f"Baseline 반복 실행 실패: {exc}")
-            else:
-                st.rerun()
-    with right:
-        st.subheader("현재/후보 버전 · Candidate")
-        st.metric("선택 Run", view["candidate"]["valid_run_count"])
+    with latency_right:
+        st.metric(
+            "Candidate 지연 중앙값",
+            f"{view['candidate']['latency_median_ms']:,.1f} ms",
+        )
         st.caption(
-            f"지연 중앙값 {view['candidate']['latency_median_ms']:,.1f} ms · "
             f"범위 {view['candidate']['latency_range_ms'][0]:,.1f}~"
             f"{view['candidate']['latency_range_ms'][1]:,.1f} ms"
         )
-        for run in selected_candidate:
-            with st.expander(_run_option(run), expanded=len(selected_candidate) == 1):
-                _render_run_detail(run, title="Candidate Run")
-        if st.button("Candidate 필요 시 다시 실행"):
-            try:
-                _execute_new_run(
-                    client,
-                    registry,
-                    remote_issue_id=str(remote_issue["issue_id"]),
-                    issue=local_issue,
-                    case=case,
-                    release_manifest_id=str(selected_candidate[-1]["release_manifest_id"]),
-                    side="CANDIDATE",
-                )
-            except (MonitoringRegistryError, MonitoringServiceError, release_assets.ReleaseAssetError, OSError, ValueError) as exc:
-                st.error(f"Candidate 반복 실행 실패: {exc}")
-            else:
-                st.rerun()
 
     st.markdown("**선택한 대표 Run의 runtime profile 차이**")
     profile_diff = _runtime_profile_diff(
@@ -2708,7 +2698,7 @@ def render_operator_monitoring_page() -> None:
             selected = st.session_state.get(_ISSUE_KEY)
             if selected:
                 st.session_state["monitoring_selected_issue_detail"] = client.get_issue(str(selected))
-        elif workspace == "재현 케이스":
+        elif workspace == "테스트 케이스 설정":
             selected = st.session_state.get(_ISSUE_KEY)
             if selected:
                 st.session_state["monitoring_selected_issue_detail"] = client.get_issue(str(selected))

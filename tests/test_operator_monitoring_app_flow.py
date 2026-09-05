@@ -321,7 +321,7 @@ def test_reproduction_workspace_keeps_selected_issue_across_reruns(
         "11111111-1111-4111-8111-111111111111"
     )
 
-    app.session_state["monitoring_operator_workspace"] = "재현 케이스"
+    app.session_state["monitoring_operator_workspace"] = "테스트 케이스 설정"
     app.run(timeout=20)
     assert not app.exception
     assert any(
@@ -374,7 +374,7 @@ def test_snapshot_scope_is_human_readable_editable_and_stable_across_reruns(
         email="admin@example.test",
         expires_at=time.time() + 3600,
     )
-    app.session_state["monitoring_operator_workspace"] = "재현 케이스"
+    app.session_state["monitoring_operator_workspace"] = "테스트 케이스 설정"
     app.session_state["monitoring_selected_issue_id"] = remote_issue_id
     app.session_state["monitoring_selected_issue_detail"] = {
         "issue_id": remote_issue_id
@@ -485,7 +485,7 @@ def test_created_snapshot_revision_id_remains_visible_after_button_rerun(
         email="admin@example.test",
         expires_at=time.time() + 3600,
     )
-    app.session_state["monitoring_operator_workspace"] = "재현 케이스"
+    app.session_state["monitoring_operator_workspace"] = "테스트 케이스 설정"
     app.session_state["monitoring_selected_issue_id"] = remote_issue_id
     app.session_state["monitoring_selected_issue_detail"] = {
         "issue_id": remote_issue_id
@@ -533,7 +533,7 @@ def test_operator_defined_draft_requires_visible_confirmation_before_ready(
         email="admin@example.test",
         expires_at=time.time() + 3600,
     )
-    app.session_state["monitoring_operator_workspace"] = "재현 케이스"
+    app.session_state["monitoring_operator_workspace"] = "테스트 케이스 설정"
     app.session_state["monitoring_selected_issue_id"] = remote_issue_id
     app.session_state["monitoring_selected_issue_detail"] = {
         "issue_id": remote_issue_id
@@ -713,14 +713,14 @@ views.render_operator_monitoring_page()
     ("workspace", "expected_subheaders"),
     [
         (
-            "재현 케이스",
+            "테스트 케이스 설정",
             (
                 "1. Fixture — 같은 질문과 확인 기준 고정",
                 "2. FixedSnapshot과 ReconstructionLineage",
                 "3. 신고 버전 Baseline 실행",
             ),
         ),
-        ("버전 비교", ("Baseline Run", "Candidate Run")),
+        ("개선 확인", ("Baseline Run", "Candidate Run")),
     ],
 )
 def test_operator_completed_cycle_workspaces_render_without_error(
