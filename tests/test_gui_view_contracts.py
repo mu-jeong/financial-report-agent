@@ -150,7 +150,6 @@ EXPLICIT_WIDGET_KEYS = {
     "'monitoring_login_password'",
     "'monitoring_recovery_no_active_process'",
     "_ISSUE_SELECTOR_KEY",
-    "_RELEASE_STAGE_INPUT_KEY",
     "_WORKSPACE_KEY",
     'f"baseline_release_{local_issue[\'issue_id\']}"',
     'f"candidate_release_{local_issue[\'issue_id\']}"',

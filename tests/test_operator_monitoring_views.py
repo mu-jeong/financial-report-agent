@@ -369,26 +369,23 @@ def test_release_registration_builds_project_sources_without_operator_paths() ->
     assert 'git_revision = st.text_input("Git revision"' not in release_registration
 
 
-def test_release_registration_derives_read_only_identity_from_staged_manifest() -> None:
+def test_release_registration_derives_read_only_identity_from_current_project() -> None:
     source = VIEW_PATH.read_text(encoding="utf-8")
     release_registration = source.split(
         "def _render_release_registration(", 1
     )[1].split("def _render_asset_settings(", 1)[0]
-    before_register_form, register_form = release_registration.split(
-        'with st.form("register_release_stage"):', 1
-    )
 
-    assert "release_assets.validate_managed_release_stage(" in release_registration
-    assert '"STAGED bundle 경로"' in before_register_form
-    assert '"STAGED bundle 경로"' not in register_form
-    assert 'release_tag = st.text_input("공식 tag"' not in register_form
-    assert 'expected_revision = st.text_input("확인할 Git revision"' not in register_form
-    assert 'value=staged_release.app_version' in register_form
-    assert 'value=release_tag' in register_form
-    assert 'value=staged_release.git_revision' in register_form
-    assert register_form.count("disabled=True") >= 3
-    assert 'release_tag = f"v{staged_release.app_version}"' in register_form
-    assert "expected_git_revision=staged_release.git_revision" in register_form
+    assert 'with st.form("register_release"):' in release_registration
+    assert 'with st.form("register_release_stage"):' not in release_registration
+    assert '"STAGED bundle 경로"' not in release_registration
+    assert 'release_tag = st.text_input("공식 tag"' not in release_registration
+    assert "release_assets.prepare_current_project_release_stage(" in release_registration
+    assert "release_assets.register_release_stage(" in release_registration
+    assert 'release_tag = f"v{current_identity.app_version}"' in release_registration
+    assert "expected_git_revision=current_identity.git_revision" in release_registration
+    assert "value=current_identity.app_version" in release_registration
+    assert "value=current_identity.git_revision" in release_registration
+    assert release_registration.count("disabled=True") >= 2
 
 
 def test_asset_settings_warns_without_manual_exact_restore_controls() -> None:

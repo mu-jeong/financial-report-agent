@@ -45,9 +45,6 @@ _WORKSPACE_KEY = "monitoring_operator_workspace"
 _REPRODUCTION_SEED_PREFIX = "monitoring_reproduction_seed_"
 _RAW_REPORT_PREFIX = "monitoring_raw_report_"
 _SNAPSHOT_STATE_PREFIX = "monitoring_snapshot_"
-_RELEASE_STAGE_PATH_KEY = "monitoring_release_stage_path"
-_RELEASE_STAGE_INPUT_KEY = "monitoring_release_stage_path_input"
-_RELEASE_STAGE_INPUT_RESET_KEY = "monitoring_release_stage_path_input_reset"
 _MAX_SNAPSHOT_SEARCH_RESULTS = 100
 _WORKSPACES = ("작업함", "재현 케이스", "버전 비교")
 _ISSUE_STATE_LABELS = {
@@ -2513,12 +2510,8 @@ def _default_release_runtime_profile() -> dict[str, Any]:
 
 def _render_release_registration(registry: MonitoringRegistry) -> None:
     root = load_operator_api_config().artifact_root.resolve()
-    st.markdown("**Release 준비·등록**")
-    st.caption(
-        "README의 app version과 현재 Git commit을 자동으로 식별하고, "
-        "그 commit의 실행 코드를 STAGED cache로 생성해 등록합니다."
-    )
-    st.caption(f"자동 package 원본: {settings_module.BASE_DIR}")
+    st.markdown("**Release 등록**")
+    st.caption("현재 Git commit의 실행 코드를 불변 Release로 등록합니다.")
     current_identity: release_assets.GitReleaseIdentity | None = None
     try:
         current_identity = release_assets.inspect_current_project_release(
@@ -2529,7 +2522,7 @@ def _render_release_registration(registry: MonitoringRegistry) -> None:
             "Git Release를 준비할 수 없습니다. 추적 중인 Release 파일을 "
             f"commit한 뒤 다시 확인하세요: {exc}"
         )
-    with st.form("prepare_release_stage"):
+    with st.form("register_release"):
         st.text_input(
             "app version",
             value=current_identity.app_version if current_identity else "",
@@ -2540,80 +2533,25 @@ def _render_release_registration(registry: MonitoringRegistry) -> None:
             value=current_identity.git_revision if current_identity else "",
             disabled=True,
         )
-        prepare = st.form_submit_button(
-            "STAGED bundle 생성·검증",
+        register = st.form_submit_button(
+            "Release 등록",
             disabled=current_identity is None,
         )
-    if prepare and current_identity is not None:
+    if register and current_identity is not None:
         try:
             stage = release_assets.prepare_current_project_release_stage(
                 root,
                 project_root=settings_module.BASE_DIR,
             )
-        except (
-            ValueError,
-            OSError,
-            release_assets.ReleaseAssetError,
-        ) as exc:
-            st.error(f"STAGED bundle을 만들지 못했습니다: {exc}")
-        else:
-            st.session_state[_RELEASE_STAGE_PATH_KEY] = str(stage)
-            st.session_state[_RELEASE_STAGE_INPUT_KEY] = str(stage)
-            st.success(f"검증된 STAGED bundle: {stage.name}")
-
-    if st.session_state.pop(_RELEASE_STAGE_INPUT_RESET_KEY, False):
-        st.session_state.pop(_RELEASE_STAGE_INPUT_KEY, None)
-    suggested_stage_path = str(
-        st.session_state.get(_RELEASE_STAGE_PATH_KEY) or ""
-    )
-    if _RELEASE_STAGE_INPUT_KEY not in st.session_state:
-        st.session_state[_RELEASE_STAGE_INPUT_KEY] = suggested_stage_path
-    stage_path = st.text_input(
-        "STAGED bundle 경로",
-        key=_RELEASE_STAGE_INPUT_KEY,
-        help=(
-            "자동 생성된 STAGED가 기본 선택됩니다. 기존 STAGED를 등록하려면 "
-            "관리되는 staging 디렉터리 안의 경로를 입력하세요."
-        ),
-    )
-    staged_release: release_assets.ValidatedRelease | None = None
-    if stage_path:
-        try:
-            staged_release = release_assets.validate_managed_release_stage(
-                root,
-                stage_path,
-            )
-        except (OSError, ValueError, release_assets.ReleaseAssetError) as exc:
-            st.warning(f"선택된 STAGED bundle을 검증하지 못했습니다: {exc}")
-
-    register = False
-    if staged_release is None:
-        st.caption("먼저 STAGED bundle을 생성·검증하세요.")
-    else:
-        with st.form("register_release_stage"):
-            st.text_input(
-                "app version",
-                value=staged_release.app_version,
-                disabled=True,
-            )
-            release_tag = f"v{staged_release.app_version}"
-            st.text_input("공식 tag", value=release_tag, disabled=True)
-            st.text_input(
-                "Git revision",
-                value=staged_release.git_revision,
-                disabled=True,
-            )
-            register = st.form_submit_button("불변 Release REGISTERED 등록")
-    if register and staged_release is not None:
-        try:
+            release_tag = f"v{current_identity.app_version}"
             existing = registry.find_release_by_version(
-                staged_release.app_version
+                current_identity.app_version
             )
             descriptor = release_assets.register_release_stage(
                 root,
-                stage_path,
+                str(stage),
                 expected_tag_version=release_tag,
-                expected_git_revision=staged_release.git_revision,
+                expected_git_revision=current_identity.git_revision,
                 existing_release_manifest_id=(
                     str(existing["release_manifest_id"]) if existing else None
                 ),
@@ -2636,12 +2574,10 @@ def _render_release_registration(registry: MonitoringRegistry) -> None:
             ValueError,
             release_assets.ReleaseAssetError,
         ) as exc:
-            st.error(f"Release를 등록하지 못했습니다: {exc}")
+            st.error(f"Release 등록에 실패했습니다: {exc}")
         else:
-            st.session_state.pop(_RELEASE_STAGE_PATH_KEY, None)
-            st.session_state[_RELEASE_STAGE_INPUT_RESET_KEY] = True
             st.success(
-                f"REGISTERED v{descriptor.app_version} · "
+                f"등록 완료 v{descriptor.app_version} · "
                 f"{descriptor.git_revision[:12]}"
             )
             st.rerun()
