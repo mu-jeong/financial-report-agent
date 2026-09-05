@@ -86,7 +86,7 @@ def test_main_graph_retries_mixed_revision_through_dispatcher_once(
             revision["publication_generation"] = 3
         return [(_document(target), 1.0)], {"revision": revision}
 
-    def synthesize(_question, _query, candidates, missing):
+    def synthesize(_question, _query, candidates, missing, _annotated=None, _contract=None):
         synthesis_calls.append((len(candidates), list(missing)))
         return "comparison [1] [2]", [AIMessage(content="comparison")]
 
@@ -153,7 +153,7 @@ def test_same_thread_does_not_replay_previous_stock_tool_call(monkeypatch):
         target = filters["target_name"]
         return [(_document(target), 1.0)], {"revision": REVISION}
 
-    def synthesize(_question, _query, _candidates, _missing):
+    def synthesize(_question, _query, _candidates, _missing, _annotated=None, _contract=None):
         nonlocal synthesis_count
         synthesis_count += 1
         if synthesis_count == 1:

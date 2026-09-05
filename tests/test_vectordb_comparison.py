@@ -44,7 +44,7 @@ def _install_fakes(monkeypatch):
 
     calls = {"synthesis": 0}
 
-    def synthesize(question, query, candidates, missing):
+    def synthesize(question, query, candidates, missing, annotated_sources=None, citation_contract=None):
         calls["synthesis"] += 1
         return "answer " + " ".join(f"[{i}]" for i in range(1, len(candidates) + 1)), [AIMessage(content="answer")]
 
@@ -747,14 +747,82 @@ def test_synthesis_prompt_uses_authoritative_publication_metadata(monkeypatch):
         },
     }
 
+    annotated, contract = comparison.annotate_document_citation_sources(
+        [
+            {
+                "rank": 1,
+                "target_name": "A",
+                "report_date": "2026-08-10",
+                "title": "Latest report",
+                "broker": "Broker",
+                "report_type": "company",
+                "file_name": "a.pdf",
+            }
+        ]
+    )
+
     answer, _messages, generation_metrics = comparison._synthesize_answer(
         "A latest report",
         "A latest report",
         [candidate],
         [],
+        annotated,
+        contract,
     )
 
     assert answer == "A summary [1]"
     assert generation_metrics["call_count"] == 1
     assert "발간일: 2026-08-10" in captured[0]
     assert "목표주가 제시일자를 발간일로 해석하지 마세요" in captured[0]
+
+
+def test_synthesis_normalizes_passage_citations_to_documents(monkeypatch):
+    captured = []
+
+    class CapturingModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, messages):
+            captured.append(messages[0].content)
+            return AIMessage(content="요약 [1] [2] [3]")
+
+    monkeypatch.setattr(comparison, "build_chat_model", lambda **_: CapturingModel())
+
+    def _candidate(stable_id: str, file_name: str) -> dict:
+        return {
+            "stable_id": stable_id,
+            "retrieval_rank": 0,
+            "target_name": "A",
+            "text": f"{file_name} text",
+            "score": 0.1,
+            "meta": {
+                "target_name": "A",
+                "report_date": "2026-08-10",
+                "broker": "Broker",
+                "title": "report",
+                "file_name": file_name,
+            },
+        }
+
+    candidates = [
+        _candidate("chunk:1", "a.pdf"),
+        _candidate("chunk:2", "a.pdf"),
+        _candidate("chunk:3", "b.pdf"),
+    ]
+    sources = [
+        {"rank": index, "target_name": "A", "file_name": candidate["meta"]["file_name"]}
+        for index, candidate in enumerate(candidates, 1)
+    ]
+    annotated, contract = comparison.annotate_document_citation_sources(sources)
+
+    answer, _messages, _metrics = comparison._synthesize_answer(
+        "A report", "A report", candidates, [], annotated, contract
+    )
+
+    # Passage citations [1][2][3] collapse to document citations [1][2]
+    # (chunks 1 and 2 share a.pdf, chunk 3 is b.pdf).
+    assert answer == "요약 [1] [2]"
+    assert "--- 문서 1 ---" in captured[0]
+    assert "--- 문서 2 ---" in captured[0]
+    assert "비인용 근거 조각 P" in captured[0]

@@ -37,7 +37,12 @@ from src.llms.generation_observability import (
 from src.nodes import vectordb
 from src.nodes.stock_price import stock_price_tools
 from src.retrieval.bootstrap import RetrievalBootstrapError
-from src.utils.citations import extract_citation_ranks, remove_unavailable_citations
+from src.utils.citations import (
+    annotate_document_citation_sources,
+    extract_citation_ranks,
+    normalize_citation_ranks,
+    remove_unavailable_document_references,
+)
 from src.utils.ranker import get_ranker
 
 
@@ -725,15 +730,26 @@ def _balanced_final(
 
 
 def _synthesize_answer(
-    question: str, query: str, candidates: list[Candidate], missing: list[str]
+    question: str,
+    query: str,
+    candidates: list[Candidate],
+    missing: list[str],
+    annotated_sources: list[dict[str, object]],
+    citation_contract: dict[str, object],
 ) -> tuple[str | None, list[BaseMessage], dict[str, object]]:
     context = "".join(
-        f"\n--- 문서 {rank} ---\n[출처: [{rank}] 기업: {item['target_name']} | "
+        f"\n--- 문서 {source['document_rank']} ---\n"
+        f"[비인용 근거 조각 P{source['passage_rank']} | 출처: [{source['document_rank']}] "
+        f"기업: {item['target_name']} | "
         f"발간일: {(item['meta'] or {}).get('report_date', '-')} | "
         f"증권사: {(item['meta'] or {}).get('broker', '-')} | "
         f"제목: {(item['meta'] or {}).get('title', '-')} ]\n{item['text']}\n"
-        for rank, item in enumerate(candidates, 1)
+        for source, item in zip(annotated_sources, candidates)
     )
+    rank_aliases = {
+        int(source["passage_rank"]): int(source["document_rank"])
+        for source in annotated_sources
+    }
     notice = f"\n비교 근거가 없거나 검색에 실패한 기업: {', '.join(missing)}" if missing else ""
     prompt = PromptTemplate.from_template(VECTORDB_PROMPT)
     message = HumanMessage(
@@ -760,7 +776,10 @@ def _synthesize_answer(
     answer = ai_message.content
     if isinstance(answer, list):
         answer = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in answer)
-    answer = remove_unavailable_citations(str(answer), source_count=len(candidates))
+    answer = normalize_citation_ranks(str(answer), rank_aliases)
+    answer = remove_unavailable_document_references(
+        answer, source_count=int(citation_contract["document_count"])
+    )
     if notice:
         answer = f"{answer.rstrip()}\n\n{notice.strip()}"
     return answer, [message, ai_message], generation_metrics
@@ -973,6 +992,7 @@ def comparison_fan_in(state: ComparisonState) -> dict:
                 "rerank_score": candidate.get("rerank_score"),
             }
         )
+    rerank_info, citation_contract = annotate_document_citation_sources(rerank_info)
     successful_target_count = sum(
         status in ("success", "success_degraded") for status in statuses.values()
     )
@@ -1002,6 +1022,7 @@ def comparison_fan_in(state: ComparisonState) -> dict:
             ),
             "messages": [],
             "rerank_info": rerank_info,
+            "citation_contract": citation_contract,
             "no_vector_results": False,
             "search_filters": _output_filters(plan),
             "monitoring_metrics": metrics,
@@ -1012,7 +1033,12 @@ def comparison_fan_in(state: ComparisonState) -> dict:
     synthesis_started = time.perf_counter_ns()
     try:
         synthesis_result = _synthesize_answer(
-            plan["original_query"], plan["retrieval_query"], selected, missing_details
+            plan["original_query"],
+            plan["retrieval_query"],
+            selected,
+            missing_details,
+            rerank_info,
+            citation_contract,
         )
         if len(synthesis_result) == 3:
             answer, messages, generation_metrics = synthesis_result
@@ -1051,6 +1077,7 @@ def comparison_fan_in(state: ComparisonState) -> dict:
     output = {
         "messages": messages,
         "rerank_info": rerank_info,
+        "citation_contract": citation_contract,
         "no_vector_results": False,
         "search_filters": _output_filters(plan),
         "monitoring_metrics": metrics,
