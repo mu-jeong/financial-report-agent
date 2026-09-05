@@ -472,6 +472,19 @@ def test_comparison_exposes_required_side_by_side_evidence() -> None:
         assert required in source
 
 
+def test_comparison_exposes_issue_closure_after_verdict() -> None:
+    source = VIEW_PATH.read_text(encoding="utf-8")
+    comparison = source.split("def _render_comparison(", 1)[1].split(
+        "def _asset_warnings(", 1
+    )[0]
+
+    assert "이슈 종결" in comparison
+    assert "client.transition_issue(" in comparison
+    assert "_available_issue_transitions(current_state)" in comparison
+    assert "if target in _ISSUE_TERMINAL_TARGETS" in comparison
+    assert "종결 사유를 입력하세요" in comparison
+
+
 def test_run_action_registers_release_and_syncs_each_lifecycle_state() -> None:
     source = VIEW_PATH.read_text(encoding="utf-8")
     function = source.split("def _execute_new_run(", 1)[1].split(

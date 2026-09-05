@@ -2315,6 +2315,58 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
         else:
             st.success("판단을 저장했습니다. 이전 판단은 수정하지 않고 이력이 그대로 남습니다.")
             st.rerun()
+    st.markdown("**이슈 종결**")
+    current_state = str(remote_issue.get("state") or "OPEN").upper()
+    terminal_transitions = [
+        (target, label)
+        for target, label in _available_issue_transitions(current_state)
+        if target in _ISSUE_TERMINAL_TARGETS
+    ]
+    if not terminal_transitions:
+        st.caption("현재 상태에서는 종결할 수 없습니다.")
+    else:
+        close_by_label = {label: target for target, label in terminal_transitions}
+        with st.form(f"close_issue_{remote_issue['issue_id']}"):
+            close_label = st.selectbox("종결 상태", tuple(close_by_label))
+            close_reason = st.text_area(
+                "종결 사유",
+                placeholder="확인 결과에 근거해 왜 종결하는지 기록하세요.",
+            )
+            close_submitted = st.form_submit_button("이슈 종결 저장", type="primary")
+        if close_submitted:
+            target = close_by_label[str(close_label)]
+            reason = str(close_reason or "").strip()
+            if not reason:
+                st.error("종결 사유를 입력하세요.")
+            else:
+                try:
+                    _synchronize_control_projection(
+                        client,
+                        registry,
+                        remote_issue_id=str(remote_issue["issue_id"]),
+                        local_issue=local_issue,
+                    )
+                    client.transition_issue(
+                        str(remote_issue["issue_id"]),
+                        target_state=target,
+                        expected_record_revision=int(remote_issue["record_revision"]),
+                        reason=reason,
+                    )
+                except OperatorConflictError:
+                    st.warning(
+                        "다른 화면에서 이슈가 변경되었습니다. 새로고침 후 다시 확인하세요."
+                    )
+                except (
+                    OperatorApiError,
+                    MonitoringRegistryError,
+                    MonitoringServiceError,
+                    ValueError,
+                ) as exc:
+                    st.error(_error_message(exc))
+                else:
+                    st.success(f"{close_label} 상태와 사유를 저장했습니다.")
+                    st.rerun()
+
     if history:
         with st.expander("판단 변경 이력", expanded=False):
             for item in reversed(history):
