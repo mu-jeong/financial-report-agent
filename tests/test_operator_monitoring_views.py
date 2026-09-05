@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,75 @@ def test_snapshot_search_uses_human_metadata_and_bounds_results() -> None:
             "report_date_start": "2026-08-01",
         }
     ) == "대상: 삼성전자, SK하이닉스 · 시작일: 2026-08-01"
+
+
+def test_snapshot_search_filters_by_report_date_range() -> None:
+    documents = (
+        _snapshot_document(
+            "a",
+            title="초기 보고서",
+            target="삼성전자",
+            broker="미래에셋",
+            report_date="2026-01-15",
+        ),
+        _snapshot_document(
+            "b",
+            title="중기 보고서",
+            target="삼성전자",
+            broker="미래에셋",
+            report_date="2026-06-30",
+        ),
+        _snapshot_document(
+            "c",
+            title="최신 보고서",
+            target="삼성전자",
+            broker="미래에셋",
+            report_date="2026-08-29",
+        ),
+        _snapshot_document(
+            "d",
+            title="날짜 없는 보고서",
+            target="삼성전자",
+            broker="미래에셋",
+            report_date="",
+        ),
+    )
+
+    matched, total = monitoring_views._search_snapshot_documents(
+        documents,
+        report_date_start="2026-06-01",
+        report_date_end="2026-08-31",
+    )
+    assert [document.report_uid for document in matched] == ["b", "c"]
+    assert total == 2
+
+    open_started, open_started_total = monitoring_views._search_snapshot_documents(
+        documents,
+        report_date_start="2026-06-01",
+    )
+    assert [document.report_uid for document in open_started] == ["b", "c"]
+    assert open_started_total == 2
+
+    open_ended, open_ended_total = monitoring_views._search_snapshot_documents(
+        documents,
+        report_date_end="2026-01-31",
+    )
+    assert [document.report_uid for document in open_ended] == ["a"]
+    assert open_ended_total == 1
+
+
+def test_snapshot_date_filter_normalizes_widget_values() -> None:
+    assert monitoring_views._snapshot_date_filter(()) == (None, None)
+    assert monitoring_views._snapshot_date_filter(None) == (None, None)
+    assert monitoring_views._snapshot_date_filter(
+        (date(2026, 6, 1), date(2026, 8, 31))
+    ) == ("2026-06-01", "2026-08-31")
+    assert monitoring_views._snapshot_date_filter(
+        (date(2026, 8, 29),)
+    ) == ("2026-08-29", "2026-08-29")
+    assert monitoring_views._snapshot_date_filter(
+        date(2026, 8, 29)
+    ) == ("2026-08-29", "2026-08-29")
 
 
 def test_snapshot_revision_for_scope_recovers_latest_exact_match() -> None:

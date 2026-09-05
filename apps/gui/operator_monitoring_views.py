@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import statistics
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -701,12 +702,38 @@ def _snapshot_document_label(
     return f"{title} — {identity} · {document.file_name}"
 
 
+def _parse_report_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _snapshot_date_filter(
+    selected: Any,
+) -> tuple[str | None, str | None]:
+    if isinstance(selected, (tuple, list)) and selected:
+        first = selected[0]
+        second = selected[1] if len(selected) > 1 else first
+        return (
+            first.isoformat() if isinstance(first, date) else None,
+            second.isoformat() if isinstance(second, date) else None,
+        )
+    if isinstance(selected, date):
+        return selected.isoformat(), selected.isoformat()
+    return None, None
+
+
 def _search_snapshot_documents(
     documents: tuple[fixed_snapshot.ActiveReportDocument, ...],
     *,
     query: str = "",
     report_type: str | None = None,
     broker: str | None = None,
+    report_date_start: str | None = None,
+    report_date_end: str | None = None,
     limit: int = _MAX_SNAPSHOT_SEARCH_RESULTS,
 ) -> tuple[tuple[fixed_snapshot.ActiveReportDocument, ...], int]:
     """Search human-readable metadata without reading report content."""
@@ -717,6 +744,14 @@ def _search_snapshot_documents(
         if report_type and document.report_type != report_type:
             continue
         if broker and document.broker != broker:
+            continue
+        if report_date_start and (
+            not document.report_date or document.report_date < report_date_start
+        ):
+            continue
+        if report_date_end and (
+            not document.report_date or document.report_date > report_date_end
+        ):
             continue
         searchable = "\n".join(
             (
@@ -1312,6 +1347,23 @@ def _render_case(
             ("전체", *brokers),
             key=f"{_SNAPSHOT_STATE_PREFIX}search_broker_{issue_id}",
         )
+        available_dates = [
+            parsed
+            for document in documents
+            if (parsed := _parse_report_date(document.report_date)) is not None
+        ]
+        selected_date_range = st.date_input(
+            "발간일 범위",
+            value=(),
+            min_value=min(available_dates) if available_dates else None,
+            max_value=max(available_dates) if available_dates else None,
+            key=f"{_SNAPSHOT_STATE_PREFIX}search_date_{issue_id}",
+            help="시작일·종료일을 지정해 발간일 기준으로 좁힙니다. "
+            "비워 두면 날짜 필터를 적용하지 않습니다.",
+        )
+        report_date_start, report_date_end = _snapshot_date_filter(
+            selected_date_range
+        )
         unselected_documents = tuple(
             document
             for document in documents
@@ -1324,6 +1376,8 @@ def _render_case(
                 None if selected_report_type == "전체" else selected_report_type
             ),
             broker=None if selected_broker == "전체" else selected_broker,
+            report_date_start=report_date_start,
+            report_date_end=report_date_end,
         )
         if total_matches > len(search_results):
             st.caption(

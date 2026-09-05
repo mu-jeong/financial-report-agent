@@ -165,6 +165,7 @@ EXPLICIT_WIDGET_KEYS = {
     'add_key',
     'remove_key',
     "f'{_SNAPSHOT_STATE_PREFIX}search_broker_{issue_id}'",
+    "f'{_SNAPSHOT_STATE_PREFIX}search_date_{issue_id}'",
     "f'{_SNAPSHOT_STATE_PREFIX}search_query_{issue_id}'",
     "f'{_SNAPSHOT_STATE_PREFIX}search_type_{issue_id}'",
     "f\"issue_report_category_{current_thread['id']}\"",
