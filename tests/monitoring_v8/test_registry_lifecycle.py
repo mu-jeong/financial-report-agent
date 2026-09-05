@@ -424,6 +424,36 @@ def test_case_contract_changes_when_fixture_snapshot_or_lineage_changes(
     ]
 
 
+def test_case_ready_rejects_duplicate_contract(registry: MonitoringRegistry) -> None:
+    issue = _issue(registry)
+    fixture = _ready_fixture(registry, issue["issue_id"])
+    snapshot = _snapshot(registry)
+    _ready_case(
+        registry,
+        issue["issue_id"],
+        fixture["fixture_revision_id"],
+        snapshot["fixed_snapshot_revision_id"],
+    )
+
+    duplicate = registry.create_case_revision(
+        issue_id=issue["issue_id"],
+        fixture_revision_id=fixture["fixture_revision_id"],
+        fixed_snapshot_revision_id=snapshot["fixed_snapshot_revision_id"],
+        fixed_clock="2026-08-29T00:00:00Z",
+        evaluator={"version": 1, "mode": "typed-plus-manual"},
+        reconstruction_lineage={
+            "exact_count": 2,
+            "exceptions": [],
+            "evidence_qualifier": "EXACT",
+        },
+    )
+
+    with pytest.raises(MonitoringContractError, match="identical Case contract"):
+        registry.mark_case_ready(
+            duplicate["case_revision_id"], snapshot_available=True
+        )
+
+
 def test_case_ready_requires_fixture_snapshot_and_confirmed_lineage(
     registry: MonitoringRegistry,
 ) -> None:

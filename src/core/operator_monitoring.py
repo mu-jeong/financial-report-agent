@@ -1405,6 +1405,19 @@ class MonitoringRegistry:
             }
             case_contract_id = _json_digest(contract_body)
             now = _utc_now()
+            duplicate = connection.execute(
+                """
+                SELECT case_revision_id
+                FROM reproduction_case_revisions
+                WHERE case_contract_id = ? AND case_revision_id != ?
+                """,
+                (case_contract_id, case_revision_id),
+            ).fetchone()
+            if duplicate is not None:
+                raise MonitoringContractError(
+                    "an identical Case contract is already registered as "
+                    f"{duplicate['case_revision_id']}"
+                )
             connection.execute(
                 """
                 UPDATE reproduction_case_revisions
