@@ -845,3 +845,48 @@ def test_vectordb_passes_matching_prior_files_into_single_retrieval_scope(monkey
             "file_names": [file_name],
         }
     ]
+
+
+def test_select_top_passages_falls_back_to_retrieval_order_when_rerank_fails(monkeypatch):
+    import src.nodes.vectordb as vectordb
+
+    monkeypatch.setattr(vectordb, "SEARCH_TOP_K", 2)
+    monkeypatch.setattr(vectordb, "USE_RERANKER", True)
+    monkeypatch.setattr(vectordb, "RECENCY_WEIGHT", 0)
+
+    class _FailingRanker:
+        def rerank(self, *_args, **_kwargs):
+            raise RuntimeError("rerank provider unavailable")
+
+    monkeypatch.setattr(vectordb, "get_ranker", lambda: _FailingRanker())
+
+    docs_with_scores = [
+        (
+            Document(
+                page_content="삼성전자 HBM 전망 1",
+                metadata={"file_name": "samsung_a.pdf", "target_name": "삼성전자"},
+            ),
+            0.1,
+        ),
+        (
+            Document(
+                page_content="삼성전자 HBM 전망 2",
+                metadata={"file_name": "samsung_a.pdf", "target_name": "삼성전자"},
+            ),
+            0.2,
+        ),
+    ]
+
+    selected, metrics = select_top_passages(
+        "삼성전자 HBM 전망",
+        docs_with_scores,
+        search_filters={"target_name": "삼성전자"},
+    )
+
+    # The turn must survive a reranker outage instead of raising out of the node.
+    assert [item["meta"]["file_name"] for item in selected] == [
+        "samsung_a.pdf",
+        "samsung_a.pdf",
+    ]
+    assert metrics["rerank_degraded"].startswith("RuntimeError")
+    assert metrics["rerank_degraded"] == "RuntimeError: rerank provider unavailable"

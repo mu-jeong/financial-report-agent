@@ -41,6 +41,14 @@ LATEST_INTENT_KEYWORDS = ("가장 최근", "최신", "최근", "마지막")
 LIST_OR_TREND_INTENT_KEYWORDS = ("목록", "리스트", "추세", "흐름", "변화")
 
 
+class SqlGuardrailError(RuntimeError):
+    """Raised when the read-only SQL guardrail refuses to execute a query."""
+
+
+class SqlExecutionError(RuntimeError):
+    """Raised when a guardrail-approved read-only query fails to execute."""
+
+
 def _ordered_target_names(target_names) -> tuple[str, ...]:
     """Return non-empty target names in caller-provided order without duplicates."""
     ordered: list[str] = []
@@ -112,8 +120,16 @@ def validate_target_scoped_query(
     query: str,
     params,
     target_names,
+    *,
+    enforce_multi_company_shape: bool = True,
 ) -> None:
-    """Validate the invariant tying one target_name IN clause to bound params."""
+    """Validate the invariant tying one target_name IN clause to bound params.
+
+    ``enforce_multi_company_shape`` additionally applies the set-query shape
+    rules (per-target partitioning for global LIMIT, GROUP BY target_name for
+    counts) that only make sense when several companies are compared. A single
+    target keeps the scope invariant but may use a plain LIMIT or a bare COUNT.
+    """
     targets = _ordered_target_names(target_names)
     bound_params = tuple(params or ())
     if bound_params != targets:
@@ -169,6 +185,9 @@ def validate_target_scoped_query(
     if len(all_placeholders) != len(target_placeholders):
         raise ValueError("unexpected SQL placeholders without bound parameters")
 
+    if not enforce_multi_company_shape:
+        return
+
     has_target_partition = any(
         any(
             column.name.lower() == "target_name"
@@ -190,7 +209,12 @@ def validate_target_scoped_query(
             raise ValueError("multi-company count must GROUP BY target_name")
 
 
-def build_target_scoped_query(query: str, target_names) -> tuple[str, tuple[str, ...]]:
+def build_target_scoped_query(
+    query: str,
+    target_names,
+    *,
+    enforce_multi_company_shape: bool = True,
+) -> tuple[str, tuple[str, ...]]:
     """Replace LLM-authored target filters with a deterministic bound IN scope."""
     targets = _ordered_target_names(target_names)
     parsed = _parse_single_select(query)
@@ -228,7 +252,12 @@ def build_target_scoped_query(query: str, target_names) -> tuple[str, tuple[str,
     )
     report_select.where(target_scope, append=True, copy=False)
     scoped_query = parsed.sql(dialect="sqlite")
-    validate_target_scoped_query(scoped_query, targets, targets)
+    validate_target_scoped_query(
+        scoped_query,
+        targets,
+        targets,
+        enforce_multi_company_shape=enforce_multi_company_shape,
+    )
     return scoped_query, targets
 
 
@@ -526,10 +555,48 @@ def rdb_sql_gen_node(state: State) -> dict:
     chain = prompt | llm | StrOutputParser()
     sql_query = chain.invoke({"question": query}).strip()
     sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
+
+    if len(target_names) == 1:
+        # Bind the target scope deterministically instead of trusting the
+        # LLM-authored predicate, mirroring the multi-company path. If the scope
+        # cannot be bound, refuse to run unscoped SQL rather than silently
+        # answering from every target.
+        try:
+            scoped_query, scoped_params = build_target_scoped_query(
+                sql_query,
+                target_names,
+                enforce_multi_company_shape=False,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "[RDB] single-target scope could not be bound; refusing unscoped SQL: %s",
+                exc,
+            )
+            return {
+                "sql_query": sql_query,
+                "sql_params": (),
+                "rdb_query_shape": {
+                    "type": "single_target_scope_unresolved",
+                    "reason": str(exc),
+                },
+            }
+        return {
+            "sql_query": scoped_query,
+            "sql_params": scoped_params,
+            "rdb_query_shape": {"type": "single_target"},
+        }
+
     return {"sql_query": sql_query}
 
 
 def sql_guardrail(func):
+    """Reject non-read-only SQL before it reaches the database.
+
+    Blocked queries raise :class:`SqlGuardrailError` instead of returning an
+    error string, so callers can branch on the failure explicitly rather than
+    pattern-matching whatever the query happened to return.
+    """
+
     @functools.wraps(func)
     def wrapper(query: str, *args, **kwargs):
         try:
@@ -547,15 +614,17 @@ def sql_guardrail(func):
                     continue
                 if table_name not in allowed_tables:
                     logger.warning(f"[Guardrail] unauthorized table access attempt: {table.name}")
-                    return f"Error: table access blocked by guardrail ({table.name})"
+                    raise SqlGuardrailError(f"table access blocked by guardrail ({table.name})")
 
             if not isinstance(parsed, sqlglot.exp.Select):
                 logger.warning("[Guardrail] non-SELECT query blocked")
-                return "Error: only SELECT queries are allowed"
+                raise SqlGuardrailError("only SELECT queries are allowed")
 
+        except SqlGuardrailError:
+            raise
         except Exception as exc:
             logger.warning(f"[Guardrail] query parse failed and was blocked: {exc}")
-            return f"Error: query parse failed and was blocked ({exc})"
+            raise SqlGuardrailError(f"query parse failed and was blocked ({exc})") from exc
 
         return func(query, *args, **kwargs)
 
@@ -564,6 +633,12 @@ def sql_guardrail(func):
 
 @sql_guardrail
 def execute_sql(query: str, params=()):
+    """Execute one guardrail-approved read-only query.
+
+    Failures raise :class:`SqlExecutionError` (or :class:`SqlGuardrailError`
+    from the guardrail) so a legitimate result row can never be mistaken for an
+    error payload.
+    """
     conn = None
     try:
         conn = get_connection()
@@ -572,8 +647,10 @@ def execute_sql(query: str, params=()):
         rows = [tuple(row) for row in cursor.fetchall()]
         columns = [description[0] for description in cursor.description] if cursor.description else []
         return {"columns": columns, "rows": rows}
+    except SqlGuardrailError:
+        raise
     except Exception as exc:
-        return f"Error: {exc}"
+        raise SqlExecutionError(str(exc)) from exc
     finally:
         if conn is not None:
             conn.close()
@@ -583,67 +660,99 @@ def rdb_execute_node(state: State) -> dict:
     sql_query = state["sql_query"]
     sql_params = tuple(state.get("sql_params") or ())
     query_started = time.perf_counter_ns()
-    target_names = state.get("target_names") or (
-        state.get("search_filters") or {}
-    ).get("target_names")
+    target_names = tuple(
+        state.get("target_names")
+        or (state.get("search_filters") or {}).get("target_names")
+        or ()
+    )
     query_shape = state.get("rdb_query_shape") or {}
+    is_multi_company = len(target_names) > 1
     missing_targets: list[str] = []
+    guardrail_blocked = False
+    scope_rejected = False
+    execution_error: str | None = None
+    db_result = None
     try:
         if sql_params and not target_names:
             raise ValueError("bound SQL requires canonical target_names in state")
-        if target_names and len(target_names) > 1 and not sql_params:
-            raise ValueError("multi-company SQL requires bound parameters")
+        if target_names and not sql_params:
+            raise ValueError("target-scoped SQL requires bound parameters")
         if sql_params and target_names:
-            validate_target_scoped_query(sql_query, sql_params, target_names)
-            expected_query, expected_params, expected_shape = build_multi_company_query(
-                state.get("rewritten_query", state["question"]),
-                {
-                    **dict(state.get("search_filters") or {}),
-                    "target_names": list(target_names),
-                },
-                query_shape=query_shape,
+            validate_target_scoped_query(
+                sql_query,
+                sql_params,
+                target_names,
+                enforce_multi_company_shape=is_multi_company,
             )
-            if (
-                sql_query != expected_query
-                or sql_params != expected_params
-                or query_shape != expected_shape
-            ):
-                raise ValueError(
-                    "SQL, params, or query shape does not match the mandatory scope"
+            if is_multi_company:
+                expected_query, expected_params, expected_shape = build_multi_company_query(
+                    state.get("rewritten_query", state["question"]),
+                    {
+                        **dict(state.get("search_filters") or {}),
+                        "target_names": list(target_names),
+                    },
+                    query_shape=query_shape,
                 )
+                if (
+                    sql_query != expected_query
+                    or sql_params != expected_params
+                    or query_shape != expected_shape
+                ):
+                    raise ValueError(
+                        "SQL, params, or query shape does not match the mandatory scope"
+                    )
         db_result = (
             execute_sql(sql_query, params=sql_params)
             if sql_params
             else execute_sql(sql_query)
         )
-        if sql_params and target_names and isinstance(db_result, dict):
+        if is_multi_company and isinstance(db_result, dict):
             db_result, missing_targets = normalize_multi_company_result(
                 db_result,
                 target_names,
                 query_shape,
             )
+    except SqlGuardrailError as exc:
+        guardrail_blocked = True
+        execution_error = str(exc)
+        db_result = None
+    except SqlExecutionError as exc:
+        execution_error = str(exc)
+        db_result = None
     except ValueError as exc:
-        db_result = f"Error: target scope validation failed ({exc})"
+        scope_rejected = True
+        execution_error = f"target scope validation failed ({exc})"
+        db_result = None
     query_ns = max(0, time.perf_counter_ns() - query_started)
     rdb_metrics = {
         "sql_query": sql_query,
         "query_ns": query_ns,
         "row_count": None,
         "column_count": None,
-        "guardrail_blocked": "Error:" in str(db_result),
+        "guardrail_blocked": guardrail_blocked,
+        "scope_rejected": scope_rejected,
+        "error": execution_error,
     }
     if query_shape:
         rdb_metrics["query_shape"] = query_shape
-        rdb_metrics["requested_targets"] = list(target_names or ())
+        rdb_metrics["requested_targets"] = list(target_names)
         rdb_metrics["missing_targets"] = missing_targets
 
-    if "Error:" in str(db_result):
-        err_msg = (
-            "데이터베이스 조회 중 문제가 발생했습니다. "
-            "읽기 전용 제약이나 SQL 가드레일에 의해 차단되었을 수 있습니다."
-        )
+    if execution_error is not None:
+        if guardrail_blocked:
+            err_msg = (
+                "데이터베이스 조회 중 문제가 발생했습니다. "
+                "읽기 전용 제약이나 SQL 가드레일에 의해 차단되었을 수 있습니다."
+            )
+        elif scope_rejected:
+            err_msg = (
+                "질문의 조회 범위를 확정하지 못해 안전하게 조회하지 않았습니다. "
+                "대상이나 기간을 조금 더 구체적으로 다시 질문해 주세요."
+            )
+        else:
+            err_msg = "데이터베이스 조회 중 문제가 발생했습니다."
         return {
-            "rdb_result": str(db_result),
+            "rdb_result": None,
             "generation": err_msg,
             "monitoring_metrics": {"rdb": rdb_metrics},
         }

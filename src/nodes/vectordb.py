@@ -670,8 +670,16 @@ def select_top_passages(
     """최종 context passage를 선택합니다."""
     passages = _build_passages(docs_with_scores)
     candidate_count = min(len(passages), _requested_candidate_count())
+    rerank_degraded: str | None = None
     if USE_RERANKER:
-        ranked = get_ranker().rerank(query, passages, candidate_count)
+        try:
+            ranked = get_ranker().rerank(query, passages, candidate_count)
+        except Exception as exc:
+            # Keep the turn alive on reranker/provider failure, matching the
+            # comparison path: fall back to retrieval order instead of raising.
+            logger.warning("VectorDB rerank failed; using retrieval order: %s", exc)
+            rerank_degraded = f"{type(exc).__name__}: {str(exc)[:240]}"
+            ranked = passages[:candidate_count]
     else:
         ranked = passages[:candidate_count]
     ranked = apply_recency_weight(ranked, RECENCY_WEIGHT)[:SEARCH_TOP_K]
@@ -690,10 +698,13 @@ def select_top_passages(
         )
     else:
         selected = ranked[:SEARCH_TOP_K]
-    return selected, {
+    coverage_metrics = {
         "document_coverage_applied": apply_coverage,
         "document_coverage_reason": coverage_reason,
     }
+    if rerank_degraded is not None:
+        coverage_metrics["rerank_degraded"] = rerank_degraded
+    return selected, coverage_metrics
 
 
 def _native_document(chunk: RetrievedChunk) -> Document:

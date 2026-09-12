@@ -1308,6 +1308,7 @@ def _build_state_transition_trace(metadata: dict[str, Any]) -> dict[str, Any]:
             "candidate_count_after_filter": retrieval.get("candidate_count_after_filter"),
             "document_coverage_applied": retrieval.get("document_coverage_applied"),
             "document_coverage_reason": retrieval.get("document_coverage_reason"),
+            "rerank_degraded": retrieval.get("rerank_degraded"),
             "prior_scope_required_file_count": retrieval.get("prior_scope_required_file_count"),
             "prior_scope_required_file_names": retrieval.get("prior_scope_required_file_names"),
             "prior_scope_required_file_names_missing_after_filter": retrieval.get("prior_scope_required_file_names_missing_after_filter"),
@@ -6966,5 +6967,7 @@ def _compact_rdb_metrics(final_state: dict[str, Any]) -> dict[str, Any]:
         "row_count": row_count,
         "column_count": column_count,
         "guardrail_blocked": existing_metrics.get("guardrail_blocked"),
+        "scope_rejected": existing_metrics.get("scope_rejected"),
+        "error": existing_metrics.get("error"),
         "result_preview": str(raw_result)[:500] if raw_result is not None else None,
     }

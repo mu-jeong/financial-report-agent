@@ -296,7 +296,7 @@ def test_rdb_execute_node_passes_sql_params_once(monkeypatch):
 
     def fake_execute(query, params=()):
         calls.append((query, params))
-        return "Error: stop after execution boundary"
+        raise rdb.SqlGuardrailError("stop after execution boundary")
 
     monkeypatch.setattr(rdb, "execute_sql", fake_execute)
 
@@ -333,4 +333,6 @@ def test_rdb_execute_node_blocks_params_without_matching_scope(monkeypatch):
     )
 
     assert calls == []
-    assert "validation failed" in result["rdb_result"]
+    assert result["rdb_result"] is None
+    assert result["monitoring_metrics"]["rdb"]["scope_rejected"] is True
+    assert "validation failed" in result["monitoring_metrics"]["rdb"]["error"]

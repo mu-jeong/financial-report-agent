@@ -154,44 +154,39 @@ def test_native_rdb_readers_follow_active_successor(tmp_path, monkeypatch):
     ],
 )
 def test_execute_sql_blocks_non_select_or_unauthorized_tables(query):
-    result = rdb.execute_sql(query)
-
-    assert isinstance(result, str)
-    assert result.startswith("Error:")
+    with pytest.raises(rdb.SqlGuardrailError):
+        rdb.execute_sql(query)
 
 
 def test_execute_sql_blocks_unauthorized_tables_inside_cte():
-    result = rdb.execute_sql(
-        """
-        WITH leaked AS (SELECT * FROM parent_chunks)
-        SELECT * FROM leaked
-        """
-    )
-
-    assert isinstance(result, str)
-    assert result.startswith("Error:")
+    with pytest.raises(rdb.SqlGuardrailError):
+        rdb.execute_sql(
+            """
+            WITH leaked AS (SELECT * FROM parent_chunks)
+            SELECT * FROM leaked
+            """
+        )
 
 
-def test_execute_sql_returns_error_when_projection_setup_fails(monkeypatch):
+def test_execute_sql_raises_execution_error_when_projection_setup_fails(monkeypatch):
     monkeypatch.setattr(
         rdb,
         "get_connection",
         lambda: (_ for _ in ()).throw(sqlite3.OperationalError("projection failed")),
     )
 
-    result = rdb.execute_sql("SELECT * FROM reports")
-
-    assert result == "Error: projection failed"
+    with pytest.raises(rdb.SqlExecutionError, match="projection failed"):
+        rdb.execute_sql("SELECT * FROM reports")
 
 
 def test_rdb_execute_node_records_query_duration_on_blocked_result(monkeypatch):
     ticks = iter([1_000_000_000, 1_125_000_000])
     monkeypatch.setattr(rdb.time, "perf_counter_ns", lambda: next(ticks))
-    monkeypatch.setattr(
-        rdb,
-        "execute_sql",
-        lambda _query: "Error: blocked for deterministic test",
-    )
+
+    def _blocked(_query, _params=()):
+        raise rdb.SqlGuardrailError("blocked for deterministic test")
+
+    monkeypatch.setattr(rdb, "execute_sql", _blocked)
 
     result = rdb.rdb_execute_node(
         {
@@ -201,6 +196,154 @@ def test_rdb_execute_node_records_query_duration_on_blocked_result(monkeypatch):
     )
 
     assert result["monitoring_metrics"]["rdb"]["query_ns"] == 125_000_000
+    assert result["monitoring_metrics"]["rdb"]["guardrail_blocked"] is True
+
+
+def test_rdb_sql_gen_node_binds_single_target_scope(monkeypatch):
+    class FakeChain:
+        def __or__(self, _other):
+            return self
+
+        def invoke(self, _inputs):
+            return "SELECT COUNT(*) AS count FROM reports"
+
+    monkeypatch.setattr(rdb, "build_chat_model", lambda **_kwargs: FakeChain())
+    monkeypatch.setattr(rdb.PromptTemplate, "from_template", lambda _template: FakeChain())
+    monkeypatch.setattr(rdb, "StrOutputParser", lambda: FakeChain())
+
+    result = rdb.rdb_sql_gen_node(
+        {
+            "question": "삼성전자 리포트 수",
+            "search_filters": {"target_names": ["삼성전자"]},
+        }
+    )
+
+    assert "target_name IN (?)" in result["sql_query"]
+    assert result["sql_params"] == ("삼성전자",)
+    assert result["rdb_query_shape"] == {"type": "single_target"}
+
+
+def test_rdb_sql_gen_node_replaces_llm_authored_single_target_predicate(monkeypatch):
+    class FakeChain:
+        def __or__(self, _other):
+            return self
+
+        def invoke(self, _inputs):
+            return (
+                "SELECT title FROM reports WHERE target_name = '다른회사' "
+                "ORDER BY report_date DESC LIMIT 1"
+            )
+
+    monkeypatch.setattr(rdb, "build_chat_model", lambda **_kwargs: FakeChain())
+    monkeypatch.setattr(rdb.PromptTemplate, "from_template", lambda _template: FakeChain())
+    monkeypatch.setattr(rdb, "StrOutputParser", lambda: FakeChain())
+
+    result = rdb.rdb_sql_gen_node(
+        {
+            "question": "삼성전자 최근 리포트",
+            "search_filters": {"target_names": ["삼성전자"]},
+        }
+    )
+
+    assert "다른회사" not in result["sql_query"]
+    assert "target_name IN (?)" in result["sql_query"]
+    assert result["sql_params"] == ("삼성전자",)
+
+
+def test_rdb_sql_gen_node_refuses_unbindable_single_target_scope(monkeypatch):
+    class FakeChain:
+        def __or__(self, _other):
+            return self
+
+        def invoke(self, _inputs):
+            return "SELECT title FROM reports"
+
+    monkeypatch.setattr(rdb, "build_chat_model", lambda **_kwargs: FakeChain())
+    monkeypatch.setattr(rdb.PromptTemplate, "from_template", lambda _template: FakeChain())
+    monkeypatch.setattr(rdb, "StrOutputParser", lambda: FakeChain())
+    monkeypatch.setattr(
+        rdb,
+        "build_target_scoped_query",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("unbindable")),
+    )
+
+    result = rdb.rdb_sql_gen_node(
+        {
+            "question": "삼성전자 리포트",
+            "search_filters": {"target_names": ["삼성전자"]},
+        }
+    )
+
+    assert result["sql_params"] == ()
+    assert result["rdb_query_shape"]["type"] == "single_target_scope_unresolved"
+
+
+def test_rdb_execute_node_rejects_unbound_single_target_scope(monkeypatch):
+    monkeypatch.setattr(rdb, "execute_sql", lambda *_args, **_kwargs: {"columns": [], "rows": []})
+
+    result = rdb.rdb_execute_node(
+        {
+            "question": "삼성전자 리포트",
+            "search_filters": {"target_names": ["삼성전자"]},
+            "sql_query": "SELECT title FROM reports",
+            "sql_params": (),
+            "rdb_query_shape": {"type": "single_target_scope_unresolved"},
+        }
+    )
+
+    assert result["rdb_result"] is None
+    assert "조회 범위를 확정하지 못해" in result["generation"]
+    assert result["monitoring_metrics"]["rdb"]["scope_rejected"] is True
+
+
+def test_rdb_execute_node_keeps_rows_whose_text_contains_error_marker(monkeypatch):
+    class FakeChatModel:
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _messages):
+            return AIMessage(content="정상 답변입니다.")
+
+    monkeypatch.setattr(
+        rdb,
+        "execute_sql",
+        lambda _query, _params=(): {
+            "columns": ["title"],
+            "rows": [("Error: quarterly review",)],
+        },
+    )
+    monkeypatch.setattr(rdb, "build_chat_model", lambda **_kwargs: FakeChatModel())
+
+    result = rdb.rdb_execute_node(
+        {
+            "question": "리포트 제목",
+            "sql_query": "SELECT title FROM reports",
+        }
+    )
+
+    assert result["generation"] == "정상 답변입니다."
+    assert result["monitoring_metrics"]["rdb"]["guardrail_blocked"] is False
+    assert result["monitoring_metrics"]["rdb"]["row_count"] == 1
+
+
+def test_rdb_execute_node_records_execution_failure_distinctly(monkeypatch):
+    def _failing(_query, _params=()):
+        raise rdb.SqlExecutionError("read-only database failure")
+
+    monkeypatch.setattr(rdb, "execute_sql", _failing)
+
+    result = rdb.rdb_execute_node(
+        {
+            "question": "리포트 수",
+            "sql_query": "SELECT COUNT(*) FROM reports",
+        }
+    )
+
+    metrics = result["monitoring_metrics"]["rdb"]
+    assert metrics["guardrail_blocked"] is False
+    assert metrics["scope_rejected"] is False
+    assert metrics["error"] == "read-only database failure"
+    assert result["rdb_result"] is None
 
 
 def test_rdb_execute_node_records_answer_generation_metrics(monkeypatch):

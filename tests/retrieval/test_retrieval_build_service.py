@@ -1130,3 +1130,53 @@ def test_corrupt_active_forward_builds_a_new_immutable_successor(tmp_path: Path)
     assert runtime[1] == first_plan.base_snapshot_id
     assert runtime[3:] == (recovered_outcome.write_epoch, 0, 1)
     assert failed_state == "failed"
+
+
+def test_write_immutable_bytes_publishes_complete_content(tmp_path: Path) -> None:
+    target = tmp_path / "evidence" / "manifest.json"
+    encoded = b'{"schema_version": 1}\n'
+
+    build_service._write_immutable_bytes(target, encoded)
+
+    assert target.read_bytes() == encoded
+    # No staging file may survive, and the published file must be non-partial.
+    assert list(target.parent.glob(".evidence-*.tmp")) == []
+
+
+def test_write_immutable_bytes_is_idempotent_for_identical_bytes(tmp_path: Path) -> None:
+    target = tmp_path / "manifest.json"
+    encoded = b'{"schema_version": 1}\n'
+
+    build_service._write_immutable_bytes(target, encoded)
+    build_service._write_immutable_bytes(target, encoded)
+
+    assert target.read_bytes() == encoded
+
+
+def test_write_immutable_bytes_rejects_conflicting_bytes(tmp_path: Path) -> None:
+    target = tmp_path / "manifest.json"
+    build_service._write_immutable_bytes(target, b'{"schema_version": 1}\n')
+
+    with pytest.raises(NativeBuildError):
+        build_service._write_immutable_bytes(target, b'{"schema_version": 2}\n')
+
+    assert target.read_bytes() == b'{"schema_version": 1}\n'
+
+
+def test_write_immutable_bytes_ignores_interrupted_staging_files(tmp_path: Path) -> None:
+    """A crash while staging must not block the next attempt.
+
+    The old in-place ``open("xb")`` could leave truncated bytes at the final
+    path, making every later retry fail permanently. Staged temp files are the
+    only artifact of an interrupted write, so a retry still publishes cleanly.
+    """
+    target = tmp_path / "manifest.json"
+    interrupted = tmp_path / ".evidence-interrupted1.tmp"
+    interrupted.write_bytes(b'{"schema_version": ')
+    encoded = b'{"schema_version": 1}\n'
+
+    build_service._write_immutable_bytes(target, encoded)
+
+    assert target.read_bytes() == encoded
+    # The unrelated staging file is left alone; only the final path matters.
+    assert interrupted.read_bytes() == b'{"schema_version": '

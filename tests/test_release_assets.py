@@ -24,6 +24,38 @@ def _run_git(root: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def test_git_command_decodes_utf8_output(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="삼성전자\n", stderr="")
+
+    monkeypatch.setattr(release_assets.subprocess, "run", fake_run)
+
+    result = release_assets._git_command(Path("."), "status", text=True)
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+    assert result == "삼성전자\n"
+
+
+def test_git_command_keeps_bytes_when_text_is_not_requested(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout=b"\x00\xff", stderr=b"")
+
+    monkeypatch.setattr(release_assets.subprocess, "run", fake_run)
+
+    result = release_assets._git_command(Path("."), "cat-file", "-p", "HEAD")
+
+    assert captured["text"] is False
+    assert captured["encoding"] is None
+    assert result == b"\x00\xff"
+
+
 def _write_bundle_inputs(root: Path, *, answer: str = "registered") -> dict[str, object]:
     app = root / "app-source"
     runtime = root / "runtime-source"

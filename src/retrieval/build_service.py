@@ -2720,16 +2720,41 @@ def _write_candidate_evidence(
         ),
     }
     encoded = (canonical_json(payload) + "\n").encode("utf-8")
-    if evidence_path.exists():
-        if evidence_path.read_bytes() != encoded:
+    _write_immutable_bytes(evidence_path, encoded)
+    return evidence_relative, hashlib.sha256(encoded).hexdigest()
+
+
+def _write_immutable_bytes(target: Path, encoded: bytes) -> None:
+    """Create an immutable evidence file without exposing a partial write.
+
+    Bytes are staged in a sibling temporary file and linked into place, so a
+    crash mid-write can never leave truncated content at the final path. The
+    previous in-place ``open("xb")`` could strand a partial file that made every
+    later retry fail with a byte-conflict error.
+    """
+    if target.exists():
+        if not target.is_file() or target.is_symlink() or target.read_bytes() != encoded:
             raise NativeBuildError("candidate evidence path contains different bytes")
-    else:
-        with evidence_path.open("xb") as stream:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.parent / f".evidence-{uuid.uuid4().hex[:12]}.tmp"
+    try:
+        with temporary.open("xb") as stream:
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        evidence_path.chmod(stat.S_IREAD)
-    return evidence_relative, hashlib.sha256(encoded).hexdigest()
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            # A concurrent writer linked first; the bytes must still match.
+            if target.read_bytes() != encoded:
+                raise NativeBuildError("candidate evidence path contains different bytes")
+        except OSError as exc:
+            raise NativeBuildError(f"atomic candidate evidence write failed: {exc}") from exc
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    target.chmod(stat.S_IREAD)
 
 
 def _completed_candidate_result(
