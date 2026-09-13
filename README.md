@@ -4,6 +4,8 @@
 
 Finance Report Agent는 여러 증권사의 기업·산업·경제 리포트를 한곳에 모아 자연어로 검색하고 분석하는 로컬 리서치 도구입니다. 원하는 기간과 기업, 산업, 증권사를 말로 지정하면 관련 리포트의 목록과 통계, 핵심 내용을 대화형 답변으로 확인할 수 있습니다.
 
+기능 구성과 사용 흐름, 화면별 설계는 [프로젝트 기획·설계(Figma)](https://www.figma.com/design/IO7ARQxmZxLZcGvPif7tS0/Untitled?node-id=25-139)에서 확인할 수 있습니다. 현재 구현과 검토 중인 내용을 구분해 정리했습니다.
+
 > 이 프로젝트는 투자 조언이나 매수/매도 추천을 제공하지 않습니다. 답변은 수집·색인된 리포트와 공개 데이터 기반의 참고 정보로만 사용하세요.
 
 ---
@@ -50,6 +52,7 @@ Windows에서 처음 실행할 때는 `RUN_QUICKSTART.bat`을 더블클릭하면
 
 | 찾는 것 | 문서 |
 | --- | --- |
+| 기능 구성·사용 흐름·화면 설계 | [프로젝트 기획·설계(Figma)](https://www.figma.com/design/IO7ARQxmZxLZcGvPif7tS0/Untitled?node-id=25-139) |
 | 실행·설치·자주 생기는 문제 | [Quick Start](docs/getting-started/QUICK_START.md) |
 | API 키 발급 | [OpenRouter API 키](docs/getting-started/OPENROUTER_API_KEY.md) |
 | `.env`·모델·검색 설정 | [API 설정 가이드](docs/getting-started/API_SETUP.md) |
