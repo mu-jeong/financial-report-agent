@@ -56,6 +56,7 @@ Thumbs.db
 
 # Local document rendering and editor scratch files
 /docs/temp/
+/docs/design/
 /.tmp_*/
 ~$*.docx
 
