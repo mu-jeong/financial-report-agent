@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import statistics
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -421,6 +421,50 @@ def _selected_issue(
     return issues, client.get_issue(str(selected_id))
 
 
+def _select_workspace(workspace: str) -> None:
+    st.session_state[_WORKSPACE_KEY] = workspace
+
+
+def _render_issue_context(
+    client: MonitoringAdminClient, issue: Mapping[str, Any], *, workspace: str
+) -> None:
+    with st.container(border=True):
+        st.subheader("현재 작업 중인 이슈")
+        st.markdown(" → ".join(
+            f"**{name} (현재)**" if name == workspace else name
+            for name in _WORKSPACES
+        ))
+        st.caption("작업함에서 선택한 같은 이슈로 테스트 설정과 개선 확인을 진행합니다.")
+        st.caption(
+            f"이슈 ID: {issue['issue_id']} · 신고 버전: {issue.get('app_version') or '-'}"
+            f" · 상태: {_issue_state_label(str(issue.get('state') or 'OPEN'))}"
+        )
+        try:
+            raw = _load_raw_report(client, str(issue["issue_id"]))
+        except OperatorApiError as exc:
+            st.warning(f"신고 내용을 불러오지 못했습니다: {_error_message(exc)}")
+        else:
+            observed = raw.get("observed")
+            observed = observed if isinstance(observed, Mapping) else {}
+            st.markdown("**신고 당시 질문**")
+            st.text(str(observed.get("selected_question") or "기록된 질문이 없습니다."))
+            st.markdown("**사용자가 신고한 문제**")
+            st.text(str(raw.get("comment") or "기록된 문제 설명이 없습니다."))
+        if workspace != "작업함":
+            st.button(
+                "작업함에서 다른 이슈 선택",
+                on_click=_select_workspace,
+                args=("작업함",),
+            )
+        if workspace != "개선 확인":
+            target = "테스트 케이스 설정" if workspace == "작업함" else "개선 확인"
+            st.button(
+                "이 이슈로 테스트 설정" if workspace == "작업함" else "이 이슈의 개선 확인",
+                on_click=_select_workspace,
+                args=(target,),
+            )
+
+
 def _render_summary(issue: Mapping[str, Any]) -> None:
     st.subheader("신고 요약")
     st.caption(
@@ -530,6 +574,7 @@ def _render_work_inbox(client: MonitoringAdminClient, registry: MonitoringRegist
     if issue is None:
         st.info("현재 조건에 맞는 신고가 없습니다.")
         return
+    _render_issue_context(client, issue, workspace="작업함")
     _render_summary(issue)
     local_issue = _find_local_issue(registry, issue)
     _render_progress(_progress(registry, local_issue))
@@ -1049,6 +1094,31 @@ def _snapshot_record(
     return record, availability
 
 
+def _case_reference_date(
+    fixed_clock: str | None, raw: Mapping[str, Any], issue: Mapping[str, Any]
+) -> tuple[date, str]:
+    if fixed_clock:
+        try:
+            return date.fromisoformat(fixed_clock[:10]), "저장된 기준 날짜"
+        except ValueError:
+            pass
+    korea = timezone(timedelta(hours=9))
+    for value, source in (
+        (raw.get("created_at"), "신고 작성 날짜 (한국 시간)"),
+        (issue.get("received_at"), "신고 접수 날짜 (한국 시간, 질문 당시 날짜와 다를 수 있습니다)"),
+    ):
+        if not isinstance(value, str):
+            continue
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(korea).date(), source
+    return datetime.now(korea).date(), "신고 날짜가 없어 오늘 날짜를 사용합니다. 질문 당시 날짜로 변경하세요."
+
+
 def _render_case(
     client: MonitoringAdminClient,
     registry: MonitoringRegistry,
@@ -1110,7 +1180,7 @@ def _render_case(
     snapshot_feedback = st.session_state.get(snapshot_feedback_key)
     with st.expander(
         "신고 근거로 Snapshot 범위 준비",
-        expanded=seed is None or isinstance(snapshot_feedback, Mapping),
+        expanded=True,
     ):
         st.write(
             "신고 원문은 선택 시 자동으로 열람되며 감사기록이 남습니다. 전체 원문을 "
@@ -1497,9 +1567,19 @@ def _render_case(
             st.warning(
                 "내용 차이·대체·누락 예외는 confirmed=true와 필요한 사유를 기록해야 Case를 READY로 고정할 수 있습니다."
             )
+    reference_date, date_source = _case_reference_date(
+        case.get("fixed_clock") if case else None,
+        st.session_state.get(_raw_report_key(remote_issue_id)) or {},
+        st.session_state.get("monitoring_selected_issue_detail") or {},
+    )
     if case is None and fixture and fixture["lifecycle_status"] == "READY" and snapshot_record:
         with st.form(f"case_create_{local_issue['issue_id']}"):
-            fixed_clock = st.text_input("고정 시각(선택)", placeholder="2026-08-29T00:00:00Z")
+            fixed_clock = st.date_input(
+                "질문의 기준 날짜", value=reference_date,
+                key=f"case_date_create_{local_issue['issue_id']}",
+                help="오늘·이번 주·내일을 해석할 기준입니다. 질문 당시 날짜를 선택하세요.",
+            )
+            st.caption(f"자동 입력 기준: {date_source}")
             evaluator_note = st.text_input("평가 방식", value="운영자 정성 평가 + Fixture typed checks")
             exceptions_text = st.text_area(
                 "Lineage 예외(JSON 배열, 선택)",
@@ -1536,7 +1616,7 @@ def _render_case(
                     issue_id=str(local_issue["issue_id"]),
                     fixture_revision_id=str(fixture["fixture_revision_id"]),
                     fixed_snapshot_revision_id=revision_id,
-                    fixed_clock=fixed_clock or None,
+                    fixed_clock=fixed_clock.isoformat(),
                     evaluator={"method": evaluator_note},
                     reconstruction_lineage=lineage,
                 )
@@ -1583,10 +1663,13 @@ def _render_case(
                     st.caption("확인 사유를 입력해야 Case를 READY로 고정할 수 있습니다.")
             with st.expander("READY 전에 Case 초안 수정", expanded=False):
                 with st.form(f"case_edit_{case['case_revision_id']}"):
-                    draft_clock = st.text_input(
-                        "고정 시각",
-                        value=str(case.get("fixed_clock") or ""),
+                    draft_clock = st.date_input(
+                        "질문의 기준 날짜",
+                        value=reference_date,
+                        key=f"case_date_edit_{case['case_revision_id']}",
+                        help="오늘·이번 주·내일을 해석할 기준입니다. 변경 후 초안 수정 저장을 누르세요.",
                     )
+                    st.caption(f"자동 입력 기준: {date_source}")
                     evaluator_text = st.text_area(
                         "evaluator (JSON)",
                         value=json.dumps(
@@ -1623,7 +1706,7 @@ def _render_case(
                                 revision_id
                                 or case["fixed_snapshot_revision_id"]
                             ),
-                            fixed_clock=draft_clock or None,
+                            fixed_clock=draft_clock.isoformat(),
                             evaluator=evaluator_body,
                             reconstruction_lineage=lineage_body,
                         )
@@ -1644,6 +1727,11 @@ def _render_case(
                 disabled=ready_disabled,
             ):
                 try:
+                    if not case.get("fixed_clock"):
+                        registry.update_case_revision(
+                            case["case_revision_id"],
+                            fixed_clock=reference_date.isoformat(),
+                        )
                     if operator_defined_scope:
                         case_lineage["operator_scope_confirmed"] = True
                         case_lineage["operator_scope_reason"] = scope_reason
@@ -1830,6 +1918,63 @@ def _reported_release_id(
     return str(match["release_manifest_id"]) if match else None
 
 
+def _release_choices(registry: MonitoringRegistry) -> dict[str, dict[str, Any]]:
+    choices = {
+        str(item["release_manifest_id"]): dict(item)
+        for item in registry.list_release_manifests()
+    }
+    try:
+        tags = release_assets.list_git_release_tags(settings_module.BASE_DIR)
+    except (release_assets.ReleaseAssetError, OSError, ValueError) as exc:
+        st.warning(f"로컬 태그를 확인하지 못했습니다: {exc}")
+        return choices
+    for tag in tags:
+        existing = next(
+            (item for item in choices.values() if item["app_version"] == tag["app_version"]),
+            None,
+        )
+        if existing and not tag.get("error") and (
+            existing.get("manifest", {}).get("git_revision") == tag["git_revision"]
+        ):
+            continue
+        choices[f"git-tag:{tag['tag']}"] = dict(tag)
+    return choices
+
+
+def _release_choice_label(choice: Mapping[str, Any]) -> str:
+    if "tag" not in choice:
+        return _release_label(choice)
+    status = f"준비 불가: {choice['error']}" if choice.get("error") else "실행 시 자동 준비"
+    return f"{choice['tag']} · {str(choice['git_revision'])[:12]} · {status}"
+
+
+def _capture_release_choice(choice: Mapping[str, Any]) -> None:
+    st.session_state["monitoring_requested_release"] = dict(choice)
+
+
+def _prepare_release_choice(registry: MonitoringRegistry, choice: Mapping[str, Any]) -> str:
+    choice = st.session_state.pop("monitoring_requested_release", choice)
+    if "tag" not in choice:
+        return str(choice["release_manifest_id"])
+    if choice.get("error"):
+        raise release_assets.ReleaseAssetError(str(choice["error"]))
+    with st.spinner(f"{choice['tag']} 검증용 Release를 준비하고 있습니다."):
+        return release_assets.ensure_git_tag_release(
+            registry, load_operator_api_config().artifact_root,
+            settings_module.BASE_DIR, str(choice["tag"]), str(choice["git_revision"]),
+        )
+
+
+def _reported_choice(
+    registry: MonitoringRegistry, issue: Mapping[str, Any], choices: Mapping[str, Any]
+) -> str | None:
+    registered = _reported_release_id(registry, issue)
+    if registered in choices:
+        return registered
+    version = str(issue.get("reported_release_id") or "").removeprefix("release-").removeprefix("v")
+    return next((key for key, item in choices.items() if item["app_version"] == version), None)
+
+
 def _render_run_action(
     client: MonitoringAdminClient,
     registry: MonitoringRegistry,
@@ -1843,18 +1988,18 @@ def _render_run_action(
     if not case or case["lifecycle_status"] != "READY":
         st.info("먼저 Fixture, FixedSnapshot, Lineage를 확인하고 Case를 READY로 고정하세요.")
         return
-    releases = registry.list_release_manifests()
+    choices = _release_choices(registry)
+    releases = list(choices.values())
     if not releases:
         st.warning(
-            "등록된 runnable release bundle이 없습니다. 설정의 ‘Release 등록’에서 "
-            "먼저 신고 버전을 등록하세요."
+            "실행할 버전이 없습니다. 신고 버전의 Git 태그를 로컬에 가져오세요."
         )
         return
-    release_ids = [str(item["release_manifest_id"]) for item in releases]
-    reported_id = _reported_release_id(registry, local_issue)
+    release_ids = list(choices)
+    reported_id = _reported_choice(registry, local_issue, choices)
     if reported_id is None:
         st.error(
-            f"신고 버전 {local_issue['reported_release_id']}에 대응하는 등록 Release가 없습니다."
+            f"신고 버전 {local_issue['reported_release_id']}에 대응하는 Release 또는 로컬 태그가 없습니다."
         )
         return
     release_id = st.selectbox(
@@ -1862,16 +2007,13 @@ def _render_run_action(
         release_ids,
         index=release_ids.index(reported_id),
         key=f"baseline_release_{local_issue['issue_id']}",
-        format_func=lambda value: _release_label(
-            next(
-                item
-                for item in releases
-                if item["release_manifest_id"] == value
-            )
-        ),
+        format_func=lambda value: _release_choice_label(choices[value]),
         disabled=True,
     )
-    if st.button("Baseline 새 Run 실행", type="primary"):
+    if st.button(
+        "Baseline 새 Run 실행", type="primary",
+        on_click=_capture_release_choice, args=(choices[release_id],),
+    ):
         try:
             run = _execute_new_run(
                 client,
@@ -1881,7 +2023,7 @@ def _render_run_action(
                 ).removeprefix("supabase:"),
                 issue=local_issue,
                 case=case,
-                release_manifest_id=release_id,
+                release_manifest_id=_prepare_release_choice(registry, choices[release_id]),
                 side="BASELINE",
             )
         except (MonitoringRegistryError, MonitoringServiceError, release_assets.ReleaseAssetError, OSError, ValueError) as exc:
@@ -1938,6 +2080,7 @@ def _render_reproduction(client: MonitoringAdminClient, registry: MonitoringRegi
     if not isinstance(remote_issue, Mapping) or str(remote_issue.get("issue_id")) != str(issue_id):
         st.info("작업함에서 신고를 한 번 열어 요약을 확인하세요.")
         return
+    _render_issue_context(client, remote_issue, workspace="테스트 케이스 설정")
     local_issue = _ensure_local_issue(registry, remote_issue)
     _synchronize_control_projection(
         client,
@@ -2083,6 +2226,86 @@ def _render_saved_comparison(
     st.json(profile_diff)
 
 
+def _render_issue_resolution(
+    client: MonitoringAdminClient,
+    registry: MonitoringRegistry,
+    remote_issue: Mapping[str, Any],
+    local_issue: Mapping[str, Any] | None,
+) -> None:
+    st.subheader("마지막 단계: 이슈 처리")
+    current_state = str(remote_issue.get("state") or "OPEN").upper()
+    comparison = None
+    if local_issue:
+        local_issue = registry.get_issue(str(local_issue["issue_id"]))
+        comparison_id = local_issue.get("current_comparison_id")
+        if comparison_id:
+            candidate = registry.get_comparison(str(comparison_id))
+            if candidate["case_contract_id"] == local_issue.get("current_case_contract_id"):
+                comparison = candidate
+    versions: list[str] = []
+    if comparison:
+        releases = {item["release_manifest_id"]: item for item in registry.list_release_manifests()}
+        for run_id in comparison["candidate_run_ids"]:
+            run = registry.get_run(str(run_id))
+            release = releases.get(run["release_manifest_id"])
+            if release:
+                versions.append(f"v{release['app_version']}")
+    version_label = ", ".join(dict.fromkeys(versions))
+    if current_state in _ISSUE_TERMINAL_TARGETS:
+        events = remote_issue.get("events") or []
+        resolution_reason = next((
+            str(event.get("reason") or "") for event in reversed(events)
+            if isinstance(event, Mapping) and event.get("to_state") == current_state
+        ), "")
+        receipt = st.session_state.get(f"monitoring_resolved_issue_{remote_issue['issue_id']}")
+        if resolution_reason:
+            st.success(f"현재 상태: {_issue_state_label(current_state)}")
+            st.text(resolution_reason)
+        elif current_state == "RESOLVED" and receipt:
+            st.success(f"{receipt}에서 해결됨")
+        else:
+            st.success(f"현재 상태: {_issue_state_label(current_state)}")
+        st.button("작업함으로 돌아가기", on_click=_select_workspace, args=("작업함",))
+        return
+    can_resolve = bool(comparison and comparison["verdict"] == "IMPROVED")
+    if comparison:
+        st.caption(f"저장된 판단: {_PROGRESS_LABELS[comparison['verdict']]} · 검증 버전: {version_label}")
+        st.text(str(comparison["note"]))
+    else:
+        st.info("같은 테스트 케이스의 개선 전·후 실행 결과를 비교하고 판단을 저장하세요.")
+    if not can_resolve:
+        st.caption("‘개선됨’ 판단을 저장하면 이슈 해결 처리가 활성화됩니다.")
+    with st.form(f"resolve_issue_{remote_issue['issue_id']}_{comparison['comparison_id'] if comparison else 'pending'}"):
+        reason = st.text_area(
+            "해결 사유", value=str(comparison["note"]) if comparison else "",
+        )
+        submitted = st.form_submit_button(
+            "이슈 해결 처리", type="primary", disabled=not can_resolve,
+        )
+    if submitted and can_resolve and local_issue and comparison:
+        if not reason.strip():
+            st.error("해결 사유를 입력하세요.")
+            return
+        try:
+            _synchronize_control_projection(
+                client, registry, remote_issue_id=str(remote_issue["issue_id"]),
+                local_issue=local_issue,
+            )
+            client.transition_issue(
+                str(remote_issue["issue_id"]), target_state="RESOLVED",
+                expected_record_revision=int(remote_issue["record_revision"]),
+                reason=f"{version_label}에서 해결 확인 · 판단 {comparison['comparison_id']}\n{reason.strip()}",
+            )
+        except OperatorConflictError:
+            st.warning("다른 화면에서 이슈가 변경되었습니다. 새로고침 후 다시 확인하세요.")
+        except (OperatorApiError, MonitoringRegistryError, MonitoringServiceError, ValueError) as exc:
+            st.error(_error_message(exc))
+        else:
+            st.session_state[f"monitoring_resolved_issue_{remote_issue['issue_id']}"] = version_label
+            st.rerun()
+    st.caption("이슈 아님 처리나 다시 열기는 작업함에서 할 수 있습니다.")
+
+
 def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegistry) -> None:
     st.header("개선 확인")
     st.write(
@@ -2092,9 +2315,11 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
     if not isinstance(remote_issue, Mapping):
         st.info("작업함에서 먼저 신고를 선택하세요.")
         return
+    _render_issue_context(client, remote_issue, workspace="개선 확인")
     local_issue = _find_local_issue(registry, remote_issue)
     if local_issue is None or not local_issue.get("current_case_contract_id"):
         st.info("먼저 테스트 케이스를 READY로 만들고 Baseline을 실행하세요.")
+        _render_issue_resolution(client, registry, remote_issue, local_issue)
         return
     _synchronize_control_projection(
         client,
@@ -2104,13 +2329,13 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
     )
     case = registry.get_case_by_contract(str(local_issue["current_case_contract_id"]))
 
-    releases = registry.list_release_manifests()
-    baseline_release_id = _reported_release_id(registry, local_issue)
-    candidate_releases = [
-        item
-        for item in releases
-        if item["release_manifest_id"] != baseline_release_id
-    ]
+    choices = _release_choices(registry)
+    baseline_release_id = _reported_choice(registry, local_issue, choices)
+    reported_version = str(remote_issue.get("app_version") or "")
+    candidate_releases = {
+        key: item for key, item in choices.items()
+        if key != baseline_release_id and item["app_version"] != reported_version
+    }
 
     runs = registry.list_runs(
         issue_id=str(local_issue["issue_id"]),
@@ -2138,7 +2363,13 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
                     _render_run_detail(run, title="Baseline Run")
         else:
             st.caption("아직 실행된 Baseline이 없습니다.")
-        if st.button("Baseline 실행"):
+        if baseline_release_id is None:
+            st.warning("신고 버전의 Release 또는 로컬 Git 태그가 필요합니다.")
+        else:
+            st.caption(_release_choice_label(choices[baseline_release_id]))
+        if st.button("Baseline 실행", disabled=baseline_release_id is None,
+                     on_click=_capture_release_choice,
+                     args=(choices.get(baseline_release_id, {}),)):
             try:
                 _execute_new_run(
                     client,
@@ -2146,7 +2377,7 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
                     remote_issue_id=str(remote_issue["issue_id"]),
                     issue=local_issue,
                     case=case,
-                    release_manifest_id=str(baseline_release_id),
+                    release_manifest_id=_prepare_release_choice(registry, choices[baseline_release_id]),
                     side="BASELINE",
                 )
             except (MonitoringRegistryError, MonitoringServiceError, release_assets.ReleaseAssetError, OSError, ValueError) as exc:
@@ -2159,25 +2390,21 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
         if candidate_releases:
             candidate_release = st.selectbox(
                 "개선 후보 Release",
-                [str(item["release_manifest_id"]) for item in candidate_releases],
+                list(candidate_releases),
                 key=f"candidate_release_{local_issue['issue_id']}",
-                format_func=lambda value: _release_label(
-                    next(
-                        item
-                        for item in candidate_releases
-                        if item["release_manifest_id"] == value
-                    )
-                ),
+                format_func=lambda value: _release_choice_label(candidate_releases[value]),
             )
         else:
-            st.warning("신고 버전과 다른 Candidate Release를 먼저 등록하세요.")
+            st.warning("신고 버전과 다른 Release 또는 로컬 Git 태그가 필요합니다.")
         if candidate:
             for index, run in enumerate(reversed(candidate[-5:])):
                 with st.expander(_run_option(run), expanded=index == 0):
                     _render_run_detail(run, title="Candidate Run")
         else:
             st.caption("아직 실행된 Candidate가 없습니다.")
-        if st.button("Candidate 실행", disabled=candidate_release is None):
+        if st.button("Candidate 실행", disabled=candidate_release is None,
+                     on_click=_capture_release_choice,
+                     args=(choices.get(candidate_release, {}),)):
             assert candidate_release is not None
             try:
                 run = _execute_new_run(
@@ -2186,7 +2413,7 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
                     remote_issue_id=str(remote_issue["issue_id"]),
                     issue=local_issue,
                     case=case,
-                    release_manifest_id=candidate_release,
+                    release_manifest_id=_prepare_release_choice(registry, choices[candidate_release]),
                     side="CANDIDATE",
                 )
             except (MonitoringRegistryError, MonitoringServiceError, release_assets.ReleaseAssetError, OSError, ValueError) as exc:
@@ -2220,6 +2447,7 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
 
     if not baseline or not candidate:
         st.info("개선 전·후 버전(SUCCEEDED + VALID)이 각각 하나 이상 필요합니다.")
+        _render_issue_resolution(client, registry, remote_issue, local_issue)
         return
 
     baseline_ids = st.multiselect(
@@ -2240,6 +2468,7 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
     )
     if not baseline_ids or not candidate_ids:
         st.info("양쪽에서 판단에 사용할 Run을 한 건 이상 선택하세요.")
+        _render_issue_resolution(client, registry, remote_issue, local_issue)
         return
     selected_baseline = [
         next(row for row in baseline if row["run_id"] == run_id)
@@ -2315,57 +2544,7 @@ def _render_comparison(client: MonitoringAdminClient, registry: MonitoringRegist
         else:
             st.success("판단을 저장했습니다. 이전 판단은 수정하지 않고 이력이 그대로 남습니다.")
             st.rerun()
-    st.markdown("**이슈 종결**")
-    current_state = str(remote_issue.get("state") or "OPEN").upper()
-    terminal_transitions = [
-        (target, label)
-        for target, label in _available_issue_transitions(current_state)
-        if target in _ISSUE_TERMINAL_TARGETS
-    ]
-    if not terminal_transitions:
-        st.caption("현재 상태에서는 종결할 수 없습니다.")
-    else:
-        close_by_label = {label: target for target, label in terminal_transitions}
-        with st.form(f"close_issue_{remote_issue['issue_id']}"):
-            close_label = st.selectbox("종결 상태", tuple(close_by_label))
-            close_reason = st.text_area(
-                "종결 사유",
-                placeholder="확인 결과에 근거해 왜 종결하는지 기록하세요.",
-            )
-            close_submitted = st.form_submit_button("이슈 종결 저장", type="primary")
-        if close_submitted:
-            target = close_by_label[str(close_label)]
-            reason = str(close_reason or "").strip()
-            if not reason:
-                st.error("종결 사유를 입력하세요.")
-            else:
-                try:
-                    _synchronize_control_projection(
-                        client,
-                        registry,
-                        remote_issue_id=str(remote_issue["issue_id"]),
-                        local_issue=local_issue,
-                    )
-                    client.transition_issue(
-                        str(remote_issue["issue_id"]),
-                        target_state=target,
-                        expected_record_revision=int(remote_issue["record_revision"]),
-                        reason=reason,
-                    )
-                except OperatorConflictError:
-                    st.warning(
-                        "다른 화면에서 이슈가 변경되었습니다. 새로고침 후 다시 확인하세요."
-                    )
-                except (
-                    OperatorApiError,
-                    MonitoringRegistryError,
-                    MonitoringServiceError,
-                    ValueError,
-                ) as exc:
-                    st.error(_error_message(exc))
-                else:
-                    st.success(f"{close_label} 상태와 사유를 저장했습니다.")
-                    st.rerun()
+    _render_issue_resolution(client, registry, remote_issue, local_issue)
 
     if history:
         with st.expander("판단 변경 이력", expanded=False):
@@ -2552,8 +2731,8 @@ def _default_release_runtime_profile() -> dict[str, Any]:
 
 def _render_release_registration(registry: MonitoringRegistry) -> None:
     root = load_operator_api_config().artifact_root.resolve()
-    st.markdown("**Release 등록**")
-    st.caption("현재 Git commit의 실행 코드를 불변 Release로 등록합니다.")
+    st.markdown("**고급 설정 · Release 수동 등록**")
+    st.caption("로컬 태그는 검증 실행 시 자동 등록됩니다. 여기서는 현재 Git commit을 직접 등록할 수 있습니다.")
     current_identity: release_assets.GitReleaseIdentity | None = None
     try:
         current_identity = release_assets.inspect_current_project_release(

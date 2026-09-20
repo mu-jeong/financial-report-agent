@@ -155,6 +155,8 @@ EXPLICIT_WIDGET_KEYS = {
     'f"baseline_release_{local_issue[\'issue_id\']}"',
     'f"candidate_release_{local_issue[\'issue_id\']}"',
     'f"case_ready_{case[\'case_revision_id\']}"',
+    'f"case_date_create_{local_issue[\'issue_id\']}"',
+    'f"case_date_edit_{case[\'case_revision_id\']}"',
     'f"case_revise_{case[\'case_revision_id\']}"',
     'f"case_select_{local_issue[\'issue_id\']}_{len(revisions)}"',
     'f"fixture_ready_{fixture[\'fixture_revision_id\']}"',

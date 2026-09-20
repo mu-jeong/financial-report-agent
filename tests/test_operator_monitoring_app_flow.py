@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,7 @@ ISSUE = {{
     "latency_ms": 1234,
     "case_diagnostics_status": "AVAILABLE",
     "raw_available": True,
+    "received_at": "2026-09-18T16:30:00Z",
 }}
 
 class FakeClient:
@@ -321,9 +323,18 @@ def test_reproduction_workspace_keeps_selected_issue_across_reruns(
         "11111111-1111-4111-8111-111111111111"
     )
 
-    app.session_state["monitoring_operator_workspace"] = "테스트 케이스 설정"
-    app.run(timeout=20)
+    next(
+        button for button in app.button if button.label == "이 이슈로 테스트 설정"
+    ).click().run(timeout=20)
     assert not app.exception
+    assert app.session_state["monitoring_operator_workspace"] == "테스트 케이스 설정"
+    assert any(item.value == "현재 작업 중인 이슈" for item in app.subheader)
+    assert any(item.value == "영업이익은 얼마인가요?" for item in app.text)
+    assert any(item.value == "답변 수치가 다릅니다." for item in app.text)
+    assert any(
+        "11111111-1111-4111-8111-111111111111" in item.value
+        for item in app.caption
+    )
     assert any(
         item.value == "1. Fixture — 같은 질문과 확인 기준 고정"
         for item in app.subheader
@@ -358,6 +369,27 @@ def test_reproduction_workspace_keeps_selected_issue_across_reruns(
     assert any(
         item.value == "1. Fixture — 같은 질문과 확인 기준 고정"
         for item in app.subheader
+    )
+
+
+    next(
+        button for button in app.button if button.label == "이 이슈의 개선 확인"
+    ).click().run(timeout=20)
+    assert not app.exception
+    assert app.session_state["monitoring_operator_workspace"] == "개선 확인"
+    assert any(item.value == "마지막 단계: 이슈 처리" for item in app.subheader)
+    assert next(button for button in app.button if button.label == "이슈 해결 처리").disabled
+    assert any(item.value == "영업이익은 얼마인가요?" for item in app.text)
+    assert any(item.value == "답변 수치가 다릅니다." for item in app.text)
+    assert app.session_state["fake_raw_view_calls"] == 1
+
+    next(
+        button for button in app.button if button.label == "작업함에서 다른 이슈 선택"
+    ).click().run(timeout=20)
+    assert not app.exception
+    assert app.session_state["monitoring_operator_workspace"] == "작업함"
+    assert app.session_state["monitoring_selected_issue_id"] == (
+        "11111111-1111-4111-8111-111111111111"
     )
 
 
@@ -465,6 +497,32 @@ def test_snapshot_scope_is_human_readable_editable_and_stable_across_reruns(
     ]
     assert app.session_state["fake_snapshot_document_reads"] == 1
 
+    next(
+        widget for widget in app.text_input if widget.label == "문서 검색"
+    ).set_value("삼성전자").run(timeout=20)
+
+    assert not app.exception
+    search_results = next(
+        widget
+        for widget in app.multiselect
+        if widget.label == "검색 결과에서 추가할 문서"
+    )
+    assert len(search_results.options) == 1
+    assert "삼성전자 같은 조건 보고서" in search_results.options[0]
+    assert next(
+        expander
+        for expander in app.expander
+        if expander.label == "신고 근거로 Snapshot 범위 준비"
+    ).proto.expanded is True
+
+    app.run(timeout=20)
+    assert not app.exception
+    assert next(
+        expander
+        for expander in app.expander
+        if expander.label == "신고 근거로 Snapshot 범위 준비"
+    ).proto.expanded is True
+
     app.session_state["fake_publication_generation"] = 2
     app.run(timeout=20)
 
@@ -560,6 +618,29 @@ def test_operator_defined_draft_requires_visible_confirmation_before_ready(
     assert reason.value
     assert ready_button.disabled is True
 
+    reference_date = next(
+        widget for widget in app.date_input if widget.label == "질문의 기준 날짜"
+    )
+    assert reference_date.value == date(2026, 9, 19)
+    reference_date.set_value(date(2026, 9, 18))
+    next(
+        button for button in app.button if button.label == "Case 초안 수정 저장"
+    ).click().run(timeout=20)
+    assert not app.exception
+    assert next(
+        widget for widget in app.date_input if widget.label == "질문의 기준 날짜"
+    ).value == date(2026, 9, 18)
+    from src.core.operator_monitoring import MonitoringRegistry
+
+    root = tmp_path / "managed-operator-defined-ready"
+    registry = MonitoringRegistry(root / "registry.sqlite3", artifact_root=root)
+    saved = registry.get_case_revision(app.session_state["fake_operator_defined_case_id"])
+    assert saved["fixed_clock"] == "2026-09-18"
+
+    confirmation = next(
+        widget for widget in app.checkbox
+        if widget.label == "선택한 문서 범위를 직접 확인했습니다"
+    )
     confirmation.set_value(True)
     app.run(timeout=20)
 
@@ -746,3 +827,95 @@ def test_operator_completed_cycle_workspaces_render_without_error(
     assert any(header.value == workspace for header in app.header)
     rendered_subheaders = {item.value for item in app.subheader}
     assert set(expected_subheaders).issubset(rendered_subheaders)
+
+
+@pytest.mark.parametrize("verdict", ["IMPROVED", "NOT_IMPROVED"])
+def test_resolution_uses_saved_verdict_and_records_version(tmp_path: Path, verdict: str) -> None:
+    harness = tmp_path / "resolve.py"
+    _write_completed_cycle_harness(harness, tmp_path / "managed", workspace="개선 확인")
+    source = harness.read_text(encoding="utf-8")
+    start = source.index("issue = registry.create_issue(")
+    end = source.index('views.st.session_state["monitoring_selected_issue_id"]', start)
+    source = source[:start] + "if not registry.list_issues():\n" + "".join(
+        "    " + line if line.strip() else line
+        for line in source[start:end].splitlines(keepends=True)
+    ) + source[end:]
+    source = source.replace('verdict="IMPROVED"', f'verdict="{verdict}"')
+    source = source.replace(
+        "    def get_issue(self, issue_id):\n        return dict(ISSUE)",
+        "    def get_issue(self, issue_id):\n"
+        "        return dict(ISSUE, state=views.st.session_state.get('resolved_state', 'OPEN'))\n"
+        "    def transition_issue(self, issue_id, **kwargs):\n"
+        "        views.st.session_state['transition_record'] = kwargs\n"
+        "        views.st.session_state['resolved_state'] = kwargs['target_state']\n",
+    )
+    harness.write_text(source, encoding="utf-8")
+    app = AppTest.from_file(str(harness))
+    app.session_state["monitoring_operator_session"] = OperatorSession(
+        access_token="fixture", user_id="admin", email="admin@example.test",
+        expires_at=time.time() + 3600,
+    )
+    app.run(timeout=30)
+    assert not app.exception
+    button = next(button for button in app.button if button.label == "이슈 해결 처리")
+    assert button.disabled is (verdict != "IMPROVED")
+    if verdict != "IMPROVED":
+        return
+    reason = next(widget for widget in app.text_area if widget.label == "해결 사유")
+    assert reason.value == "답변과 근거를 정성 검토했습니다."
+    button.click().run(timeout=30)
+    assert not app.exception
+    record = app.session_state["transition_record"]
+    assert record["target_state"] == "RESOLVED"
+    assert record["expected_record_revision"] == 3
+    assert "v0.6.2" in record["reason"]
+    assert any("v0.6.2에서 해결됨" in item.value for item in app.success)
+
+
+def test_candidate_tag_is_prepared_before_execution(tmp_path: Path) -> None:
+    harness = tmp_path / "tag_execution.py"
+    _write_completed_cycle_harness(harness, tmp_path / "managed", workspace="개선 확인")
+    source = harness.read_text(encoding="utf-8")
+    start = source.index("issue = registry.create_issue(")
+    end = source.index('views.st.session_state["monitoring_selected_issue_id"]', start)
+    source = source[:start] + "if not registry.list_issues():\n" + "".join(
+        "    " + line if line.strip() else line
+        for line in source[start:end].splitlines(keepends=True)
+    ) + source[end:]
+    source = source.replace("views.render_operator_monitoring_page()", '''
+original_list = views.release_assets.list_git_release_tags
+original_ensure = views.release_assets.ensure_git_tag_release
+original_execute = views._execute_new_run
+views.release_assets.list_git_release_tags = lambda root: [
+    {"tag": "v0.6.9", "app_version": "0.6.9", "git_revision": "e" * 40, "error": None}
+]
+def ensure(registry, root, project, tag, revision):
+    views.st.session_state["prepared_tag"] = (tag, revision)
+    return "new-release"
+def execute(*args, **kwargs):
+    assert views.st.session_state["prepared_tag"] == ("v0.6.9", "e" * 40)
+    views.st.session_state["executed_release"] = kwargs["release_manifest_id"]
+    return {"run_id": "test-run", "execution_status": "SUCCEEDED", "validity": "VALID"}
+views.release_assets.ensure_git_tag_release = ensure
+views._execute_new_run = execute
+try:
+    views.render_operator_monitoring_page()
+finally:
+    views.release_assets.list_git_release_tags = original_list
+    views.release_assets.ensure_git_tag_release = original_ensure
+    views._execute_new_run = original_execute
+''')
+    harness.write_text(source, encoding="utf-8")
+    app = AppTest.from_file(str(harness))
+    app.session_state["monitoring_operator_session"] = OperatorSession(
+        access_token="fixture", user_id="admin", email="admin@example.test",
+        expires_at=time.time() + 3600,
+    )
+    app.run(timeout=30)
+    assert not app.exception
+    next(widget for widget in app.selectbox if widget.label == "개선 후보 Release").set_value(
+        "git-tag:v0.6.9"
+    ).run(timeout=30)
+    next(button for button in app.button if button.label == "Candidate 실행").click().run(timeout=30)
+    assert not app.exception
+    assert app.session_state["executed_release"] == "new-release"

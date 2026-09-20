@@ -20,6 +20,33 @@ APP_PATH = Path("apps/gui/app.py")
 SIDEBAR_PATH = Path("apps/gui/sidebar_views.py")
 
 
+@pytest.mark.parametrize(
+    "clock,raw,issue,expected",
+    [
+        ("2026-09-17T23:00:00Z", {}, {}, date(2026, 9, 17)),
+        (None, {"created_at": "2026-09-18T16:00:00Z"},
+         {"received_at": "2026-09-20T00:00:00Z"}, date(2026, 9, 19)),
+        (None, {}, {"received_at": "2026-09-18T16:00:00Z"}, date(2026, 9, 19)),
+        ("invalid", {"created_at": "invalid"},
+         {"received_at": "2026-09-18T00:00:00Z"}, date(2026, 9, 18)),
+    ],
+)
+def test_case_reference_date_preserves_saved_date_and_uses_korean_report_date(
+    clock, raw, issue, expected
+) -> None:
+    assert monitoring_views._case_reference_date(clock, raw, issue)[0] == expected
+
+
+def test_case_reference_date_explains_missing_report_date() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    before = datetime.now(timezone(timedelta(hours=9))).date()
+    selected, source = monitoring_views._case_reference_date(None, {}, {})
+    after = datetime.now(timezone(timedelta(hours=9))).date()
+    assert selected in (before, after)
+    assert "신고 날짜가 없어" in source
+
+
 def test_operator_api_version_drift_has_an_actionable_message() -> None:
     assert monitoring_views._error_message(
         OperatorApiError("method_not_allowed", status_code=405)
@@ -465,7 +492,7 @@ def test_comparison_exposes_required_side_by_side_evidence() -> None:
         "check_result",
         "latency_ms",
         "runtime_profile",
-        'st.button("Baseline 실행")',
+        'st.button("Baseline 실행",',
         'st.button("Candidate 실행"',
         "supersedes_comparison_id",
     ):
@@ -478,11 +505,13 @@ def test_comparison_exposes_issue_closure_after_verdict() -> None:
         "def _asset_warnings(", 1
     )[0]
 
-    assert "이슈 종결" in comparison
-    assert "client.transition_issue(" in comparison
-    assert "_available_issue_transitions(current_state)" in comparison
-    assert "if target in _ISSUE_TERMINAL_TARGETS" in comparison
-    assert "종결 사유를 입력하세요" in comparison
+    assert "_render_issue_resolution(" in comparison
+    resolution = source.split("def _render_issue_resolution(", 1)[1].split(
+        "def _render_comparison(", 1
+    )[0]
+    assert "client.transition_issue(" in resolution
+    assert 'comparison["verdict"] == "IMPROVED"' in resolution
+    assert "해결 사유를 입력하세요" in resolution
 
 
 def test_run_action_registers_release_and_syncs_each_lifecycle_state() -> None:

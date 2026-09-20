@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from src.core import release_assets
+from src.core.operator_monitoring import MonitoringRegistry
 
 
 def _run_git(root: Path, *args: str) -> str:
@@ -162,6 +163,144 @@ def test_current_project_release_identity_comes_from_clean_git(
     )
     with pytest.raises(release_assets.ReleaseAssetError, match="working tree"):
         release_assets.inspect_current_project_release(project_root)
+
+
+def test_list_git_release_tags_keeps_invalid_tags_and_sorts_semver(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    first_revision = _initialize_git_release_checkout(project_root)
+    _run_git(project_root, "tag", "v0.6.2")
+    (project_root / "README.md").write_text(
+        "> Version: 0.6.10\n", encoding="utf-8"
+    )
+    _run_git(project_root, "add", "README.md")
+    _run_git(project_root, "commit", "-m", "Prepare 0.6.10")
+    second_revision = _run_git(project_root, "rev-parse", "HEAD")
+    _run_git(project_root, "tag", "-a", "v0.6.10", "-m", "Release 0.6.10")
+    _run_git(project_root, "branch", "v0.6.10", first_revision)
+    _run_git(project_root, "tag", "v0.6.9")
+    _run_git(project_root, "tag", "vnext")
+
+    tags = release_assets.list_git_release_tags(project_root)
+
+    assert [item["tag"] for item in tags] == [
+        "v0.6.10",
+        "v0.6.9",
+        "v0.6.2",
+        "vnext",
+    ]
+    by_tag = {str(item["tag"]): item for item in tags}
+    assert by_tag["v0.6.10"] == {
+        "tag": "v0.6.10",
+        "app_version": "0.6.10",
+        "git_revision": second_revision,
+        "error": None,
+    }
+    assert by_tag["v0.6.2"]["git_revision"] == first_revision
+    assert by_tag["v0.6.2"]["error"] is None
+    assert "committed README" in str(by_tag["v0.6.9"]["error"])
+    assert "semantic version" in str(by_tag["vnext"]["error"])
+    assert by_tag["vnext"]["git_revision"] == ""
+
+
+def test_list_git_release_tags_marks_nonofficial_baseline_revision(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    _initialize_git_release_checkout(project_root)
+    (project_root / "README.md").write_text(
+        "> Version: 0.6.1\n", encoding="utf-8"
+    )
+    _run_git(project_root, "add", "README.md")
+    _run_git(project_root, "commit", "-m", "Create unofficial baseline")
+    _run_git(project_root, "tag", "v0.6.1")
+
+    [tag] = release_assets.list_git_release_tags(project_root)
+
+    assert tag["tag"] == "v0.6.1"
+    assert "official remote baseline revision" in str(tag["error"])
+
+
+def test_ensure_git_tag_release_registers_exact_commit_and_reuses_it(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    revision = _initialize_git_release_checkout(project_root)
+    _run_git(project_root, "tag", "-a", "v0.6.2", "-m", "Release 0.6.2")
+    managed_root = tmp_path / "managed"
+    registry = MonitoringRegistry(
+        tmp_path / "monitoring.sqlite3",
+        artifact_root=managed_root,
+    )
+
+    release_id = release_assets.ensure_git_tag_release(
+        registry,
+        managed_root,
+        project_root,
+        "v0.6.2",
+        revision,
+    )
+    reused_id = release_assets.ensure_git_tag_release(
+        registry,
+        managed_root,
+        project_root,
+        "v0.6.2",
+        revision,
+    )
+
+    assert reused_id == release_id == release_assets.git_release_manifest_id(
+        "0.6.2", revision
+    )
+    [record] = registry.list_release_manifests()
+    assert record["release_tag"] == "v0.6.2"
+    assert record["manifest_version"] == release_assets.GIT_RELEASE_SCHEMA_VERSION
+    assert record["manifest"]["git_revision"] == revision
+    assert (managed_root / record["bundle_relpath"]).is_dir()
+
+
+def test_ensure_git_tag_release_rejects_moved_tag_and_registered_version_conflict(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    original_revision = _initialize_git_release_checkout(project_root)
+    _run_git(project_root, "tag", "v0.6.2")
+    managed_root = tmp_path / "managed"
+    registry = MonitoringRegistry(
+        tmp_path / "monitoring.sqlite3",
+        artifact_root=managed_root,
+    )
+    release_assets.ensure_git_tag_release(
+        registry,
+        managed_root,
+        project_root,
+        "v0.6.2",
+        original_revision,
+    )
+    (project_root / "src" / "core" / "example.py").write_text(
+        "VALUE = 'new commit'\n", encoding="utf-8"
+    )
+    _run_git(project_root, "add", "src/core/example.py")
+    _run_git(project_root, "commit", "-m", "Move release candidate")
+    moved_revision = _run_git(project_root, "rev-parse", "HEAD")
+    _run_git(project_root, "tag", "-f", "v0.6.2")
+
+    with pytest.raises(release_assets.ReleaseAssetError, match="tag moved"):
+        release_assets.ensure_git_tag_release(
+            registry,
+            managed_root,
+            project_root,
+            "v0.6.2",
+            original_revision,
+        )
+    with pytest.raises(release_assets.ReleaseAssetError, match="different identity"):
+        release_assets.ensure_git_tag_release(
+            registry,
+            managed_root,
+            project_root,
+            "v0.6.2",
+            moved_revision,
+        )
 
 
 def test_release_identity_is_version_and_commit_not_runtime_profile(

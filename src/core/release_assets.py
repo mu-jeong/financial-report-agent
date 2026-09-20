@@ -126,6 +126,16 @@ _README_VERSION_RE = re.compile(
     r"^>\s*Version:\s*`?([^`\s]+)`?\s*$",
     flags=re.MULTILINE,
 )
+_SEMVER_TAG_RE = re.compile(
+    r"^v(?P<major>0|[1-9]\d*)\."
+    r"(?P<minor>0|[1-9]\d*)\."
+    r"(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<prerelease>"
+    r"(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*"
+    r"))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 class ReleaseAssetError(RuntimeError):
@@ -327,6 +337,176 @@ def inspect_current_project_release(
         git_revision=revision,
     )
     return GitReleaseIdentity(committed_version, revision)
+
+
+def _semver_tag_key(tag: str) -> tuple[Any, ...] | None:
+    match = _SEMVER_TAG_RE.fullmatch(tag)
+    if match is None:
+        return None
+    prerelease = match.group("prerelease")
+    prerelease_key: tuple[tuple[int, Any], ...] = ()
+    if prerelease is not None:
+        prerelease_key = tuple(
+            (0, int(part)) if part.isdigit() else (1, part)
+            for part in prerelease.split(".")
+        )
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+        1 if prerelease is None else 0,
+        prerelease_key,
+    )
+
+
+def list_git_release_tags(
+    project_root: str | Path,
+) -> list[dict[str, str | None]]:
+    """List local ``v*`` tags with committed Release identity validation.
+
+    Invalid references remain in the result so an operator can see why a local
+    tag cannot be selected. Valid semantic versions are ordered newest first;
+    non-SemVer ``v*`` references follow in lexical order.
+    """
+
+    project = _git_project_root(project_root)
+    raw_tags = _git_command(project, "tag", "--list", "v*", text=True)
+    tags = [value.strip() for value in str(raw_tags).splitlines() if value.strip()]
+    results: list[dict[str, str | None]] = []
+    for tag in tags:
+        version = tag.removeprefix("v")
+        revision = ""
+        error: str | None = None
+        try:
+            if _semver_tag_key(tag) is None:
+                raise ReleaseAssetError("release tag must be a semantic version such as v0.6.5")
+            revision = _resolve_git_commit(project, f"refs/tags/{tag}")
+            committed_version = _app_version_from_readme(
+                _git_blob(project, revision, "README.md")
+            )
+            if committed_version != version:
+                raise ReleaseAssetError(
+                    "release tag version does not match the committed README"
+                )
+            _validate_official_release_identity(
+                app_version=committed_version,
+                git_revision=revision,
+            )
+        except ReleaseAssetError as exc:
+            error = str(exc)
+        results.append(
+            {
+                "tag": tag,
+                "app_version": version,
+                "git_revision": revision,
+                "error": error,
+            }
+        )
+
+    semver_results = [
+        item for item in results if _semver_tag_key(str(item["tag"]))
+    ]
+    other_results = [
+        item
+        for item in results
+        if _semver_tag_key(str(item["tag"])) is None
+    ]
+    semver_results.sort(
+        key=lambda item: _semver_tag_key(str(item["tag"])) or (),
+        reverse=True,
+    )
+    other_results.sort(key=lambda item: str(item["tag"]))
+    return semver_results + other_results
+
+
+def ensure_git_tag_release(
+    registry: Any,
+    managed_root: str | Path,
+    project_root: str | Path,
+    tag: str,
+    expected_git_revision: str,
+) -> str:
+    """Ensure one local Git tag has an exact immutable registry Release."""
+
+    project = _git_project_root(project_root)
+    normalized_tag = str(tag).strip()
+    semver_key = _semver_tag_key(normalized_tag)
+    if semver_key is None:
+        raise ReleaseAssetError("release tag must be a semantic version such as v0.6.5")
+    expected_revision = str(expected_git_revision).strip().casefold()
+    if not _FULL_GIT_REVISION_RE.fullmatch(expected_revision):
+        raise ReleaseAssetError("expected Git revision must be a full commit SHA")
+    current_revision = _resolve_git_commit(
+        project, f"refs/tags/{normalized_tag}"
+    )
+    if current_revision != expected_revision:
+        raise ReleaseAssetError("local release tag moved after it was selected")
+
+    app_version = normalized_tag.removeprefix("v")
+    committed_version = _app_version_from_readme(
+        _git_blob(project, current_revision, "README.md")
+    )
+    if committed_version != app_version:
+        raise ReleaseAssetError(
+            "release tag version does not match the committed README"
+        )
+    _validate_official_release_identity(
+        app_version=app_version,
+        git_revision=current_revision,
+    )
+
+    existing = registry.find_release_by_version(app_version)
+    if existing is not None:
+        manifest = existing.get("manifest")
+        if not isinstance(manifest, Mapping):
+            raise ReleaseAssetError("registered Release manifest is invalid")
+        existing_revision = str(manifest.get("git_revision") or "").casefold()
+        expected_identity = git_release_manifest_id(app_version, current_revision)
+        if (
+            str(existing.get("release_tag") or "") != normalized_tag
+            or int(existing.get("manifest_version") or 0) != GIT_RELEASE_SCHEMA_VERSION
+            or existing_revision != current_revision
+            or str(existing.get("release_manifest_id") or "") != expected_identity
+        ):
+            raise ReleaseAssetError(
+                f"release {app_version} is already registered with a different identity"
+            )
+        return expected_identity
+
+    root = _managed_root(managed_root)
+    stage: Path | None = None
+    try:
+        stage = prepare_git_revision_release_stage(
+            root,
+            project_root=project,
+            app_version=app_version,
+            git_revision=current_revision,
+        )
+        descriptor = register_release_stage(
+            root,
+            stage,
+            expected_tag_version=normalized_tag,
+            expected_git_revision=current_revision,
+        )
+        stage = None
+        manifest = _read_json_mapping(descriptor.path / "release-manifest.json")
+        relative = descriptor.path.resolve().relative_to(root)
+        registered = registry.register_release_manifest(
+            release_manifest_id=descriptor.release_manifest_id,
+            release_tag=normalized_tag,
+            app_version=descriptor.app_version,
+            manifest_version=descriptor.manifest_version,
+            runtime_bundle_digest=descriptor.runtime_bundle_digest,
+            bundle_relpath=relative.as_posix(),
+            manifest=manifest,
+        )
+        registered_id = str(registered.get("release_manifest_id") or "")
+        if registered_id != descriptor.release_manifest_id:
+            raise ReleaseAssetError("registry returned a different Release identity")
+        return registered_id
+    finally:
+        if stage is not None and (stage.exists() or stage.is_symlink()):
+            safe_cleanup(stage, managed_root=root)
 
 
 def git_release_manifest_id(app_version: str, git_revision: str) -> str:
