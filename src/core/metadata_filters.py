@@ -229,9 +229,20 @@ def _bounds_for_month_offset(today: date, month_offset: int) -> tuple[str, str]:
     return start, end
 
 
-def _resolve_relative_temporal_context(query: str, today: date) -> TemporalContext | None:
-    normalized_query = _normalize_text(query)
+def _contains_relative_expression(query: str, expression: str) -> bool:
+    """Match date phrases, not substrings of names such as 아모레퍼시픽.
 
+    Keep word boundaries while accepting spacing (이번 주), particles (모레에),
+    and report shorthand (이번주에발간). A particle must be followed by a boundary
+    or report wording, so 오늘의집 and 금주에스엠 remain names rather than dates.
+    """
+    phrase = r"\s*".join(re.escape(char) for char in expression)
+    particle = r"(?:부터|까지|에는|에도|에서|으로|의|에|은|는|만|도|이|가|을|를|와|과|로|자)?"
+    suffix = r"(?=" + particle + r"(?:\W|$|발간|발행|보고서|리포트))"
+    return re.search(r"(?<!\w)" + phrase + suffix, query) is not None
+
+
+def _resolve_relative_temporal_context(query: str, today: date) -> TemporalContext | None:
     relative_days = (
         ("그제", -2),
         ("어제", -1),
@@ -240,7 +251,7 @@ def _resolve_relative_temporal_context(query: str, today: date) -> TemporalConte
         ("모레", 2),
     )
     for expression, offset in relative_days:
-        if expression in normalized_query:
+        if _contains_relative_expression(query, expression):
             target = today + timedelta(days=offset)
             return _temporal_context(expression, target.isoformat(), target.isoformat(), today)
 
@@ -253,7 +264,7 @@ def _resolve_relative_temporal_context(query: str, today: date) -> TemporalConte
         ("차주", 1),
     )
     for expression, offset in relative_weeks:
-        if expression in normalized_query:
+        if _contains_relative_expression(query, expression):
             if offset == 0:
                 start, end = _bounds_for_current_week(today)
             else:
@@ -270,7 +281,7 @@ def _resolve_relative_temporal_context(query: str, today: date) -> TemporalConte
         ("익월", 1),
     )
     for expression, offset in relative_months:
-        if expression in normalized_query:
+        if _contains_relative_expression(query, expression):
             start, end = _bounds_for_month_offset(today, offset)
             return _temporal_context(expression, start, end, today)
 
@@ -282,7 +293,7 @@ def _resolve_relative_temporal_context(query: str, today: date) -> TemporalConte
         ("내년", 1),
     )
     for expression, offset in relative_years:
-        if expression in normalized_query:
+        if _contains_relative_expression(query, expression):
             start, end = _bounds_for_year(today.year + offset)
             return _temporal_context(expression, start, end, today)
 

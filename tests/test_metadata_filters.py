@@ -553,6 +553,94 @@ def test_resolve_temporal_context_for_relative_dates():
 
 
 @pytest.mark.parametrize(
+    "query",
+    [
+        "아모레퍼시픽 보고서를 정리해줘",
+        "전주페이퍼 보고서를 알려줘",
+        "오늘의집 관련 보고서",
+        "모레테크 보고서",
+        "금주에스엠 보고서",
+        "이내일 기업 보고서",
+    ],
+)
+def test_relative_dates_do_not_match_inside_names(query):
+    assert resolve_temporal_context(query, current_date=date(2026, 9, 19)) is None
+
+
+@pytest.mark.parametrize(
+    ("query", "start", "end"),
+    [
+        ("아모레퍼시픽의 어제 보고서", "2026-09-18", "2026-09-18"),
+        ("이번 주 아모레퍼시픽 보고서", "2026-09-14", "2026-09-19"),
+        ("아모레퍼시픽, 모레에 발간될 보고서", "2026-09-21", "2026-09-21"),
+        ("아모레퍼시픽 어제부터 발간된 보고서", "2026-09-18", "2026-09-18"),
+        ("오늘의 아모레퍼시픽 보고서", "2026-09-19", "2026-09-19"),
+        ("오늘의리포트", "2026-09-19", "2026-09-19"),
+        ("오늘자 아모레퍼시픽 보고서", "2026-09-19", "2026-09-19"),
+        ("오늘이 발간일인 아모레퍼시픽 보고서", "2026-09-19", "2026-09-19"),
+        ("내일을 기준으로 아모레퍼시픽 보고서", "2026-09-20", "2026-09-20"),
+        ("이번주에발간된 아모레퍼시픽 보고서", "2026-09-14", "2026-09-19"),
+        ("어제부터발간된 아모레퍼시픽 보고서", "2026-09-18", "2026-09-18"),
+        ("이번주발간된 아모레퍼시픽 보고서", "2026-09-14", "2026-09-19"),
+        ("지난 달 아모레퍼시픽 보고서", "2026-08-01", "2026-08-31"),
+        ("올해의 아모레퍼시픽 보고서", "2026-01-01", "2026-12-31"),
+        ("아모레퍼시픽 2026-09-14~2026-09-19 보고서", "2026-09-14", "2026-09-19"),
+    ],
+)
+def test_explicit_dates_still_work_alongside_company_names(query, start, end):
+    context = resolve_temporal_context(query, current_date=date(2026, 9, 19))
+
+    assert context is not None
+    assert context["report_date_start"] == start
+    assert context["report_date_end"] == end
+
+
+@pytest.mark.parametrize("date_expression", ["", "어제 "])
+def test_company_followup_preserves_period_unless_date_is_explicit(monkeypatch, date_expression):
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 9, 19)
+
+    targets = ["아모레퍼시픽", "오리온", "SK바이오팜", "HD현대마린솔루션"]
+    candidates = {
+        "target_name": targets,
+        "broker": (),
+        "report_month": ("2026-09",),
+        "target_report_types": {target: ("company",) for target in targets},
+    }
+    monkeypatch.setattr(metadata_filters_module, "date", FixedDate)
+    monkeypatch.setattr(metadata_filters_module, "get_metadata_candidates", lambda: candidates)
+    monkeypatch.setattr(search_scope, "get_metadata_candidates", lambda: candidates)
+    question = f"{', '.join(targets)} 에 대한 {date_expression}보고서를 정리해서 알려줘"
+    prior_filters = {
+        "report_types": ["company", "industry"],
+        "report_date_start": "2026-09-14",
+        "report_date_end": "2026-09-19",
+    }
+    state = {
+        "question": question,
+        "rewritten_query": question,
+        "prior_search_scope": {"route": "rdb", "search_filters": prior_filters},
+    }
+
+    prepared = search_scope.search_scope_prepare_node(state)
+    resolved = search_scope.search_scope_node({**state, **prepared})
+    expected_dates = {
+        "report_date_start": "2026-09-18" if date_expression else "2026-09-14",
+        "report_date_end": "2026-09-18" if date_expression else "2026-09-19",
+    }
+
+    for result in (prepared["scope_prepare"]["base_filters"], resolved["search_filters"]):
+        assert result == {**expected_dates, "report_type": "company", "target_names": targets}
+    assert resolved["scope_source"] == "prior_search_scope"
+    # This fix only changes temporal interpretation, not content routing.
+    assert resolved["routing_context"]["has_vector_intent"] is False
+    assert resolved["routing_context"]["route_hint"] == "rdb"
+    assert prior_filters["report_date_start"] == "2026-09-14"
+
+
+@pytest.mark.parametrize(
     ("query", "expected_expression", "expected_start", "expected_end"),
     [
         ("올해 발간된 리포트", "올해", "2026-01-01", "2026-12-31"),
