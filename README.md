@@ -165,6 +165,8 @@ python apps/cli/app.py --status
 
 ## Monitoring Mode
 
+사용자마다 로컬 검색 DB와 설치된 프로그램 버전이 다를 수 있어, 운영자 환경에서 같은 질문에 정상 응답했다고 해서 사용자가 신고한 문제가 해결됐다고 판단할 수는 없습니다. 신고 기반 개선 루프는 이 차이를 다루기 위해 신고 근거로 재현 자료를 구성·고정하고, 같은 조건에서 신고 버전과 개선 후보 버전을 실행해 비교하도록 설계했습니다. 사용자 DB 전체의 자동 복원을 보장하지 않으며, 신고 당시 자료와 재구성한 자료의 대응 범위도 기록합니다. 개발 배경과 비교 원칙은 [개선 루프](docs/operations/IMPROVEMENT_LOOP.md#개발-배경과-비교-원칙)에 정리했습니다.
+
 `MONITORING_MODE=true`는 로컬 `개별 Chat Monitoring`과 `개선 실험`을 엽니다. production 운영자 `Monitoring`은 `DEPLOYMENT_ENVIRONMENT=production`과 Supabase URL·publishable key·operator Function URL·`MONITORING_ARTIFACT_ROOT`까지 설정해야 노출됩니다.
 
 현재 구현의 저장 권위, 강제 gate, 권장 운영 순서, 알려진 제한은 [사용자 신고 기반 개선 루프](docs/operations/IMPROVEMENT_LOOP.md), 화면·지표·trace 세부 계약은 [Monitoring](docs/operations/MONITORING.md)을 기준으로 합니다.
