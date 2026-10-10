@@ -1,10 +1,24 @@
 from types import SimpleNamespace
 
+import pytest
+
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.messages.tool import tool_call_chunk
 from langchain_openrouter import ChatOpenRouter
 
 from src.llms import generation_observability as observability
+
+
+@pytest.mark.parametrize("finish", ["stop", "length", "error"])
+def test_terminal_usage_chunk_keeps_atomic_finish_reason(finish):
+    response = observability._combine_stream([
+        AIMessageChunk(content='{"answer":"complete text"}', response_metadata={"finish_reason": finish}),
+        AIMessageChunk(content="", response_metadata={"finish_reason": finish},
+                       usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+    ])
+    assert response.response_metadata["finish_reason"] == finish
+    assert response.content == '{"answer":"complete text"}'
+    assert response.usage_metadata["output_tokens"] == 5
 
 
 class _RawChunk:

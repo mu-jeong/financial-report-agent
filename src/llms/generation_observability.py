@@ -180,6 +180,14 @@ def _combine_stream(chunks: list[Any]) -> AIMessage:
     message = message_chunk_to_message(combined)
     if not isinstance(message, AIMessage):
         raise TypeError("LLM stream did not produce an AIMessage")
+    # OpenRouter repeats terminal metadata in its usage chunk. LangChain's
+    # generic string merge would turn "stop" + "stop" into "stopstop".
+    for key in ("finish_reason", "native_finish_reason"):
+        for chunk in reversed(chunks):
+            value = chunk.response_metadata.get(key)
+            if isinstance(value, str) and value:
+                message.response_metadata[key] = value
+                break
     return message
 
 
