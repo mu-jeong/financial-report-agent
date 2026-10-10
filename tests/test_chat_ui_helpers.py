@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src.core.chat_ui_helpers import (
     build_no_result_suggestions,
     build_scope_notice,
@@ -55,6 +57,18 @@ def test_escape_numeric_tildes_for_markdown_preserves_financial_range_text():
     assert escape_numeric_tildes_for_markdown(text) == (
         "5\\~10위권 고객사 매출 비중이 과거 1%에서 \\~23%로 상승"
     )
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("10~11개, 4~5%, 30~40%", r"10\~11개, 4\~5%, 30\~40%"),
+    ("2026년 4분기~2027년", r"2026년 4분기\~2027년"),
+    ("-5~-1%와 -2~+3%", r"-5\~-1%와 -2\~+3%"),
+    ("−5~−1%", r"−5\~−1%"),
+    ("4 ~ 5%와 30 ~ 40%", r"4 \~ 5%와 30 \~ 40%"),
+])
+def test_financial_range_display_is_literal_and_idempotent(text, expected):
+    assert escape_numeric_tildes_for_markdown(text) == expected
+    assert escape_numeric_tildes_for_markdown(expected) == expected
 
 
 def test_escape_numeric_tildes_for_markdown_leaves_code_and_explicit_strikethrough():

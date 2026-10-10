@@ -81,6 +81,29 @@ class ChatResponseTimeout(TimeoutError):
     """Raised when a graph invocation exceeds the user-visible answer deadline."""
 
 
+class SynthesisScopeChangedError(RuntimeError):
+    """A follow-up selected a different version of a synthesized document."""
+
+
+def _validate_synthesis_followup(prior_scope, final_state, sources) -> bool:
+    if not prior_scope or prior_scope.get("scope_source") != "report_synthesis":
+        return False
+    prior_filters = prior_scope.get("search_filters") or {}
+    filters = final_state.get("search_filters") or {}
+    if final_state.get("scope_source") != "prior_search_scope":
+        return False
+    scope_keys = ("target_name", "report_type", "report_date_start", "report_date_end")
+    if any(filters.get(key) != prior_filters.get(key) for key in scope_keys):
+        return False  # An explicit company/category/date change starts a new scope.
+    allowed = set(prior_scope.get("document_uids") or [])
+    if not allowed or any(
+        (source.get("report_uid") or source.get("source_uid")) not in allowed
+        for source in sources
+    ):
+        raise SynthesisScopeChangedError("종합에 사용한 자료와 현재 검색 자료가 다릅니다. 기업 리포트 종합에서 새 결과를 생성해 주세요.")
+    return True
+
+
 class _GraphTraceHandle:
     """Capture a sealable snapshot of graph events observed before a timeout."""
 
@@ -429,7 +452,15 @@ def _run_chat_response_job(
             if final_state.get("route") == "vectordb"
             else final_state.get("rdb_sources") or []
         )
+        synthesis_scope_inherited = _validate_synthesis_followup(prior_search_scope, final_state, selected_sources)
         search_scope = _search_scope_from_graph_state(final_state)
+        if synthesis_scope_inherited and search_scope:
+            search_scope.update({
+                "scope_source": "report_synthesis",
+                "document_uids": list(prior_search_scope["document_uids"]),
+                "fingerprint": prior_search_scope.get("fingerprint"),
+                "revision": prior_search_scope.get("revision"),
+            })
         metadata = {
             "status": "succeeded",
             "job_id": job_id,
@@ -491,7 +522,8 @@ def _run_chat_response_job(
             failure_metadata["retrieval_runtime"] = runtime_provenance
         update_message(
             assistant_message_id,
-            "답변을 생성하는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+            str(exc) if isinstance(exc, SynthesisScopeChangedError)
+            else "답변을 생성하는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
             failure_metadata,
         )
         _record_chat_job_event(

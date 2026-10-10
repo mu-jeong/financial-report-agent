@@ -108,6 +108,8 @@ data_views = _import_or_reload("apps.gui.data_views")
 chat_jobs = _import_or_reload("apps.gui.chat_jobs")
 chat_views = _import_or_reload("apps.gui.chat_views")
 sidebar_views = _import_or_reload("apps.gui.sidebar_views")
+# Background synthesis state is process-persistent and must survive reruns.
+synthesis_views = _import_or_reload("apps.gui.synthesis_views")
 if MONITORING_MODE:
     monitoring_views = _import_or_reload("apps.gui.monitoring_views")
 if OPERATOR_MONITORING_ENABLED:
@@ -186,7 +188,9 @@ with st.sidebar:
         operator_monitoring_enabled=OPERATOR_MONITORING_ENABLED,
     )
 
-if MONITORING_MODE:
+if st.session_state.get("active_user_page", "Chat") == "기업 리포트 종합":
+    synthesis_views.render_synthesis_page()
+elif MONITORING_MODE:
     active_page = st.session_state.get("active_monitoring_page", "Chat")
     if active_page == "Monitoring" and OPERATOR_MONITORING_ENABLED:
         operator_monitoring_views.render_operator_monitoring_page()

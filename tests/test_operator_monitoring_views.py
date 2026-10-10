@@ -367,7 +367,15 @@ def test_app_and_sidebar_fail_closed_around_production_operator_gate() -> None:
     assert "if MONITORING_MODE:" in app_source
     assert "monitoring_enabled=MONITORING_MODE" in app_source
     assert "operator_monitoring_enabled=OPERATOR_MONITORING_ENABLED" in app_source
-    assert "if monitoring_enabled:" in sidebar_source
+    monitoring_gate = next(
+        node for node in ast.walk(ast.parse(sidebar_source))
+        if isinstance(node, ast.If)
+        and any(isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "build_monitoring_page_labels"
+                for statement in node.body for value in ast.walk(statement))
+    )
+    assert isinstance(monitoring_gate.test, ast.Name)
+    assert monitoring_gate.test.id == "monitoring_enabled"
     assert "if config_module.MONITORING_MODE:" not in sidebar_source
 
 

@@ -5,6 +5,28 @@ from __future__ import annotations
 import re
 from typing import Any
 
+
+def display_report_content(result: dict) -> str:
+    """Hide exact legacy renderer notices without changing stored diagnostics."""
+    content = str(result.get("content") or "")
+    if result.get("processing_mode") != "raw_body":
+        return content
+    counts, coverage = result.get("counts") or {}, result.get("coverage") or {}
+    notices = {
+        "동일 증권사의 전망 변화를 판단할 근거가 부족합니다.",
+        f"부분 종합: 준비 실패 {counts.get('failed', 0)}건, "
+        f"준비 제외 {counts.get('excluded', 0)}건, 인용 누락 {coverage.get('uncited', 0)}건. "
+        "검증된 인용 근거가 확인된 범위의 부분 결과이며 전체 대상 자료의 종합으로 볼 수 없습니다.",
+    }
+    comparison_notice = re.compile(
+        r"부분 종합: 비교 근거가 부족한 선택 문단은 제외했습니다: [^\n]+"
+        r"\. 제외된 비교 결론은 이 결과의 판단에 포함하지 않습니다\."
+    )
+    return "\n\n".join(
+        block for block in content.split("\n\n")
+        if block not in notices and not comparison_notice.fullmatch(block)
+    )
+
 _DATE_RANGE_PATTERNS = [
     re.compile(r"20\d{2}\s*년\s*(?:1[0-2]|0?[1-9])\s*월\s*(?:3[01]|[12]\d|0?[1-9])\s*일?"),
     re.compile(r"20\d{2}[-/.](?:1[0-2]|0?[1-9])[-/.](?:3[01]|[12]\d|0?[1-9])"),
@@ -12,7 +34,7 @@ _DATE_RANGE_PATTERNS = [
     re.compile(r"20\d{2}\s*년\s*(?:1[0-2]|0?[1-9])\s*월"),
     re.compile(r"(?:이번주|지난주|전주|금주|다음주|차주|이번달|지난달|전월|금월|다음달|익월|오늘|어제|그제|내일|모레)"),
 ]
-_NUMERIC_TILDE_RE = re.compile(r"(?<![\\~])~(?!~)(?=[ \t]*\d)")
+_NUMERIC_TILDE_RE = re.compile(r"(?<![\\~])~(?!~)(?=[ \t]*[+−-]?[ \t]*\d)")
 _BACKTICK_CODE_RE = re.compile(r"(?P<delimiter>`+).*?(?P=delimiter)", re.DOTALL)
 _TILDE_FENCE_RE = re.compile(r"^[ \t]{0,3}(~{3,})(.*)$")
 

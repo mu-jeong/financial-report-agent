@@ -1,11 +1,13 @@
 """Conversation navigation and sidebar data-status composition."""
 
+import sqlite3
+
 import streamlit as st
 
 from apps.gui import chat_jobs
 from apps.gui import data_views
 from apps.gui import status_cache
-from src.configs import config as config_module
+from apps.gui import synthesis_jobs, synthesis_views
 from src.core import conversation_store
 from src.core import monitoring
 
@@ -37,10 +39,16 @@ def ensure_current_thread(threads: list[dict]) -> None:
 
 
 def _set_current_thread(thread_id: str) -> None:
+    returning_to_chat = st.session_state.get("active_user_page", "Chat") != "Chat"
+    st.session_state.active_user_page = "Chat"
+    if returning_to_chat:
+        st.session_state._return_to_chat = True
     if st.session_state.current_thread_id != thread_id:
         st.session_state.current_thread_id = thread_id
         st.session_state.editing_thread_id = None
         st.session_state.show_issue_report_form = False
+        _app_rerun()
+    elif returning_to_chat:
         _app_rerun()
 
 
@@ -152,6 +160,56 @@ def _render_thread_row(thread: dict, *, selected: bool) -> None:
         _delete_thread_and_select_next(thread_id)
 
 
+def _select_user_page() -> None:
+    selected = st.session_state["_user_page_selection"]
+    st.session_state.active_user_page = selected
+    if selected == "Chat":
+        st.session_state.active_monitoring_page = "Chat"
+
+
+def _render_synthesis_history() -> None:
+    """Reopen durable synthesis jobs belonging to this browser session."""
+    owner_id = synthesis_views._session_owner_id()
+    try:
+        jobs = synthesis_jobs.list_jobs(owner_id, limit=100)
+    except (OSError, sqlite3.Error):
+        st.warning("종합 기록을 불러오지 못했습니다. 저장소 상태를 확인해 주세요.")
+        return
+    if not jobs:
+        return
+    st.caption("기업 리포트 종합 기록")
+    labels = {"running": "⏳ 생성 중", "completed": "완료", "partial": "⚠ 부분 완료",
+              "failed": "⚠ 실패", "empty": "자료 없음"}
+    for job in jobs:
+        selected = (
+            st.session_state.get("active_user_page") == "기업 리포트 종합"
+            and st.session_state.get("synthesis_current_job_id") == job["id"]
+        )
+        label = (
+            f"{'>' if selected else '-'} {job['company']} 리포트 종합 · "
+            f"{job['start_date']} ~ {job['end_date']} · "
+            f"{labels.get(job['status'], job['status'])}"
+        )
+        if st.button(label, key=f"synthesis_history_{job['id']}", width="stretch"):
+            st.session_state.active_user_page = "기업 리포트 종합"
+            st.session_state.synthesis_current_job_id = job["id"]
+            # Hidden widgets can retain another job's draft. Restore this job's
+            # fixed scope on the next full render instead.
+            for key in ("synthesis_company", "synthesis_period_preset", "synthesis_date_range",
+                        "synthesis_confirmed_corpus", "synthesis_preview_error"):
+                st.session_state.pop(key, None)
+            st.session_state.synthesis_saved_scope = {
+                key: job[key] for key in ("company", "start_date", "end_date")
+            }
+            _app_rerun()
+
+
+def _select_monitoring_page() -> None:
+    """Leave a research page when the user chooses a monitoring destination."""
+    st.session_state.active_user_page = "Chat"
+    st.session_state["_user_page_selection"] = "Chat"
+
+
 def render_sidebar(
     current_id: str,
     *,
@@ -161,6 +219,17 @@ def render_sidebar(
     threads = load_threads()
 
     st.title("Finance Report Agent")
+    if st.session_state.pop("_return_to_chat", False):
+        st.session_state.active_monitoring_page = "Chat"
+    if st.session_state.get("active_user_page") not in {"Chat", "기업 리포트 종합"}:
+        st.session_state.active_user_page = "Chat"
+    st.session_state["_user_page_selection"] = st.session_state.active_user_page
+    st.radio(
+        "리서치 화면",
+        ["Chat", "기업 리포트 종합"],
+        key="_user_page_selection",
+        on_change=_select_user_page,
+    )
     if monitoring_enabled:
         labels = monitoring.build_monitoring_page_labels(
             operator_monitoring_enabled=operator_monitoring_enabled
@@ -177,9 +246,12 @@ def render_sidebar(
             labels,
             key="active_monitoring_page",
             label_visibility="collapsed",
+            on_change=_select_monitoring_page,
         )
 
     if st.button("새 대화 시작", width="stretch"):
+        st.session_state.active_user_page = "Chat"
+        st.session_state._return_to_chat = True
         st.session_state.current_thread_id = conversation_store.create_thread(
             f"대화 {len(threads) + 1}"
         )
@@ -189,6 +261,7 @@ def render_sidebar(
     st.subheader("대화 목록")
     for thread in threads:
         _render_thread_row(thread, selected=thread["id"] == current_id)
+    _render_synthesis_history()
 
     with st.container(key="sidebar_data_status_bottom"):
         st.divider()

@@ -25,6 +25,7 @@ SEARCH_ENGINE_PATH = GUI_DIR / "search_engine.py"
 SIDEBAR_VIEWS_PATH = GUI_DIR / "sidebar_views.py"
 
 CHAT_JOB_FUNCTIONS = {
+    "_validate_synthesis_followup",
     "_chat_job_registry",
     "_record_chat_job_event",
     "_chat_job_owner_id",
@@ -111,6 +112,7 @@ MONITORING_VIEW_FUNCTIONS = {
 }
 
 SIDEBAR_VIEW_FUNCTIONS = {
+    "_select_user_page",
     "_sidebar_rerun",
     "_app_rerun",
     "load_threads",
@@ -131,6 +133,17 @@ EXPECTED_VIEW_OWNERS = {
 }
 
 EXPLICIT_WIDGET_KEYS = {
+    'f"synthesis_history_{job[\'id\']}"',
+    "'_user_page_selection'",
+    "_COMPANY_KEY",
+    "_DATE_RANGE_KEY",
+    "_PRESET_KEY",
+    "_REPORT_BODY_KEY",
+    "_REPORT_METRICS_KEY",
+    'f"retry_partial_synthesis_{job.get(\'id\')}"',
+    'f"retry_synthesis_{job.get(\'id\')}"',
+    'f"synthesis_pdf_{result.get(\'fingerprint\')}_{index}"',
+    "f'synthesis_followup_{original_fingerprint}'",
     "'active_monitoring_page'",
     "'chat_entry_area'",
     "'report_calendar_prev'",
@@ -230,6 +243,13 @@ def _load_helpers(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names
     ]
     assert {node.name for node in selected} == set(names)
+    if path == CHAT_JOBS_PATH and "_run_chat_response_job" in names:
+        selected.extend(
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+            and node.name in {"_validate_synthesis_followup", "SynthesisScopeChangedError"}
+            and node not in selected
+        )
 
     namespace: dict[str, object] = {
         "WEEKDAY_LABELS": ["월", "화", "수", "목", "금"],
