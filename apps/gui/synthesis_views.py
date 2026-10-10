@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import uuid
 from calendar import monthrange
+from contextlib import nullcontext
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 import streamlit as st
 
-from apps.gui import synthesis_jobs
+from apps.gui import chat_views, synthesis_jobs
 from src.core.chat_ui_helpers import display_report_content, escape_numeric_tildes_for_markdown
 from src.configs import config as config_module
 from src.core import conversation_store, report_corpus, report_synthesis
@@ -198,7 +200,7 @@ def _safe_pdf_path(document: Mapping[str, Any]) -> Path | None:
     return None
 
 
-def _verified_pdf(document: Mapping[str, Any]) -> tuple[bytes | None, str]:
+def _verified_pdf(document: Mapping[str, Any]) -> tuple[Path | None, str]:
     path = _safe_pdf_path(document)
     if path is None:
         return None, "저장된 원문을 찾을 수 없습니다."
@@ -209,7 +211,7 @@ def _verified_pdf(document: Mapping[str, Any]) -> tuple[bytes | None, str]:
     expected_hash = str(document.get("source_sha256") or "").strip().lower()
     if not expected_hash or hashlib.sha256(payload).hexdigest() != expected_hash:
         return None, "종합 생성 후 원문이 변경되어 열 수 없습니다. 새 종합을 생성해 주세요."
-    return payload, ""
+    return path, ""
 
 
 def _result_scope(result: Mapping[str, Any]) -> str:
@@ -357,96 +359,114 @@ def _render_document_list(result: Mapping[str, Any], *, source_changed: bool) ->
     uncited = int((result.get("coverage") or {}).get("uncited") or 0)
     if uncited:
         st.caption(f"대상 리포트 중 {uncited}건은 최종 분석에 반영되지 않았습니다.")
-    for index, document in enumerate(documents):
-        status = str(document.get("status") or "unknown")
-        status_labels = (
-            {"prepared": "본문 준비 완료", "failed": "본문 준비 실패", "excluded": "준비 제외"}
-            if raw_body
-            else {"completed": "분석 완료", "failed": "분석 실패", "excluded": "분석 제외"}
-        )
-        status_label = status_labels.get(status, status)
-        if raw_body and document.get("synthesis_status") == "uncited":
-            status_label = "최종 분석 미반영"
-        title = str(document.get("title") or _document_file_name(document))
-        rank = rank_by_uid.get(_document_uid(document))
-        if rank is not None:
-            st.markdown(
-                f"<div id='{citations.source_anchor_id(_ANCHOR_PREFIX, rank)}'></div>",
-                unsafe_allow_html=True,
-            )
-        label = (
-            (f"[{rank}] " if rank is not None else "") +
-            f"{document.get('report_date') or '-'} · {document.get('broker') or '-'} · "
-            f"{title} · {status_label}"
-        )
-        with st.expander(label):
-            reason = document.get("reason") or document.get("error")
-            if reason:
-                st.caption(f"사유: {reason}")
-            if raw_body:
-                preparation = document.get("preparation")
-                if isinstance(preparation, Mapping) and status == "prepared":
-                    segments = int(preparation.get("total_segments") or 0)
-                    body_chars = int(preparation.get("body_chars") or 0)
-                    st.caption(f"본문 {body_chars:,}자 · {segments}개 구간 준비")
-                document_evidence = evidence_by_document.get(_document_uid(document), [])
-                if document_evidence:
-                    st.caption("리포트에 사용한 원문 근거")
-                for evidence in document_evidence:
-                    quote = str(evidence.get("quote") or "").strip()
-                    st.markdown(escape_numeric_tildes_for_markdown(f"> {quote}"))
-                if status == "prepared" and not document_evidence:
-                    st.caption("최종 리포트에서 직접 인용한 원문 근거가 없습니다.")
-            analysis = document.get("analysis")
-            if not raw_body and isinstance(analysis, Mapping):
-                claims = [claim for claim in analysis.get("claims") or [] if isinstance(claim, Mapping)]
-                for claim in claims:
-                    topic = str(claim.get("topic") or "주요 내용")
-                    claim_text = str(claim.get("claim") or "").strip()
-                    quote = str(claim.get("quote") or "").strip()
-                    if claim_text:
-                        st.markdown(escape_numeric_tildes_for_markdown(
-                            f"**{topic}** — {claim_text}"
-                        ))
-                    if quote:
-                        st.markdown(escape_numeric_tildes_for_markdown(f"> {quote}"))
-                failed_chunks = int(analysis.get("failed_chunks") or 0)
-                if failed_chunks:
-                    st.caption(f"본문 구간 {failed_chunks}개를 처리하지 못했습니다.")
-                    failure_labels = {
-                        "timeout": "모델 응답 대기 시간 초과",
-                        "evidence_mismatch": "모델의 인용이 원문과 일치하지 않음",
-                        "json_format": "모델 응답의 JSON 형식 오류",
-                        "output_validation": "모델 응답 형식 검증 실패",
-                        "rate_limit": "모델 요청 한도 초과",
-                        "connection": "모델 연결 오류",
-                        "provider_http": "모델 서비스 요청 오류",
-                        "provider_error": "모델 호출 오류",
-                    }
-                    for failure in analysis.get("errors") or []:
-                        if not isinstance(failure, Mapping) or failure.get("category") not in failure_labels:
-                            continue
-                        label = failure_labels[failure["category"]]
-                        elapsed_ms = failure.get("elapsed_ms")
-                        if type(elapsed_ms) in {int, float} and elapsed_ms >= 0:
-                            label += f" · {elapsed_ms / 1000:.1f}초"
-                        st.caption(label)
-                if not claims and not failed_chunks and status == "completed":
-                    st.caption("본문 분석은 완료했지만 표시할 주요 주장이 없습니다.")
-            if source_changed:
-                st.caption("자료 구성이 바뀌어 이 결과의 원문 열기를 제한했습니다.")
-                continue
-            payload, error = _verified_pdf(document)
-            if payload is None:
-                st.caption(error)
-            else:
-                st.download_button(
-                    "원문 PDF 다운로드",
-                    data=payload,
-                    file_name=_document_file_name(document),
-                    mime="application/pdf",
-                    key=f"synthesis_pdf_{result.get('fingerprint')}_{index}",
+    indexed_documents = list(enumerate(documents))
+    cited_documents = sorted(
+        ((index, document) for index, document in indexed_documents
+         if _document_uid(document) in rank_by_uid),
+        key=lambda item: rank_by_uid[_document_uid(item[1])],
+    )
+    other_documents = [
+        (index, document) for index, document in indexed_documents
+        if _document_uid(document) not in rank_by_uid
+    ]
+    for group in (cited_documents, other_documents):
+        if not group:
+            continue
+        is_other = group is other_documents
+        with (st.expander(f"기타 대상 문서 ({len(group)}개)", expanded=False)
+              if is_other else nullcontext()):
+            if is_other:
+                st.caption("최종 리포트의 검증된 인용 번호가 없는 문서입니다.")
+            for index, document in group:
+                status = str(document.get("status") or "unknown")
+                status_labels = (
+                    {"prepared": "본문 준비 완료", "failed": "본문 준비 실패", "excluded": "준비 제외"}
+                    if raw_body
+                    else {"completed": "분석 완료", "failed": "분석 실패", "excluded": "분석 제외"}
                 )
+                status_label = status_labels.get(status, status)
+                if raw_body and document.get("synthesis_status") == "uncited":
+                    status_label = "최종 분석 미반영"
+                title = str(document.get("title") or _document_file_name(document))
+                rank = rank_by_uid.get(_document_uid(document))
+                if rank is not None:
+                    st.markdown(
+                        f"<div id='{citations.source_anchor_id(_ANCHOR_PREFIX, rank)}'></div>",
+                        unsafe_allow_html=True,
+                    )
+                label = (
+                    (f"[{rank}] " if rank is not None else "") +
+                    f"{document.get('report_date') or '-'} · {document.get('broker') or '-'} · "
+                    f"{title} · {status_label}"
+                )
+                with st.expander(label):
+                    reason = document.get("reason") or document.get("error")
+                    if reason:
+                        st.caption(f"사유: {reason}")
+                    if raw_body:
+                        preparation = document.get("preparation")
+                        if isinstance(preparation, Mapping) and status == "prepared":
+                            segments = int(preparation.get("total_segments") or 0)
+                            body_chars = int(preparation.get("body_chars") or 0)
+                            st.caption(f"본문 {body_chars:,}자 · {segments}개 구간 준비")
+                        document_evidence = evidence_by_document.get(_document_uid(document), [])
+                        if document_evidence:
+                            st.caption("리포트에 사용한 원문 근거")
+                        for evidence in document_evidence:
+                            quote = str(evidence.get("quote") or "").strip()
+                            st.markdown(escape_numeric_tildes_for_markdown(f"> {quote}"))
+                        if status == "prepared" and not document_evidence:
+                            st.caption("최종 리포트에서 직접 인용한 원문 근거가 없습니다.")
+                    analysis = document.get("analysis")
+                    if not raw_body and isinstance(analysis, Mapping):
+                        claims = [claim for claim in analysis.get("claims") or [] if isinstance(claim, Mapping)]
+                        for claim in claims:
+                            topic = str(claim.get("topic") or "주요 내용")
+                            claim_text = str(claim.get("claim") or "").strip()
+                            quote = str(claim.get("quote") or "").strip()
+                            if claim_text:
+                                st.markdown(escape_numeric_tildes_for_markdown(
+                                    f"**{topic}** — {claim_text}"
+                                ))
+                            if quote:
+                                st.markdown(escape_numeric_tildes_for_markdown(f"> {quote}"))
+                        failed_chunks = int(analysis.get("failed_chunks") or 0)
+                        if failed_chunks:
+                            st.caption(f"본문 구간 {failed_chunks}개를 처리하지 못했습니다.")
+                            failure_labels = {
+                                "timeout": "모델 응답 대기 시간 초과",
+                                "evidence_mismatch": "모델의 인용이 원문과 일치하지 않음",
+                                "json_format": "모델 응답의 JSON 형식 오류",
+                                "output_validation": "모델 응답 형식 검증 실패",
+                                "rate_limit": "모델 요청 한도 초과",
+                                "connection": "모델 연결 오류",
+                                "provider_http": "모델 서비스 요청 오류",
+                                "provider_error": "모델 호출 오류",
+                            }
+                            for failure in analysis.get("errors") or []:
+                                if not isinstance(failure, Mapping) or failure.get("category") not in failure_labels:
+                                    continue
+                                label = failure_labels[failure["category"]]
+                                elapsed_ms = failure.get("elapsed_ms")
+                                if type(elapsed_ms) in {int, float} and elapsed_ms >= 0:
+                                    label += f" · {elapsed_ms / 1000:.1f}초"
+                                st.caption(label)
+                        if not claims and not failed_chunks and status == "completed":
+                            st.caption("본문 분석은 완료했지만 표시할 주요 주장이 없습니다.")
+                    if source_changed:
+                        st.caption("자료 구성이 바뀌어 이 결과의 원문 열기를 제한했습니다.")
+                        continue
+                    pdf_path, error = _verified_pdf(document)
+                    if pdf_path is None:
+                        st.caption(error)
+                    elif st.button(
+                        "원문 PDF 열기",
+                        key=f"synthesis_pdf_{result.get('fingerprint')}_{index}",
+                        help="앱이 실행 중인 컴퓨터의 기본 PDF 뷰어에서 원문을 엽니다.",
+                    ):
+                        opened, error = chat_views._open_pdf_path(pdf_path)
+                        if not opened:
+                            st.warning(error)
 
 
 def _current_fingerprint(result: Mapping[str, Any]) -> str | None:
@@ -477,7 +497,7 @@ def _render_result(result: Mapping[str, Any], *, current_corpus: Mapping[str, An
         if stored_prompt_version != report_synthesis.REPORT_PROMPT_VERSION:
             st.warning(
                 "이 결과는 이전 작성 방식으로 생성되어 기간 내 기업 흐름 형식을 보장하지 않습니다. "
-                "같은 조회 범위에서 새 리포트를 생성해 주세요."
+                "같은 회사·기간으로 새 리포트를 생성해 주세요."
             )
 
     raw_body = _uses_raw_body_pipeline(result)
@@ -547,12 +567,23 @@ def _render_result(result: Mapping[str, Any], *, current_corpus: Mapping[str, An
         _open_followup_chat(result)
 
 
+def _clear_job_selection() -> None:
+    """Discard a removed result's selection, saved scope, and hidden form values."""
+    for key in (_JOB_KEY, _SCOPE_KEY, _COMPANY_KEY, _PRESET_KEY, _DATE_RANGE_KEY,
+                _PREVIEW_KEY, _PREVIEW_ERROR_KEY):
+        st.session_state.pop(key, None)
+
+
 def _latest_owned_job(owner_id: str) -> dict[str, Any] | None:
     current_id = st.session_state.get(_JOB_KEY)
     if current_id:
         current = synthesis_jobs.get_job(str(current_id), owner_id)
         if current is not None:
             return current
+        _clear_job_selection()
+        # Another tab may delete the selection after the form was rendered, or
+        # during a fragment run. Rebuild the whole page with the remaining scope.
+        st.rerun(scope="app")
     jobs = synthesis_jobs.list_jobs(owner_id, limit=20)
     if not jobs:
         return None
@@ -651,7 +682,7 @@ def _render_job(owner_id: str, *, current_corpus: Mapping[str, Any] | None = Non
             st.caption("다른 화면으로 이동하거나 새로고침해도 이 작업은 계속됩니다.")
             return
         if status == "empty":
-            st.info("이 범위에는 분석 가능한 리포트가 없습니다. 준비 제외 자료가 있다면 미리보기에서 사유를 확인해 주세요.")
+            st.info("이 범위에는 분석 가능한 리포트가 없습니다. 준비 제외 자료가 있다면 자료 확인 요약에서 사유를 확인해 주세요.")
             result = job.get("result")
             if isinstance(result, Mapping):
                 _render_result(result, current_corpus=current_corpus)
@@ -673,7 +704,7 @@ def _render_job(owner_id: str, *, current_corpus: Mapping[str, Any] | None = Non
 
 
 def render_synthesis_page() -> None:
-    """Render the complete company/date selection, preview, job, and result UI."""
+    """Submit the selected company/date scope and generate with a single action."""
     owner_id = _session_owner_id()
     st.header("기업 리포트 종합")
     st.caption(
@@ -694,6 +725,10 @@ def render_synthesis_page() -> None:
 
     active = _latest_owned_job(owner_id)
     _restore_scope_widgets(companies, active)
+    # Viewing a historical result must not bypass another live owned job.
+    job_running = bool(active and active.get("status") == "running") or any(
+        job.get("status") == "running" for job in synthesis_jobs.list_jobs(owner_id, limit=1)
+    )
     today = date.today()
     with st.form("synthesis_scope_form", enter_to_submit=False):
         company = st.selectbox("회사", companies, key=_COMPANY_KEY)
@@ -712,10 +747,12 @@ def render_synthesis_page() -> None:
             max_value=today,
             key=_DATE_RANGE_KEY,
         )
-        st.caption("날짜 입력은 '직접 선택'에만 적용됩니다. 조건을 모두 선택한 뒤 조회를 눌러 주세요.")
-        submitted = st.form_submit_button("조회", type="primary", width="stretch")
+        st.caption("날짜 입력은 '직접 선택'에만 적용됩니다. 종합 생성을 누르면 대상 확인 후 바로 생성합니다.")
+        submitted = st.form_submit_button(
+            "종합 생성", type="primary", width="stretch", disabled=job_running,
+        )
 
-    if submitted:
+    if submitted and not job_running:
         # Draft widget values become the active scope only on explicit submit.
         st.session_state.pop(_PREVIEW_KEY, None)
         st.session_state.pop(_PREVIEW_ERROR_KEY, None)
@@ -744,7 +781,7 @@ def render_synthesis_page() -> None:
                 )
             except ValueError as exc:
                 st.session_state[_PREVIEW_ERROR_KEY] = str(exc)
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, sqlite3.Error):
                 st.session_state[_PREVIEW_ERROR_KEY] = "대상 리포트를 확인하지 못했습니다. 데이터 상태를 확인해 주세요."
 
     corpus = st.session_state.get(_PREVIEW_KEY)
@@ -752,12 +789,12 @@ def render_synthesis_page() -> None:
     if error:
         st.warning(error)
     elif corpus is None:
-        st.info("회사와 기간을 선택한 뒤 조회를 눌러 대상 리포트를 확인해 주세요.")
+        st.info("회사와 기간을 선택한 뒤 종합 생성을 눌러 주세요.")
 
     ready_count = 0
     workload_error = None
     if corpus is not None:
-        st.caption(f"조회 조건: {_result_scope(corpus)} · 이 조건으로 종합을 생성합니다.")
+        st.caption(f"생성 요청 조건: {_result_scope(corpus)}")
         counts = _corpus_counts(corpus)
         ready_count = counts["ready"]
         metric_columns = st.columns(4)
@@ -797,29 +834,20 @@ def render_synthesis_page() -> None:
         if workload_error:
             st.warning(workload_error + ". 기간을 줄여 주세요.")
 
-    # History selection identifies the displayed result, not the owner's live
-    # job. The unique running job is always the latest submission for an owner.
-    job_running = bool(active and active.get("status") == "running") or any(
-        job.get("status") == "running" for job in synthesis_jobs.list_jobs(owner_id, limit=1)
-    )
-    if st.button(
-        "종합 생성",
-        type="primary",
-        width="stretch",
-        disabled=bool(error or corpus is None or ready_count == 0 or workload_error or job_running),
-    ):
+    if submitted and not (error or corpus is None or ready_count == 0 or workload_error or job_running):
         try:
-            job_id = synthesis_jobs.start_job(
-                str(corpus["company"]), str(corpus["start_date"]), str(corpus["end_date"]), owner_id=owner_id
-            )
-        except (RuntimeError, ValueError) as exc:
+            # Freeze the freshly verified input without repeating the corpus read.
+            job_id = synthesis_jobs._start_corpus(corpus, owner_id=owner_id)
+        except ValueError as exc:
             st.error(str(exc))
+        except (OSError, RuntimeError, sqlite3.Error):
+            st.error("종합 작업을 시작하지 못했습니다. 저장소와 데이터 상태를 확인해 주세요.")
         else:
             st.session_state[_JOB_KEY] = job_id
             st.rerun(scope="app")
     if job_running:
         st.caption("이미 이 사용자 세션에서 종합 작업을 실행 중입니다. 중복 작업은 시작하지 않습니다.")
 
-    # A stored preview is fixed at confirmation time. Only a fresh lookup may
+    # A stored scope is fixed at submission time. Only a fresh lookup may
     # replace the result's independent source-change check.
     _render_job(owner_id, current_corpus=corpus if submitted else None)

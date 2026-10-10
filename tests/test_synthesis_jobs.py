@@ -38,6 +38,9 @@ def test_background_job_persists_progress_and_does_not_duplicate_running_work(tm
         assert jobs.get_job(job_id, "other-owner") is None
         assert jobs.get_job(job_id, "owner")["phase"] == "synthesizing"
         assert jobs.list_jobs("owner")[0]["id"] == job_id
+        with pytest.raises(ValueError, match="완료 후 삭제"):
+            jobs.delete_job(job_id, "owner")
+        assert jobs.get_job(job_id, "owner")["status"] == "running"
     finally:
         release.set()
         thread.join(5)
@@ -220,3 +223,28 @@ def test_watcher_module_reimport_keeps_running_job_registry(tmp_path, monkeypatc
         release.set()
         thread.join(5)
     assert jobs.get_job(job_id, "owner")["result"]["content"] == "survived reload"
+
+
+@pytest.mark.parametrize("status", ["completed", "partial", "failed", "empty"])
+def test_delete_owned_terminal_job_preserves_other_jobs_and_cache(tmp_path, monkeypatch, status):
+    monkeypatch.setattr(jobs.config, "DATA_ROOT", str(tmp_path))
+    store = jobs._store()
+    job, _ = store.create_job(_corpus(), "owner", jobs._PROCESS_TOKEN)
+    store.finish(job["id"], {"status": status, "content": "result"})
+    other, _ = store.create_job(_corpus(), "other-owner", jobs._PROCESS_TOKEN)
+    store.finish(other["id"], {"status": "completed", "content": "other"})
+    store.put_batch("shared", {"section": "cached"})
+
+    assert not jobs.delete_job(job["id"], "other-owner")
+    assert jobs.get_job(job["id"], "owner") is not None
+    # Watcher reimports must work with an already cached store instance.
+    spec = importlib.util.spec_from_file_location(jobs.__name__, jobs.__file__)
+    reimported = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reimported)
+    assert reimported.delete_job(job["id"], "owner")
+    assert not jobs.delete_job(job["id"], "owner")
+    reopened = jobs.SynthesisStore(store.path)
+    assert reopened.get_job(job["id"], "owner") is None
+    assert jobs.list_jobs("owner") == []
+    assert reopened.get_job(other["id"], "other-owner") is not None
+    assert reopened.get_batch("shared") == {"section": "cached"}

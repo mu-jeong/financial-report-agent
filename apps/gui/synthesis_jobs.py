@@ -131,6 +131,29 @@ def list_jobs(owner_id: str, limit=20) -> list[dict]:
     return _store().list_jobs(owner_id, limit)
 
 
+def delete_job(job_id: str, owner_id: str) -> bool:
+    """Delete an owned terminal job while retaining reusable synthesis caches."""
+    with _LOCK:
+        store = _store()
+        # Use the existing connection API so cached pre-reload store instances
+        # remain usable. Serialize the status check and delete across processes.
+        with store._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM synthesis_jobs WHERE id=? AND owner_id=?",
+                (job_id, owner_id),
+            ).fetchone()
+            if row is None:
+                return False
+            if row["status"] == "running":
+                raise ValueError("생성 중인 종합 작업은 완료 후 삭제할 수 있습니다.")
+            connection.execute(
+                "DELETE FROM synthesis_jobs WHERE id=? AND owner_id=?",
+                (job_id, owner_id),
+            )
+            return True
+
+
 def retry_job(job_id: str, owner_id: str) -> str:
     job = _store().get_job(job_id, owner_id, include_corpus=True)
     if not job:

@@ -51,6 +51,7 @@ CHAT_VIEW_FUNCTIONS = {
     "_scroll_to_anchor",
     "_resolve_report_pdf",
     "_open_report_pdf",
+    "_open_pdf_path",
     "_render_sources",
     "_render_no_result_actions",
     "_render_message",
@@ -134,6 +135,7 @@ EXPECTED_VIEW_OWNERS = {
 
 EXPLICIT_WIDGET_KEYS = {
     'f"synthesis_history_{job[\'id\']}"',
+    'f"delete_synthesis_{job[\'id\']}"',
     "'_user_page_selection'",
     "_COMPANY_KEY",
     "_DATE_RANGE_KEY",

@@ -144,6 +144,31 @@ def _inject_ui_styles() -> None:
             font-size: inherit;
             line-height: inherit;
         }
+        [data-testid="stSidebar"] [class*="st-key-synthesis_history_"] button {
+            height: auto;
+            min-width: 0;
+            padding: 0.35rem 0.4rem;
+            justify-content: flex-start;
+            font-size: 0.75rem;
+            line-height: 1.2rem;
+            text-align: left;
+        }
+        [data-testid="stSidebar"] [class*="st-key-synthesis_history_"] button > div,
+        [data-testid="stSidebar"] [class*="st-key-synthesis_history_"] button span {
+            min-width: 0;
+            max-width: 100%;
+            font-size: inherit;
+        }
+        [data-testid="stSidebar"] [class*="st-key-synthesis_history_"] [data-testid="stMarkdownContainer"],
+        [data-testid="stSidebar"] [class*="st-key-synthesis_history_"] button p {
+            min-width: 0;
+            max-width: 100%;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            font-size: inherit;
+            line-height: 1.2rem;
+            text-align: left;
+        }
         .st-key-issue_report_control {
             margin-top: 0.2rem;
             padding-bottom: 0.25rem;

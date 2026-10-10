@@ -13,7 +13,9 @@
 .\.venv\Scripts\python.exe scripts\run_fast_tests.py -k report_type_only_followup
 ```
 
-기업 리포트 종합의 고정 corpus, 시간순 종합, 부분 결과, 영속 작업, UI, 기록 다시 열기, 후속 대화와 공유 표시 helper를 함께 확인하려면 다음 범위를 실행합니다.
+기업 리포트 종합의 고정 corpus, 시간순 종합, 부분 결과, 영속 작업, UI, 기록 다시 열기·삭제, 검증된 기존 PDF 열기, 후속 대화와 공유 표시 helper를 함께 확인하려면 다음 범위를 실행합니다. 단일 `종합 생성` 제출은 실제 위젯으로 RDB 결과 생성과 후속 대화까지 검증하며, 제출한 조건을 한 번 읽고 이전 확인 자료를 재사용하지 않는지 확인합니다. 입력 편집·화면 갱신 시 작업 미실행, 자료 부족·한도 초과·저장소 오류 안내와 실행 중 작업의 중복 제출 차단도 검증합니다. 기록 삭제는 소유권·실행 중 차단·선택 전환·마지막 기록 정리·캐시 유지와 watcher 재로드를 검증하며, PDF 열기는 기본 뷰어 호출을 대체해 정확한 경로·해시 검사와 실패 안내를 확인합니다. 실제 OS 뷰어 창은 자동 테스트에서 열지 않습니다.
+
+근거 부록은 미인용 문서가 9번과 10번 사이에 끼는 사례와 대상 문서 순서가 뒤집힌 사례를 재현해 저장된 번호순 표시를 검증합니다. 번호 없는 문서가 접힌 `기타 대상 문서`에 한 번만 표시되는지 실제 위젯 구조로 확인하고, 인용 anchor·PDF 버튼·후속 질문 범위·저장된 결과가 유지되는지 검사합니다.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_fast_tests.py tests\test_report_corpus.py tests\test_report_synthesis.py tests\test_report_synthesis_raw_contract.py tests\test_report_synthesis_store.py tests\test_synthesis_app_flow.py tests\test_synthesis_followup.py tests\test_synthesis_jobs.py tests\test_synthesis_plain_text.py tests\test_synthesis_response_contract.py tests\test_synthesis_temporal_prompt.py tests\test_synthesis_views.py tests\test_sidebar_synthesis_history.py tests\test_chat_ui_helpers.py

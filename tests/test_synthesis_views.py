@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
+from copy import deepcopy
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +30,9 @@ class _Region:
 
     def metric(self, label, value):
         self.ui.metrics.append((label, value))
+
+    def button(self, label, **kwargs):
+        return self.ui.button(label, **kwargs)
 
 
 class _FakeStreamlit:
@@ -204,8 +210,8 @@ def test_owner_id_rehydrates_from_valid_query_param_and_replaces_invalid(monkeyp
 @pytest.mark.parametrize("available", [None, {
     "start_date": "2026-01-02", "end_date": "2026-08-19", "documents": 17,
 }])
-def test_empty_corpus_disables_generation_and_explains_unknown_coverage(monkeypatch, available):
-    fake_st = _FakeStreamlit(pressed={"조회", "종합 생성"})
+def test_empty_corpus_prevents_job_and_explains_unknown_coverage(monkeypatch, available):
+    fake_st = _FakeStreamlit(pressed={"종합 생성"})
     monkeypatch.setattr(views, "st", fake_st)
     monkeypatch.setattr(views.report_corpus, "list_companies", lambda: ["삼성전자"])
     monkeypatch.setattr(
@@ -216,13 +222,13 @@ def test_empty_corpus_disables_generation_and_explains_unknown_coverage(monkeypa
     )
     monkeypatch.setattr(views.synthesis_jobs, "list_jobs", lambda *_args, **_kwargs: [])
     started = []
-    monkeypatch.setattr(views.synthesis_jobs, "start_job", lambda *args, **kwargs: started.append((args, kwargs)))
+    monkeypatch.setattr(views.synthesis_jobs, "_start_corpus", lambda *args, **kwargs: started.append((args, kwargs)))
 
     views.render_synthesis_page()
 
     assert started == []
     generate = next(kwargs for label, kwargs in fake_st.buttons if label == "종합 생성")
-    assert generate["disabled"] is True
+    assert generate["disabled"] is False  # Changing the form can fix an empty scope.
     assert any("발행된 리포트가 없다는 뜻으로 단정" in message for _, message in fake_st.messages)
     if available:
         assert any("2026-01-02 ~ 2026-08-19" in message and "17건" in message
@@ -244,7 +250,7 @@ def test_page_describes_a_new_period_flow_report(monkeypatch):
 
 
 def test_generate_button_starts_one_fixed_scope_job(monkeypatch):
-    fake_st = _FakeStreamlit(pressed={"조회", "종합 생성"})
+    fake_st = _FakeStreamlit(pressed={"종합 생성"})
     monkeypatch.setattr(views, "st", fake_st)
     corpus = {
         "company": "삼성전자", "start_date": "2026-09-01", "end_date": "2026-09-30",
@@ -256,10 +262,12 @@ def test_generate_button_starts_one_fixed_scope_job(monkeypatch):
     monkeypatch.setattr(views.report_corpus, "list_companies", lambda: ["삼성전자"])
     monkeypatch.setattr(views.report_corpus, "load_report_corpus", lambda *_args: corpus)
     monkeypatch.setattr(views.synthesis_jobs, "list_jobs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(views.synthesis_jobs, "get_job",
+                        lambda *_: {"id": "job-1", "status": "running"})
     calls = []
     monkeypatch.setattr(
         views.synthesis_jobs,
-        "start_job",
+        "_start_corpus",
         lambda *args, **kwargs: calls.append((args, kwargs)) or "job-1",
     )
     monkeypatch.setattr(views, "_workload_error", lambda _corpus: None)
@@ -267,13 +275,14 @@ def test_generate_button_starts_one_fixed_scope_job(monkeypatch):
     views.render_synthesis_page()
 
     assert len(calls) == 1
-    assert calls[0][0][0] == "삼성전자"
+    assert calls[0][0][0] is corpus
     assert calls[0][1]["owner_id"] == fake_st.session_state[views._OWNER_KEY]
     assert fake_st.session_state[views._JOB_KEY] == "job-1"
+    assert not any(label == "조회" for label, _ in fake_st.buttons)
 
 
 def test_opening_completed_history_does_not_allow_another_running_job(monkeypatch):
-    fake_st = _FakeStreamlit(pressed={"조회", "종합 생성"})
+    fake_st = _FakeStreamlit(pressed={"종합 생성"})
     monkeypatch.setattr(views, "st", fake_st)
     monkeypatch.setattr(views.report_corpus, "list_companies", lambda: ["삼성전자"])
     monkeypatch.setattr(views.report_corpus, "load_report_corpus", lambda *_args: {
@@ -287,14 +296,14 @@ def test_opening_completed_history_does_not_allow_another_running_job(monkeypatc
     monkeypatch.setattr(views, "_render_job", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(views, "_workload_error", lambda _corpus: None)
     calls = []
-    monkeypatch.setattr(views.synthesis_jobs, "start_job", lambda *_args, **_kwargs: calls.append(True))
+    monkeypatch.setattr(views.synthesis_jobs, "_start_corpus", lambda *_args, **_kwargs: calls.append(True))
     views.render_synthesis_page()
     assert not calls
     assert next(kwargs for label, kwargs in fake_st.buttons if label == "종합 생성")["disabled"]
 
 
-def test_preview_explains_workload_limit_rejected_before_body_loading(monkeypatch):
-    fake_st = _FakeStreamlit(pressed={"조회"})
+def test_generation_explains_workload_limit_rejected_before_body_loading(monkeypatch):
+    fake_st = _FakeStreamlit(pressed={"종합 생성"})
     monkeypatch.setattr(views, "st", fake_st)
     monkeypatch.setattr(views.report_corpus, "list_companies", lambda: ["삼성전자"])
     monkeypatch.setattr(views.synthesis_jobs, "list_jobs", lambda *_args, **_kwargs: [])
@@ -305,7 +314,7 @@ def test_preview_explains_workload_limit_rejected_before_body_loading(monkeypatc
     monkeypatch.setattr(views.report_corpus, "load_report_corpus", overlarge)
     views.render_synthesis_page()
     assert any("기간을 줄여 주세요" in message for kind, message in fake_st.messages if kind == "warning")
-    assert next(kwargs for label, kwargs in fake_st.buttons if label == "종합 생성")["disabled"]
+    assert not next(kwargs for label, kwargs in fake_st.buttons if label == "종합 생성")["disabled"]
 
 
 def test_page_does_not_query_before_scope_submission(monkeypatch):
@@ -320,10 +329,10 @@ def test_page_does_not_query_before_scope_submission(monkeypatch):
 
     assert queries == []
     assert fake_st.forms == [("synthesis_scope_form", {"enter_to_submit": False})]
-    assert next(kwargs for label, kwargs in fake_st.buttons if label == "종합 생성")["disabled"]
+    assert not next(kwargs for label, kwargs in fake_st.buttons if label == "종합 생성")["disabled"]
 
 
-def test_generation_uses_confirmed_scope_even_when_draft_values_change(monkeypatch):
+def test_generation_reads_submitted_scope_once_instead_of_reusing_old_preview(monkeypatch):
     fake_st = _FakeStreamlit(pressed={"종합 생성"})
     confirmed = {"company": "삼성전자", "start_date": "2026-01-01", "end_date": "2026-01-31",
                  "documents": [{**_document(), "parents": [{"content": "본문"}]}],
@@ -334,15 +343,59 @@ def test_generation_uses_confirmed_scope_even_when_draft_values_change(monkeypat
     monkeypatch.setattr(views.synthesis_jobs, "list_jobs", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(views, "_workload_error", lambda _: None)
     queries, started, source_checks = [], [], []
-    monkeypatch.setattr(views.report_corpus, "load_report_corpus", lambda *args: queries.append(args))
-    monkeypatch.setattr(views.synthesis_jobs, "start_job", lambda *args, **kwargs: started.append(args) or "new-job")
+    fresh = {**confirmed, "company": "다른 회사", "fingerprint": "fresh"}
+
+    def load(company, start, end):
+        queries.append((company, start, end))
+        fresh.update(start_date=start, end_date=end)
+        return fresh
+
+    monkeypatch.setattr(views.report_corpus, "load_report_corpus", load)
+    monkeypatch.setattr(views.synthesis_jobs, "_start_corpus", lambda corpus, **kwargs: started.append(corpus) or "new-job")
     monkeypatch.setattr(views, "_render_job", lambda owner, **kwargs: source_checks.append(kwargs["current_corpus"]))
 
     views.render_synthesis_page()
 
-    assert not queries
-    assert started == [("삼성전자", "2026-01-01", "2026-01-31")]
-    assert source_checks == [None]  # An older preview cannot certify current source identity.
+    assert len(queries) == 1 and queries[0][0] == "다른 회사"
+    assert started == [fresh]
+    assert source_checks == [fresh]
+    fake_st.pressed.clear()
+    views.render_synthesis_page()
+    assert len(queries) == 1 and len(started) == 1
+    assert source_checks[-1] is None  # Stored scope cannot certify current source identity.
+
+
+@pytest.mark.parametrize("phase", ["lookup", "submission"])
+@pytest.mark.parametrize("error", [OSError("private storage details"), sqlite3.DatabaseError("private storage details")])
+def test_one_click_storage_failure_does_not_start_work_or_expose_details(monkeypatch, phase, error):
+    fake_st = _FakeStreamlit(pressed={"종합 생성"})
+    monkeypatch.setattr(views, "st", fake_st)
+    monkeypatch.setattr(views.report_corpus, "list_companies", lambda: ["Alpha"])
+    monkeypatch.setattr(views, "_latest_owned_job", lambda _: None)
+    monkeypatch.setattr(views.synthesis_jobs, "list_jobs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(views, "_render_job", lambda *_args, **_kwargs: None)
+    corpus = {"company": "Alpha", "start_date": "2026-09-01", "end_date": "2026-09-30",
+              "documents": [{**_document(), "parents": [{"content": "본문"}]}],
+              "excluded": [], "warnings": [], "fingerprint": "ready"}
+
+    def unavailable(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(views.report_corpus, "load_report_corpus",
+                        unavailable if phase == "lookup" else lambda *_: corpus)
+    submissions = []
+
+    def start(*args, **kwargs):
+        submissions.append(args)
+        raise error
+
+    monkeypatch.setattr(views.synthesis_jobs, "_start_corpus", start)
+    views.render_synthesis_page()
+    assert len(submissions) == (0 if phase == "lookup" else 1)
+    assert views._JOB_KEY not in fake_st.session_state
+    assert any(kind in {"warning", "error"} for kind, _ in fake_st.messages)
+    assert all("private storage details" not in message for _, message in fake_st.messages)
+    assert not fake_st.reruns
 
 
 def test_background_completion_refreshes_app_without_confirmation(monkeypatch):
@@ -797,7 +850,7 @@ def test_appendix_shows_each_cited_document_once_with_anchor_and_pdf(monkeypatch
     fake_st = _FakeStreamlit()
     monkeypatch.setattr(views, "st", fake_st)
     monkeypatch.setattr(views, "_current_fingerprint", lambda _result: "fixed-scope")
-    monkeypatch.setattr(views, "_verified_pdf", lambda _document: (b"pdf", ""))
+    monkeypatch.setattr(views, "_verified_pdf", lambda _document: (Path("original.pdf"), ""))
     result = _raw_result()
     views._render_result(result)
     title = result["documents"][0]["title"]
@@ -806,7 +859,8 @@ def test_appendix_shows_each_cited_document_once_with_anchor_and_pdf(monkeypatch
     assert not any(title in message for kind, message in fake_st.messages if kind == "write")
     anchor = views.citations.source_anchor_id(views._ANCHOR_PREFIX, 1)
     assert sum(f"id='{anchor}'" in markup for markup in fake_st.markdowns) == 1
-    assert len(fake_st.downloads) == 1
+    assert sum(label == "원문 PDF 열기" for label, _ in fake_st.buttons) == 1
+    assert not fake_st.downloads
 
 
 def test_appendix_keeps_source_only_legacy_results(monkeypatch):
@@ -818,6 +872,60 @@ def test_appendix_keeps_source_only_legacy_results(monkeypatch):
     views._render_document_list(result, source_changed=False)
     assert len(fake_st.expanders) == 1
     assert fake_st.expanders[0][0].startswith("[1] ")
+
+
+@pytest.mark.parametrize("reverse_documents", [False, True])
+def test_appendix_orders_citations_before_separate_other_documents(monkeypatch, reverse_documents):
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(views, "st", fake_st)
+    monkeypatch.setattr(views, "_verified_pdf", lambda _document: (Path("original.pdf"), ""))
+    cited = [
+        _document(
+            report_uid=f"{rank:064x}",
+            title=f"인용 문서 {rank}",
+            status="prepared",
+            synthesis_status="cited",
+        )
+        for rank in range(1, 11)
+    ]
+    uncited = _document(
+        report_uid="c" * 64, title="6월 29일 미인용 문서",
+        status="prepared", synthesis_status="uncited", reason="최종 인용 미채택",
+    )
+    failed = _document(report_uid="d" * 64, title="본문 준비 실패 문서",
+                       status="failed", reason="본문 읽기 실패")
+    documents = [*cited[:9], uncited, cited[9], failed]
+    if reverse_documents:
+        documents.reverse()
+    result = _raw_result(status="partial", documents=documents, failed=1)
+    result["selected_sources"], result["citation_contract"] = (
+        views.citations.annotate_document_citation_sources(cited)
+    )
+    result["coverage"] = {"prepared": 11, "cited": 10, "uncited": 1}
+    saved_result = deepcopy(result)
+
+    views._render_document_list(result, source_changed=False)
+
+    labels = [label for label, _ in fake_st.expanders]
+    assert [label.split(" ")[0] for label in labels[:10]] == [
+        f"[{rank}]" for rank in range(1, 11)
+    ]
+    assert fake_st.expanders[10] == ("기타 대상 문서 (2개)", {"expanded": False})
+    assert len(labels) == 13
+    assert any("6월 29일 미인용 문서" in label and "최종 분석 미반영" in label
+               for label in labels[11:])
+    assert any("본문 준비 실패 문서" in label for label in labels[11:])
+    assert ("caption", "사유: 본문 읽기 실패") in fake_st.messages
+    assert sum("<div id=" in markup for markup in fake_st.markdowns) == 10
+    for rank in range(1, 11):
+        anchor = views.citations.source_anchor_id(views._ANCHOR_PREFIX, rank)
+        assert sum(f"id='{anchor}'" in markup for markup in fake_st.markdowns) == 1
+    pdf_keys = [options["key"] for label, options in fake_st.buttons if label == "원문 PDF 열기"]
+    assert len(pdf_keys) == len(set(pdf_keys)) == 12
+    assert views._followup_metadata(result)["document_uids"] == [
+        document["report_uid"] for document in cited
+    ]
+    assert result == saved_result
 
 
 def test_saved_raw_report_hides_only_legacy_renderer_notices(monkeypatch):
@@ -917,7 +1025,7 @@ def test_old_writer_result_prompts_manual_regeneration_without_starting_job(monk
     started = []
     monkeypatch.setattr(
         views.synthesis_jobs,
-        "start_job",
+        "_start_corpus",
         lambda *args, **kwargs: started.append((args, kwargs)),
     )
 
@@ -1001,7 +1109,7 @@ def test_partial_job_can_retry_without_starting_a_duplicate(monkeypatch):
     assert fake_st.session_state[views._JOB_KEY] == "retry-2"
 
 
-def test_pdf_download_requires_canonical_in_root_and_matching_hash(tmp_path, monkeypatch):
+def test_pdf_open_requires_canonical_in_root_and_matching_hash(tmp_path, monkeypatch):
     pdf_root = tmp_path / "downloaded"
     pdf_root.mkdir()
     payload = b"%PDF safe"
@@ -1014,11 +1122,79 @@ def test_pdf_download_requires_canonical_in_root_and_matching_hash(tmp_path, mon
         source_sha256=hashlib.sha256(payload).hexdigest(),
     )
 
-    assert views._verified_pdf(document) == (payload, "")
+    assert views._verified_pdf(document) == (pdf, "")
     assert views._safe_pdf_path({**document, "canonical_relative_path": "../one.pdf"}) is None
     changed, message = views._verified_pdf({**document, "source_sha256": "0" * 64})
     assert changed is None
     assert "변경" in message
+
+
+@pytest.mark.parametrize("open_error", [None, "PDF를 열 수 없습니다."])
+def test_appendix_open_uses_verified_original_path_without_download(tmp_path, monkeypatch, open_error):
+    root = tmp_path / "downloaded"
+    nested = root / "broker"
+    nested.mkdir(parents=True)
+    pdf = nested / "one.pdf"
+    payload = b"%PDF original"
+    pdf.write_bytes(payload)
+    monkeypatch.setattr(views.config_module, "REPORT_PDF_DIR", str(root))
+    monkeypatch.setattr(views.config_module, "DATA_ROOT", str(tmp_path))
+    fake_st = _FakeStreamlit(pressed=["원문 PDF 열기"])
+    monkeypatch.setattr(views, "st", fake_st)
+    result = _raw_result()
+    result["documents"][0].update(canonical_relative_path="downloaded/broker/one.pdf",
+                                 source_sha256=hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(views, "_current_fingerprint", lambda _: result["fingerprint"])
+    opened = []
+    monkeypatch.setattr(views.chat_views, "_open_pdf_path",
+                        lambda path: opened.append(path) or (open_error is None, open_error))
+    views._render_result(result)
+    assert opened == [pdf]
+    assert not fake_st.downloads
+    if open_error:
+        assert ("warning", open_error) in fake_st.messages
+    # A changed or missing file must never reach the OS viewer.
+    for changed in (b"%PDF changed", None):
+        if changed is None:
+            pdf.unlink()
+        else:
+            pdf.write_bytes(changed)
+        opened.clear()
+        views._render_result(result)
+        assert not opened
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+def test_shared_pdf_opener_uses_system_viewer(monkeypatch, tmp_path, platform):
+    chat = views.chat_views
+    path = tmp_path / "원문 파일.pdf"
+    calls = []
+    monkeypatch.setattr(chat.sys, "platform", platform)
+    monkeypatch.setattr(chat.os, "startfile", lambda target: calls.append(target), raising=False)
+    monkeypatch.setattr(chat.subprocess, "Popen", lambda args: calls.append(args))
+    assert chat._open_pdf_path(path) == (True, None)
+    expected = str(path) if platform == "win32" else ["open" if platform == "darwin" else "xdg-open", str(path)]
+    assert calls == [expected]
+
+
+@pytest.mark.parametrize("remaining", [False, True])
+def test_selected_job_deleted_by_another_tab_clears_its_scope(monkeypatch, remaining):
+    fake_st = _FakeStreamlit()
+    stale_keys = (views._JOB_KEY, views._SCOPE_KEY, views._COMPANY_KEY, views._PRESET_KEY,
+                  views._DATE_RANGE_KEY, views._PREVIEW_KEY, views._PREVIEW_ERROR_KEY)
+    fake_st.session_state.update({key: "deleted job" for key in stale_keys})
+    fake_st.session_state.current_thread_id = "followup"
+    monkeypatch.setattr(views, "st", fake_st)
+    monkeypatch.setattr(views.synthesis_jobs, "get_job", lambda *_: None)
+    replacement = {"id": "remaining-job", "company": "Beta", "start_date": "2026-08-01",
+                   "end_date": "2026-08-31", "status": "completed"}
+    monkeypatch.setattr(views.synthesis_jobs, "list_jobs",
+                        lambda *_args, **_kwargs: [replacement] if remaining else [])
+    assert views._latest_owned_job("owner") == (replacement if remaining else None)
+    assert all(key not in fake_st.session_state for key in stale_keys if key != views._JOB_KEY)
+    assert fake_st.session_state.get(views._JOB_KEY) == (replacement["id"] if remaining else None)
+    assert fake_st.session_state.current_thread_id == "followup"
+    assert fake_st.reruns == [{"scope": "app"}]
 
 
 def test_followup_button_persists_exact_scope_and_switches_to_chat(monkeypatch):

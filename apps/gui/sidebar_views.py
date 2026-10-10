@@ -167,6 +167,22 @@ def _select_user_page() -> None:
         st.session_state.active_monitoring_page = "Chat"
 
 
+def _delete_synthesis_job(job_id: str, owner_id: str) -> None:
+    try:
+        synthesis_jobs.delete_job(job_id, owner_id)
+    except ValueError as exc:
+        st.warning(str(exc))
+        return
+    except (OSError, sqlite3.Error):
+        st.warning("종합 기록을 삭제하지 못했습니다. 저장소 상태를 확인해 주세요.")
+        return
+    if st.session_state.get("synthesis_current_job_id") == job_id:
+        # The next render selects a remaining owned job, or opens an empty form.
+        # Discard this result's saved scope and hidden widgets at the same time.
+        synthesis_views._clear_job_selection()
+    _app_rerun()
+
+
 def _render_synthesis_history() -> None:
     """Reopen durable synthesis jobs belonging to this browser session."""
     owner_id = synthesis_views._session_owner_id()
@@ -190,7 +206,10 @@ def _render_synthesis_history() -> None:
             f"{job['start_date']} ~ {job['end_date']} · "
             f"{labels.get(job['status'], job['status'])}"
         )
-        if st.button(label, key=f"synthesis_history_{job['id']}", width="stretch"):
+        history_col, delete_col = st.columns(
+            [0.86, 0.14], gap="small", vertical_alignment="center",
+        )
+        if history_col.button(label, key=f"synthesis_history_{job['id']}", width="stretch"):
             st.session_state.active_user_page = "기업 리포트 종합"
             st.session_state.synthesis_current_job_id = job["id"]
             # Hidden widgets can retain another job's draft. Restore this job's
@@ -202,6 +221,12 @@ def _render_synthesis_history() -> None:
                 key: job[key] for key in ("company", "start_date", "end_date")
             }
             _app_rerun()
+        if delete_col.button(
+            "×", key=f"delete_synthesis_{job['id']}", width="stretch",
+            disabled=job["status"] == "running",
+            help="생성 완료 후 삭제할 수 있습니다." if job["status"] == "running" else "종합 기록 삭제",
+        ):
+            _delete_synthesis_job(job["id"], owner_id)
 
 
 def _select_monitoring_page() -> None:

@@ -109,7 +109,7 @@ if st.checkbox("Show synthesis", value=True):
     app.radio[0].set_value("직접 선택")
     selected = (date(2026, 1, 1), date(2026, 1, 31))
     app.date_input[0].set_value(selected)
-    next(button for button in app.button if button.label == "조회").click().run(timeout=30)
+    next(button for button in app.button if button.label == "종합 생성").click().run(timeout=30)
     app.checkbox[0].set_value(False).run(timeout=30)
     monkeypatch.setattr(widget_policies, "_shown_default_value_warning", False)
     app.checkbox[0].set_value(True).run(timeout=30)
@@ -183,11 +183,9 @@ with patch.object(synthesis_jobs.report_synthesis, 'synthesize_corpus', side_eff
     app = AppTest.from_file(str(harness)).run(timeout=30)
     assert not app.exception
     assert app.header[0].value == "기업 리포트 종합"
-    assert next(button for button in app.button if button.label == "종합 생성").disabled
+    assert not next(button for button in app.button if button.label == "종합 생성").disabled
     app.radio[0].set_value("직접 선택")
     app.date_input[0].set_value((date(2026, 1, 1), date(2026, 1, 31)))
-    next(button for button in app.button if button.label == "조회").click().run(timeout=30)
-    assert not app.exception
     generate_button = next(button for button in app.button if button.label == "종합 생성")
     assert not generate_button.disabled
     generate_button.click().run(timeout=30)
@@ -246,7 +244,7 @@ st.write(st.session_state.get('active_user_page'))
     assert app.session_state["active_monitoring_page"] == "Chat"
 
 
-def test_scope_form_applies_all_edits_only_when_lookup_is_submitted(tmp_path, monkeypatch):
+def test_scope_form_applies_all_edits_only_when_generation_is_submitted(tmp_path, monkeypatch):
     queries = []
     monkeypatch.setattr(synthesis_views.report_corpus, "list_companies", lambda: ["A", "B"])
     monkeypatch.setattr(synthesis_jobs, "list_jobs", lambda *_args, **_kwargs: [])
@@ -273,7 +271,7 @@ def test_scope_form_applies_all_edits_only_when_lookup_is_submitted(tmp_path, mo
     app.date_input[0].set_value((date(2026, 1, 1), date(2026, 1, 31)))
     app.run(timeout=30)
     assert not app.exception and not queries
-    next(button for button in app.button if button.label == "조회").click().run(timeout=30)
+    next(button for button in app.button if button.label == "종합 생성").click().run(timeout=30)
     assert not app.exception
     assert queries == [("B", "2026-01-01", "2026-01-31")]
 
@@ -283,15 +281,15 @@ def test_scope_form_applies_all_edits_only_when_lookup_is_submitted(tmp_path, mo
     assert not app.exception
     assert queries == [("B", "2026-01-01", "2026-01-31")]
     assert app.session_state[synthesis_views._PREVIEW_KEY]["company"] == "B"
-    assert any("조회 조건: B" in caption.value for caption in app.caption)
-    next(button for button in app.button if button.label == "조회").click().run(timeout=30)
+    assert any("생성 요청 조건: B" in caption.value for caption in app.caption)
+    next(button for button in app.button if button.label == "종합 생성").click().run(timeout=30)
     assert queries[-1] == ("A", "2026-02-01", "2026-02-28")
 
     app.date_input[0].set_value((date(2026, 3, 1),))
-    next(button for button in app.button if button.label == "조회").click().run(timeout=30)
+    next(button for button in app.button if button.label == "종합 생성").click().run(timeout=30)
     assert not app.exception
     assert len(queries) == 2
-    assert next(button for button in app.button if button.label == "종합 생성").disabled
+    assert not next(button for button in app.button if button.label == "종합 생성").disabled
     assert any("시작일과 종료일을 모두" in warning.value for warning in app.warning)
 
 
@@ -339,7 +337,7 @@ with patch.object(synthesis_views, "_session_owner_id", return_value="owner"), \
     assert any("핵심 내용" in item.value for item in app.markdown)
     assert any("근거 부록 · 분석한 문서" in item.label for item in app.expander)
     assert any(button.label == "이 범위에서 질문하기" for button in app.button)
-    assert any(button.label == "조회" for button in app.button)
+    assert all(button.label != "조회" for button in app.button)
     assert any(button.label == "종합 생성" for button in app.button)
     assert all(button.label != "결과 확인" for button in app.button)
 
@@ -456,3 +454,12 @@ with patch.object(synthesis_views, "_session_owner_id", return_value="owner"), \
     assert any(button.label == "부분 종합 다시 생성" for button in app.button)
     assert all(button.label != "결과 확인" for button in app.button)
     assert app.session_state["raw_retry_calls"] == []
+    appendix = next(item for item in app.expander if item.label == "근거 부록 · 인용한 문서 (1개)")
+    other_documents = next(item for item in appendix.expander if item.label == "기타 대상 문서 (1개)")
+    assert not other_documents.proto.expanded
+    other_rows = [item for item in other_documents.children.values() if item.type == "expander"]
+    assert len(other_rows) == 1
+    assert "인용 누락 리포트" in other_rows[0].label
+    assert not other_rows[0].label.startswith("[")
+    assert sum(item.type == "expander" and item.label.startswith("[1] ")
+               for item in appendix.children.values()) == 1

@@ -374,6 +374,11 @@ def _open_report_pdf(file_name: str) -> tuple[bool, str | None]:
             False,
             "PDF 파일을 찾을 수 없습니다. 데이터 업데이트를 다시 실행하거나 REPORT_PDF_DIR 설정을 확인해 주세요.",
         )
+    return _open_pdf_path(pdf_path)
+
+
+def _open_pdf_path(pdf_path: Path) -> tuple[bool, str | None]:
+    """Open an already resolved local PDF using the system viewer."""
     try:
         if sys.platform.startswith("win"):
             os.startfile(str(pdf_path))  # type: ignore[attr-defined]
