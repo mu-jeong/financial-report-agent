@@ -240,7 +240,8 @@ def render_sidebar(
     *,
     monitoring_enabled: bool = False,
     operator_monitoring_enabled: bool = False,
-) -> dict:
+    render_data_status: bool = True,
+) -> dict | None:
     threads = load_threads()
 
     st.title("Finance Report Agent")
@@ -288,6 +289,12 @@ def render_sidebar(
         _render_thread_row(thread, selected=thread["id"] == current_id)
     _render_synthesis_history()
 
+    if render_data_status:
+        return render_sidebar_status()
+    return None
+
+
+def render_sidebar_status() -> dict:
     with st.container(key="sidebar_data_status_bottom"):
         st.divider()
         status = status_cache.get_data_status()

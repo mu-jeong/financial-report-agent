@@ -211,6 +211,7 @@ with st.sidebar:
         current_id,
         monitoring_enabled=MONITORING_MODE,
         operator_monitoring_enabled=OPERATOR_MONITORING_ENABLED,
+        render_data_status=False,
     )
 
 if st.session_state.get("active_user_page", "Chat") == "기업 리포트 종합":
@@ -233,3 +234,8 @@ else:
     chat_views.render_chat(current_id, current_thread)
 
 search_engine.release_background_warmup()
+
+# Data-status queries can contend with active report searches. Keep navigation
+# responsive, but render this nonessential sidebar section after main content.
+with st.sidebar:
+    sidebar_status = sidebar_views.render_sidebar_status()

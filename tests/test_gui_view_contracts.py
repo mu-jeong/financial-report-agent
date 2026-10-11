@@ -123,6 +123,7 @@ SIDEBAR_VIEW_FUNCTIONS = {
     "_thread_status_badge",
     "_render_thread_row",
     "render_sidebar",
+    "render_sidebar_status",
 }
 
 EXPECTED_VIEW_OWNERS = {
@@ -2333,3 +2334,41 @@ def test_app_only_composes_extracted_views_and_leaf_modules_do_not_import_app():
             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
         ]
         assert not top_level_calls
+
+
+def test_app_renders_navigation_then_chat_before_the_sidebar_status_work():
+    app_tree = ast.parse(
+        APP_PATH.read_text(encoding="utf-8-sig"),
+        filename=str(APP_PATH),
+    )
+    call_lines = {
+        ast.unparse(node.func): node.lineno
+        for node in ast.walk(app_tree)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func)
+        in {
+            "chat_views.render_chat",
+            "sidebar_views.render_sidebar",
+            "sidebar_views.render_sidebar_status",
+            "search_engine.release_background_warmup",
+        }
+    }
+    navigation_call = next(
+        node
+        for node in ast.walk(app_tree)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func) == "sidebar_views.render_sidebar"
+    )
+    navigation_keywords = {
+        keyword.arg: ast.unparse(keyword.value)
+        for keyword in navigation_call.keywords
+        if keyword.arg is not None
+    }
+
+    assert navigation_keywords["render_data_status"] == "False"
+    assert (
+        call_lines["sidebar_views.render_sidebar"]
+        < call_lines["chat_views.render_chat"]
+        < call_lines["search_engine.release_background_warmup"]
+        < call_lines["sidebar_views.render_sidebar_status"]
+    )
