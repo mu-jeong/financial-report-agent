@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import threading
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
 
 from src.configs import config
-from src.core import report_corpus, report_synthesis
-from src.core.report_synthesis_store import SynthesisStore
+from src.core import report_corpus, report_synthesis, report_synthesis_store
+
+
+SynthesisStore = report_synthesis_store.SynthesisStore
 
 
 @st.cache_resource
@@ -35,27 +36,9 @@ _THREADS: dict[str, threading.Thread] = _REGISTRY["threads"]
 
 def _repair_orphaned_jobs(store, process_token, active_job_ids) -> int:
     """Fail same-process running rows that have no live registered worker."""
-    active_job_ids = set(active_job_ids)
-    with store._connection() as connection:
-        running_ids = {
-            row[0]
-            for row in connection.execute(
-                "SELECT id FROM synthesis_jobs WHERE status='running' AND process_token=?",
-                (process_token,),
-            )
-        }
-        orphaned_ids = running_ids - active_job_ids
-        if not orphaned_ids:
-            return 0
-        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        connection.executemany(
-            """UPDATE synthesis_jobs SET status='failed', phase='finished',
-                error='작업 결과를 저장하지 못해 작업이 중단되었습니다. 다시 시도해 주세요.',
-                updated_at=?
-                WHERE id=? AND status='running' AND process_token=?""",
-            [(timestamp, job_id, process_token) for job_id in orphaned_ids],
-        )
-        return len(orphaned_ids)
+    return report_synthesis_store.repair_orphaned_jobs(
+        store, process_token, active_job_ids,
+    )
 
 
 def _store():
@@ -135,23 +118,9 @@ def delete_job(job_id: str, owner_id: str) -> bool:
     """Delete an owned terminal job while retaining reusable synthesis caches."""
     with _LOCK:
         store = _store()
-        # Use the existing connection API so cached pre-reload store instances
-        # remain usable. Serialize the status check and delete across processes.
-        with store._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT status FROM synthesis_jobs WHERE id=? AND owner_id=?",
-                (job_id, owner_id),
-            ).fetchone()
-            if row is None:
-                return False
-            if row["status"] == "running":
-                raise ValueError("생성 중인 종합 작업은 완료 후 삭제할 수 있습니다.")
-            connection.execute(
-                "DELETE FROM synthesis_jobs WHERE id=? AND owner_id=?",
-                (job_id, owner_id),
-            )
-            return True
+        # Keep this module-level so cached pre-reload store instances do not
+        # need methods added by a newer SynthesisStore class definition.
+        return report_synthesis_store.delete_owned_terminal_job(store, job_id, owner_id)
 
 
 def retry_job(job_id: str, owner_id: str) -> str:

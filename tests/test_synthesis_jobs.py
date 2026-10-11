@@ -180,8 +180,29 @@ def test_same_process_reconciliation_is_bounded_and_preserves_persisted_inputs(t
     assert store.get_batch("cache-key") == {"section": "cached"}
 
 
-def test_watcher_reimport_does_not_require_new_store_module_api(monkeypatch):
-    monkeypatch.delattr(report_synthesis_store, "repair_orphaned_jobs", raising=False)
+def test_watcher_reimport_supports_legacy_cached_store_instance(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs.config, "DATA_ROOT", str(tmp_path))
+    store = jobs.SynthesisStore(tmp_path / "report_synthesis.sqlite3")
+    orphaned, _ = store.create_job(_corpus(), "orphan-owner", jobs._PROCESS_TOKEN)
+    terminal, _ = store.create_job(
+        {**_corpus(), "fingerprint": "terminal"}, "terminal-owner", jobs._PROCESS_TOKEN,
+    )
+    store.finish(terminal["id"], {"status": "completed", "content": "done"})
+
+    class LegacyCachedStore:
+        _connection = jobs.SynthesisStore._connection
+        _job = staticmethod(jobs.SynthesisStore._job)
+        get_job = jobs.SynthesisStore.get_job
+
+        def __init__(self, path):
+            self.path = path
+
+    legacy_store = LegacyCachedStore(store.path)
+    assert not hasattr(legacy_store, "repair_orphaned_jobs")
+    assert not hasattr(legacy_store, "delete_owned_terminal_job")
+    path = str(store.path.resolve())
+    with jobs._LOCK:
+        jobs._STORES[path] = legacy_store
 
     spec = importlib.util.spec_from_file_location(jobs.__name__, jobs.__file__)
     reimported = importlib.util.module_from_spec(spec)
@@ -189,6 +210,9 @@ def test_watcher_reimport_does_not_require_new_store_module_api(monkeypatch):
 
     assert reimported.SynthesisStore is report_synthesis_store.SynthesisStore
     assert reimported._STORES is jobs._STORES
+    assert reimported.get_job(orphaned["id"], "orphan-owner")["status"] == "failed"
+    assert reimported.delete_job(terminal["id"], "terminal-owner")
+    assert store.get_job(terminal["id"], "terminal-owner") is None
 
 
 def test_watcher_module_reimport_keeps_running_job_registry(tmp_path, monkeypatch):

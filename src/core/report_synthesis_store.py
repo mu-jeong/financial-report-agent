@@ -16,6 +16,50 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def repair_orphaned_jobs(store, process_token, active_job_ids) -> int:
+    """Fail same-process running rows that have no live registered worker."""
+    active_job_ids = set(active_job_ids)
+    with store._connection() as connection:
+        running_ids = {
+            row[0]
+            for row in connection.execute(
+                "SELECT id FROM synthesis_jobs WHERE status='running' AND process_token=?",
+                (process_token,),
+            )
+        }
+        orphaned_ids = running_ids - active_job_ids
+        if not orphaned_ids:
+            return 0
+        timestamp = _now()
+        connection.executemany(
+            """UPDATE synthesis_jobs SET status='failed', phase='finished',
+                error='작업 결과를 저장하지 못해 작업이 중단되었습니다. 다시 시도해 주세요.',
+                updated_at=?
+                WHERE id=? AND status='running' AND process_token=?""",
+            [(timestamp, job_id, process_token) for job_id in orphaned_ids],
+        )
+        return len(orphaned_ids)
+
+
+def delete_owned_terminal_job(store, job_id: str, owner_id: str) -> bool:
+    """Delete an owned terminal job while retaining reusable synthesis caches."""
+    with store._connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT status FROM synthesis_jobs WHERE id=? AND owner_id=?",
+            (job_id, owner_id),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["status"] == "running":
+            raise ValueError("생성 중인 종합 작업은 완료 후 삭제할 수 있습니다.")
+        connection.execute(
+            "DELETE FROM synthesis_jobs WHERE id=? AND owner_id=?",
+            (job_id, owner_id),
+        )
+        return True
+
+
 class SynthesisStore:
     def __init__(self, path=None):
         self.path = Path(path or Path(config.DATA_ROOT) / "report_synthesis.sqlite3")

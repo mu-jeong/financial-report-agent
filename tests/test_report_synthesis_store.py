@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from src.core import report_synthesis_store
 from src.core.report_synthesis_store import SynthesisStore
 
 
@@ -54,6 +55,33 @@ def test_restart_repairs_interrupted_job_and_preserves_cache_and_frozen_input(tm
     assert store.get_batch("cache-key") == {"section": "완료된 중간 종합"}
     store.finish(job["id"], {"status": "completed"})
     assert store.get_job(job["id"], "owner")["status"] == "failed"
+
+
+def test_module_operations_preserve_owner_status_and_timestamp_semantics(tmp_path, monkeypatch):
+    store = SynthesisStore(tmp_path / "synthesis.sqlite3")
+    live, _ = store.create_job(_corpus("live"), "live-owner", "process")
+    orphaned, _ = store.create_job(_corpus("orphaned"), "orphan-owner", "process")
+    terminal, _ = store.create_job(_corpus("terminal"), "terminal-owner", "process")
+    store.finish(terminal["id"], {"status": "completed", "content": "done"})
+    timestamp = "2026-10-11T12:34:56+00:00"
+    monkeypatch.setattr(report_synthesis_store, "_now", lambda: timestamp)
+
+    repaired = report_synthesis_store.repair_orphaned_jobs(
+        store, "process", {live["id"]},
+    )
+
+    assert repaired == 1
+    assert store.get_job(live["id"], "live-owner")["status"] == "running"
+    saved = store.get_job(orphaned["id"], "orphan-owner")
+    assert saved["status"] == "failed"
+    assert saved["updated_at"] == timestamp
+    assert not report_synthesis_store.delete_owned_terminal_job(
+        store, terminal["id"], "other-owner",
+    )
+    assert report_synthesis_store.delete_owned_terminal_job(
+        store, terminal["id"], "terminal-owner",
+    )
+    assert store.get_job(terminal["id"], "terminal-owner") is None
 
 
 def test_segment_cache_survives_reopening_and_is_independent_from_document_cache(tmp_path):
