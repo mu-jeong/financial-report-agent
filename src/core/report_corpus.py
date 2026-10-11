@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from src.configs import config
-from src.core.db_manager import parse_filename
+from src.core.report_metadata import parse_filename
 from src.retrieval.schema import SCHEMA_VERSION
 
 _SQL_STRIP_CHARS = (

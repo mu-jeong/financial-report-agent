@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
 from src.configs.config import DATA_ROOT
+from src.core.report_metadata import parse_filename
 
 
 def _read_only_uri(path: Path) -> str:
@@ -60,28 +60,3 @@ def get_connection(*, materialize_reports: bool = True) -> sqlite3.Connection:
         connection.close()
         raise
     return connection
-
-
-def parse_filename(file_name: str) -> dict[str, str] | None:
-    """Parse ``type_date_target_broker_title.pdf`` metadata."""
-
-    if not file_name.lower().endswith(".pdf"):
-        return None
-
-    parts = file_name[:-4].split("_", 4)
-    if len(parts) < 5:
-        return None
-
-    report_type, report_date, target_name, broker, title = parts
-    try:
-        datetime.strptime(report_date, "%Y-%m-%d")
-    except ValueError:
-        return None
-
-    return {
-        "report_type": report_type,
-        "report_date": report_date,
-        "target_name": target_name,
-        "broker": broker,
-        "title": title,
-    }

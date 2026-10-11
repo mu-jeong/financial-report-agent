@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 import requests
 
 from src.core import artifact_io
-from src.core.feedback_handoff import redact_handoff_text
+from src.core.text_redaction import redact_handoff_text
 
 LOGGER = logging.getLogger(__name__)
 

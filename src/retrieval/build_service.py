@@ -2052,7 +2052,7 @@ def _validate_candidate_source_inventory(result: CandidateResult) -> None:
 
 
 def _default_metadata_parser(file_name: str) -> Mapping[str, Any] | None:
-    from src.core.db_manager import parse_filename
+    from src.core.report_metadata import parse_filename
 
     return parse_filename(file_name)
 
