@@ -4299,6 +4299,253 @@ def _require_candidate_reproduction_readiness(
         raise CandidateValidationError(str(readiness["reason"]))
 
 
+_EXPECTATION_EDITABLE_STATUSES = frozenset({
+    "needs_expectation", "ready", "reproduced", "fixing", "verified",
+})
+_RECORD_EDITABLE_STATUSES = _EXPECTATION_EDITABLE_STATUSES | {"new", "triaged"}
+
+
+def _plan_candidate_patch(
+    candidate: Mapping[str, Any],
+    changes: Mapping[str, Any],
+    *,
+    runtime_manifest_factory: Callable[[], dict[str, Any]],
+) -> tuple[dict[str, Any], list[str], bool]:
+    """Validate and plan fields without persisting or mutating the input.
+
+    Runtime fingerprinting remains lazy through the supplied factory so field
+    validation order and the caller's write-lock boundary are preserved.
+    """
+
+    status = str(candidate.get("triage_status"))
+    next_candidate = dict(candidate)
+    changed_fields: list[str] = []
+    contract_changed = False
+    record_fields = {"severity", "impact_area", "impact_summary"}
+    closure_fields = {
+        "fixed_in_version",
+        "closure_reason",
+        "suite_case_id",
+        "suite_exclusion_reason",
+    }
+    for key, raw_value in changes.items():
+        value = raw_value
+        if key in record_fields:
+            if status not in _RECORD_EDITABLE_STATUSES:
+                raise CandidateValidationError(f"{key} is not editable in {status}")
+            if key == "severity" and value not in {
+                "untriaged",
+                "S1",
+                "S2",
+                "S3",
+                "S4",
+            }:
+                raise CandidateValidationError("severity is invalid")
+            if key == "impact_area" and value not in _IMPACT_AREAS:
+                raise CandidateValidationError("impact_area is invalid")
+        elif key == "operator_decision":
+            if status not in {"new", "triaged", "needs_expectation", "ready"}:
+                raise CandidateValidationError(
+                    "operator_decision is no longer editable"
+                )
+            if value not in {
+                "unreviewed",
+                "accepted",
+                "needs_info",
+                "duplicate",
+                "rejected",
+            }:
+                raise CandidateValidationError("operator_decision is invalid")
+        elif key == "observed":
+            if status not in _EXPECTATION_EDITABLE_STATUSES:
+                raise CandidateValidationError(
+                    "reproduction input cannot be edited in this state"
+                )
+            if not isinstance(value, Mapping) or set(value) != {
+                "reproduction_input"
+            }:
+                raise CandidateValidationError(
+                    "observed update may replace reproduction_input only"
+                )
+            reproduction_input = value.get("reproduction_input")
+            if not isinstance(reproduction_input, Mapping):
+                raise CandidateValidationError(
+                    "reproduction_input must be an object"
+                )
+            observed = dict(candidate.get("observed") or {})
+            observed["reproduction_input"] = dict(reproduction_input)
+            value = observed
+            contract_changed = contract_changed or value != candidate.get(key)
+        elif key == "expected":
+            if status not in _EXPECTATION_EDITABLE_STATUSES:
+                raise CandidateValidationError(
+                    "expected cannot be edited in this state"
+                )
+            value = _canonical_expected(value)
+            contract_changed = contract_changed or value != candidate.get(key)
+        elif key == "active_checks":
+            if status not in _EXPECTATION_EDITABLE_STATUSES:
+                raise CandidateValidationError(
+                    "active_checks cannot be edited in this state"
+                )
+            if not isinstance(value, (list, tuple)) or any(
+                not isinstance(check, str) for check in value
+            ):
+                raise CandidateValidationError("active_checks must be a string list")
+            value = list(value)
+            if int(
+                next_candidate.get("contract_schema_version") or 1
+            ) >= 2:
+                raw_plan = dict(
+                    next_candidate.get("validation_plan") or {}
+                )
+                raw_plan["hard_checks"] = value
+                normalized_plan = _canonical_validation_plan(
+                    raw_plan,
+                    active_checks=value,
+                    verification_type=str(
+                        next_candidate.get("verification_type")
+                        or "graph_contract"
+                    ),
+                    quality_profile=next_candidate.get(
+                        "quality_profile"
+                    ),
+                )
+                next_candidate["validation_plan"] = {
+                    plan_key: normalized_plan[plan_key]
+                    for plan_key in (
+                        "schema_version",
+                        "quality_profile",
+                        "hard_checks",
+                        "soft_objectives",
+                        "performance_budget",
+                    )
+                }
+                next_candidate["quality_profile"] = normalized_plan[
+                    "quality_profile"
+                ]
+                next_candidate["verification_type"] = normalized_plan[
+                    "verification_type"
+                ]
+                changed_fields.extend(
+                    [
+                        "validation_plan",
+                        "quality_profile",
+                        "verification_type",
+                    ]
+                )
+            contract_changed = contract_changed or value != candidate.get(key)
+        elif key == "verification_type":
+            if status not in _EXPECTATION_EDITABLE_STATUSES:
+                raise CandidateValidationError(
+                    "verification_type cannot be edited in this state"
+                )
+            if value not in _VERIFICATION_TYPES:
+                raise CandidateValidationError("verification_type is invalid")
+            if int(
+                next_candidate.get("contract_schema_version") or 1
+            ) >= 2:
+                normalized_plan = _canonical_validation_plan(
+                    next_candidate.get("validation_plan"),
+                    active_checks=list(
+                        next_candidate.get("active_checks") or []
+                    ),
+                    verification_type=str(value),
+                    quality_profile=next_candidate.get(
+                        "quality_profile"
+                    ),
+                )
+                value = normalized_plan["verification_type"]
+            contract_changed = contract_changed or value != candidate.get(key)
+        elif key == "validation_plan":
+            if status not in _EXPECTATION_EDITABLE_STATUSES:
+                raise CandidateValidationError(
+                    "validation_plan cannot be edited in this state"
+                )
+            normalized_plan = _canonical_validation_plan(
+                value,
+                active_checks=list(
+                    next_candidate.get("active_checks") or []
+                ),
+                verification_type=str(
+                    next_candidate.get("verification_type")
+                    or "graph_contract"
+                ),
+                quality_profile=next_candidate.get(
+                    "quality_profile"
+                ),
+            )
+            value = {
+                plan_key: normalized_plan[plan_key]
+                for plan_key in (
+                    "schema_version",
+                    "quality_profile",
+                    "hard_checks",
+                    "soft_objectives",
+                    "performance_budget",
+                )
+            }
+            next_candidate["contract_schema_version"] = 2
+            if not next_candidate.get("reproduction_manifest"):
+                next_candidate["reproduction_manifest"] = (
+                    runtime_manifest_factory()
+                )
+                changed_fields.append("reproduction_manifest")
+            next_candidate["quality_profile"] = normalized_plan[
+                "quality_profile"
+            ]
+            next_candidate["active_checks"] = list(
+                normalized_plan["hard_checks"]
+            )
+            next_candidate["verification_type"] = normalized_plan[
+                "verification_type"
+            ]
+            changed_fields.extend(
+                [
+                    "contract_schema_version",
+                    "quality_profile",
+                    "active_checks",
+                    "verification_type",
+                ]
+            )
+            contract_changed = contract_changed or (
+                value != candidate.get(key)
+            )
+        elif key == "reproduction_manifest":
+            if status not in _EXPECTATION_EDITABLE_STATUSES:
+                raise CandidateValidationError(
+                    "reproduction_manifest cannot be edited in this state"
+                )
+            try:
+                value = (
+                    reproduction_manifest_module
+                    .canonicalize_reproduction_manifest(value)
+                )
+            except (
+                reproduction_manifest_module.ReproductionManifestError
+            ) as exc:
+                raise CandidateValidationError(str(exc)) from exc
+            next_candidate["contract_schema_version"] = 2
+            changed_fields.append("contract_schema_version")
+            contract_changed = contract_changed or (
+                value != candidate.get(key)
+            )
+        elif key == "duplicate_of":
+            if status not in {"new", "triaged", "needs_expectation", "ready"}:
+                raise CandidateValidationError("duplicate target is not editable")
+        elif key in closure_fields:
+            if status != "verified":
+                raise CandidateValidationError(
+                    f"{key} can be set only after verification"
+                )
+
+        if next_candidate.get(key) != value:
+            next_candidate[key] = value
+            changed_fields.append(key)
+
+    return next_candidate, changed_fields, contract_changed
+
+
 def update_regression_candidate(
     path: str | Path,
     *,
@@ -4341,278 +4588,16 @@ def update_regression_candidate(
         if status in _TERMINAL_CANDIDATE_STATUSES:
             raise CandidateValidationError("terminal candidate must be reopened first")
 
-        next_candidate = dict(candidate)
-        changed_fields: list[str] = []
-        contract_changed = False
-        record_fields = {"severity", "impact_area", "impact_summary"}
-        closure_fields = {
-            "fixed_in_version",
-            "closure_reason",
-            "suite_case_id",
-            "suite_exclusion_reason",
-        }
-        for key, raw_value in changes.items():
-            value = raw_value
-            if key in record_fields:
-                if status not in {
-                    "new",
-                    "triaged",
-                    "needs_expectation",
-                    "ready",
-                    "reproduced",
-                    "fixing",
-                    "verified",
-                }:
-                    raise CandidateValidationError(f"{key} is not editable in {status}")
-                if key == "severity" and value not in {
-                    "untriaged",
-                    "S1",
-                    "S2",
-                    "S3",
-                    "S4",
-                }:
-                    raise CandidateValidationError("severity is invalid")
-                if key == "impact_area" and value not in _IMPACT_AREAS:
-                    raise CandidateValidationError("impact_area is invalid")
-            elif key == "operator_decision":
-                if status not in {"new", "triaged", "needs_expectation", "ready"}:
-                    raise CandidateValidationError(
-                        "operator_decision is no longer editable"
-                    )
-                if value not in {
-                    "unreviewed",
-                    "accepted",
-                    "needs_info",
-                    "duplicate",
-                    "rejected",
-                }:
-                    raise CandidateValidationError("operator_decision is invalid")
-            elif key == "observed":
-                if status not in {
-                    "needs_expectation",
-                    "ready",
-                    "reproduced",
-                    "fixing",
-                    "verified",
-                }:
-                    raise CandidateValidationError(
-                        "reproduction input cannot be edited in this state"
-                    )
-                if not isinstance(value, Mapping) or set(value) != {
-                    "reproduction_input"
-                }:
-                    raise CandidateValidationError(
-                        "observed update may replace reproduction_input only"
-                    )
-                reproduction_input = value.get("reproduction_input")
-                if not isinstance(reproduction_input, Mapping):
-                    raise CandidateValidationError(
-                        "reproduction_input must be an object"
-                    )
-                observed = dict(candidate.get("observed") or {})
-                observed["reproduction_input"] = dict(reproduction_input)
-                value = observed
-                contract_changed = contract_changed or value != candidate.get(key)
-            elif key == "expected":
-                if status not in {
-                    "needs_expectation",
-                    "ready",
-                    "reproduced",
-                    "fixing",
-                    "verified",
-                }:
-                    raise CandidateValidationError(
-                        "expected cannot be edited in this state"
-                    )
-                value = _canonical_expected(value)
-                contract_changed = contract_changed or value != candidate.get(key)
-            elif key == "active_checks":
-                if status not in {
-                    "needs_expectation",
-                    "ready",
-                    "reproduced",
-                    "fixing",
-                    "verified",
-                }:
-                    raise CandidateValidationError(
-                        "active_checks cannot be edited in this state"
-                    )
-                if not isinstance(value, (list, tuple)) or any(
-                    not isinstance(check, str) for check in value
-                ):
-                    raise CandidateValidationError("active_checks must be a string list")
-                value = list(value)
-                if int(
-                    next_candidate.get("contract_schema_version") or 1
-                ) >= 2:
-                    raw_plan = dict(
-                        next_candidate.get("validation_plan") or {}
-                    )
-                    raw_plan["hard_checks"] = value
-                    normalized_plan = _canonical_validation_plan(
-                        raw_plan,
-                        active_checks=value,
-                        verification_type=str(
-                            next_candidate.get("verification_type")
-                            or "graph_contract"
-                        ),
-                        quality_profile=next_candidate.get(
-                            "quality_profile"
-                        ),
-                    )
-                    next_candidate["validation_plan"] = {
-                        plan_key: normalized_plan[plan_key]
-                        for plan_key in (
-                            "schema_version",
-                            "quality_profile",
-                            "hard_checks",
-                            "soft_objectives",
-                            "performance_budget",
-                        )
-                    }
-                    next_candidate["quality_profile"] = normalized_plan[
-                        "quality_profile"
-                    ]
-                    next_candidate["verification_type"] = normalized_plan[
-                        "verification_type"
-                    ]
-                    changed_fields.extend(
-                        [
-                            "validation_plan",
-                            "quality_profile",
-                            "verification_type",
-                        ]
-                    )
-                contract_changed = contract_changed or value != candidate.get(key)
-            elif key == "verification_type":
-                if status not in {
-                    "needs_expectation",
-                    "ready",
-                    "reproduced",
-                    "fixing",
-                    "verified",
-                }:
-                    raise CandidateValidationError(
-                        "verification_type cannot be edited in this state"
-                    )
-                if value not in _VERIFICATION_TYPES:
-                    raise CandidateValidationError("verification_type is invalid")
-                if int(
-                    next_candidate.get("contract_schema_version") or 1
-                ) >= 2:
-                    normalized_plan = _canonical_validation_plan(
-                        next_candidate.get("validation_plan"),
-                        active_checks=list(
-                            next_candidate.get("active_checks") or []
-                        ),
-                        verification_type=str(value),
-                        quality_profile=next_candidate.get(
-                            "quality_profile"
-                        ),
-                    )
-                    value = normalized_plan["verification_type"]
-                contract_changed = contract_changed or value != candidate.get(key)
-            elif key == "validation_plan":
-                if status not in {
-                    "needs_expectation",
-                    "ready",
-                    "reproduced",
-                    "fixing",
-                    "verified",
-                }:
-                    raise CandidateValidationError(
-                        "validation_plan cannot be edited in this state"
-                    )
-                normalized_plan = _canonical_validation_plan(
-                    value,
-                    active_checks=list(
-                        next_candidate.get("active_checks") or []
-                    ),
-                    verification_type=str(
-                        next_candidate.get("verification_type")
-                        or "graph_contract"
-                    ),
-                    quality_profile=next_candidate.get(
-                        "quality_profile"
-                    ),
+        next_candidate, changed_fields, contract_changed = _plan_candidate_patch(
+            candidate,
+            changes,
+            runtime_manifest_factory=lambda: (
+                reproduction_manifest_module.build_runtime_reproduction_manifest(
+                    data_revision=None,
+                    index_revision=None,
                 )
-                value = {
-                    plan_key: normalized_plan[plan_key]
-                    for plan_key in (
-                        "schema_version",
-                        "quality_profile",
-                        "hard_checks",
-                        "soft_objectives",
-                        "performance_budget",
-                    )
-                }
-                next_candidate["contract_schema_version"] = 2
-                if not next_candidate.get("reproduction_manifest"):
-                    next_candidate["reproduction_manifest"] = (
-                        reproduction_manifest_module
-                        .build_runtime_reproduction_manifest(
-                            data_revision=None,
-                            index_revision=None,
-                        )
-                    )
-                    changed_fields.append("reproduction_manifest")
-                next_candidate["quality_profile"] = normalized_plan[
-                    "quality_profile"
-                ]
-                next_candidate["active_checks"] = list(
-                    normalized_plan["hard_checks"]
-                )
-                next_candidate["verification_type"] = normalized_plan[
-                    "verification_type"
-                ]
-                changed_fields.extend(
-                    [
-                        "contract_schema_version",
-                        "quality_profile",
-                        "active_checks",
-                        "verification_type",
-                    ]
-                )
-                contract_changed = contract_changed or (
-                    value != candidate.get(key)
-                )
-            elif key == "reproduction_manifest":
-                if status not in {
-                    "needs_expectation",
-                    "ready",
-                    "reproduced",
-                    "fixing",
-                    "verified",
-                }:
-                    raise CandidateValidationError(
-                        "reproduction_manifest cannot be edited in this state"
-                    )
-                try:
-                    value = (
-                        reproduction_manifest_module
-                        .canonicalize_reproduction_manifest(value)
-                    )
-                except (
-                    reproduction_manifest_module.ReproductionManifestError
-                ) as exc:
-                    raise CandidateValidationError(str(exc)) from exc
-                next_candidate["contract_schema_version"] = 2
-                changed_fields.append("contract_schema_version")
-                contract_changed = contract_changed or (
-                    value != candidate.get(key)
-                )
-            elif key == "duplicate_of":
-                if status not in {"new", "triaged", "needs_expectation", "ready"}:
-                    raise CandidateValidationError("duplicate target is not editable")
-            elif key in closure_fields:
-                if status != "verified":
-                    raise CandidateValidationError(
-                        f"{key} can be set only after verification"
-                    )
-
-            if next_candidate.get(key) != value:
-                next_candidate[key] = value
-                changed_fields.append(key)
+            ),
+        )
 
         if not changed_fields:
             return candidate

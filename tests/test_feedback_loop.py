@@ -1,10 +1,11 @@
 import json
 import shutil
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
-from src.core import artifact_io, issue_report_store
+from src.core import artifact_io, issue_report_store, monitoring
 from src.core.feedback_handoff import (
     discover_candidate_orphan_handoffs,
     write_codex_handoff,
@@ -662,6 +663,101 @@ def test_promotion_rejects_existing_candidate_with_different_source_identity(
         )
 
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        (
+            {"severity": "invalid", "observed": 42},
+            "severity is invalid",
+        ),
+        (
+            {"observed": 42, "severity": "invalid"},
+            "observed update may replace reproduction_input only",
+        ),
+        (
+            {"impact_summary": "edited before failure", "observed": 42},
+            "observed update may replace reproduction_input only",
+        ),
+    ],
+)
+def test_candidate_invalid_patch_preserves_validation_order_and_file(
+    tmp_path, changes, message
+):
+    path, candidate = _ready_fixture_candidate(tmp_path)
+    before = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+
+    with pytest.raises(CandidateValidationError, match=message):
+        update_regression_candidate(
+            path,
+            expected_record_revision=candidate["record_revision"],
+            changes=changes,
+            reason="characterize atomic validation",
+        )
+
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_candidate_patch_planning_preserves_input_and_defers_runtime_io(tmp_path):
+    _, candidate = _ready_fixture_candidate(tmp_path)
+    before = deepcopy(candidate)
+    changes = {
+        "severity": "S2",
+        "observed": {"reproduction_input": {"question": "updated question"}},
+    }
+    original_changes = deepcopy(changes)
+
+    def unexpected_fingerprint():
+        pytest.fail("ordinary field changes must not fingerprint the runtime")
+
+    planned, _, contract_changed = monitoring._plan_candidate_patch(
+        candidate, changes, runtime_manifest_factory=unexpected_fingerprint
+    )
+
+    assert candidate == before
+    assert changes == original_changes
+    assert planned["severity"] == "S2"
+    assert planned["observed"]["reproduction_input"] == {
+        "question": "updated question"
+    }
+    assert planned["observed"]["actual"] == before["observed"]["actual"]
+    assert planned["record_revision"] == before["record_revision"]
+    assert planned["history"] == before["history"]
+    assert contract_changed
+
+
+def test_candidate_patch_runtime_manifest_is_lazy_and_preserves_validation_order(
+    tmp_path,
+):
+    _, candidate = _ready_fixture_candidate(tmp_path)
+    candidate["reproduction_manifest"] = None
+    before = deepcopy(candidate)
+    calls = []
+    manifest = {"test_runtime_identity": "provided by caller"}
+
+    def fingerprint_runtime():
+        calls.append("fingerprint")
+        return manifest
+
+    with pytest.raises(CandidateValidationError, match="severity is invalid"):
+        monitoring._plan_candidate_patch(
+            candidate,
+            {"severity": "invalid", "validation_plan": {}},
+            runtime_manifest_factory=fingerprint_runtime,
+        )
+    assert calls == []
+
+    planned, _, _ = monitoring._plan_candidate_patch(
+        candidate,
+        {"validation_plan": {}},
+        runtime_manifest_factory=fingerprint_runtime,
+    )
+    assert calls == ["fingerprint"]
+    assert planned["reproduction_manifest"] == manifest
+    assert candidate == before
 
 
 def test_candidate_noop_update_keeps_bytes_revisions_and_history(tmp_path):
