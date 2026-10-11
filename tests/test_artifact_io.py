@@ -36,6 +36,29 @@ def test_atomic_write_json_rejects_non_finite_values_without_touching_target(
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_canonical_json_bytes_has_stable_utf8_order_and_hash() -> None:
+    payload = {
+        "z": [3, 1],
+        "a": "한글",
+        "nested": {"b": False},
+    }
+
+    result = artifact_io.canonical_json_bytes(payload)
+
+    assert result == '{"a":"한글","nested":{"b":false},"z":[3,1]}'.encode(
+        "utf-8"
+    )
+    assert hashlib.sha256(result).hexdigest() == (
+        "7c9137e6c3f52b25549dc716710c4178778e20a21d878c681269024bd1db36d5"
+    )
+
+
+@pytest.mark.parametrize("value", [{"value": float("nan")}, {"value": {1, 2}}])
+def test_canonical_json_bytes_rejects_unsupported_json_values(value: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        artifact_io.canonical_json_bytes(value)
+
+
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
 def test_strict_json_loads_rejects_non_standard_constants(constant: str) -> None:
     with pytest.raises(ValueError, match="non-finite JSON constant"):

@@ -3271,13 +3271,7 @@ def build_eval_case_draft_from_issue_report(report: dict[str, Any]) -> dict[str,
 
 
 def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
+    return artifact_io.canonical_json_bytes(payload)
 
 
 def _utc_iso_now() -> str:

@@ -211,13 +211,7 @@ class ReleaseExecutionResult:
 
 
 def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
+    return artifact_io.canonical_json_bytes(payload)
 
 
 def _sha256_bytes(payload: bytes) -> str:

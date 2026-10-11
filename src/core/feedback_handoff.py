@@ -184,19 +184,15 @@ class FeedbackHandoffError(RuntimeError):
 
 def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
     try:
-        encoded = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+        return artifact_io.canonical_json_bytes(value)
+    except UnicodeEncodeError:
+        # UTF-8 encoding used to happen outside the JSON validation boundary.
+        raise
     except (TypeError, ValueError) as exc:
         raise FeedbackHandoffError(
             "invalid_payload",
             "non-finite or unsupported JSON value",
         ) from exc
-    return encoded.encode("utf-8")
 
 
 def _sha256(value: bytes) -> str:

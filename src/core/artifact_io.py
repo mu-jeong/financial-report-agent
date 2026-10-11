@@ -79,6 +79,18 @@ def atomic_write_json(path: str | Path, payload: Mapping[str, Any]) -> Path:
     return atomic_write_text(path, text)
 
 
+def canonical_json_bytes(value: Any) -> bytes:
+    """Serialize *value* to deterministic UTF-8 JSON bytes for hashing."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 def strict_json_loads(text: str) -> Any:
     """Decode JSON while rejecting non-standard NaN and Infinity constants."""
 

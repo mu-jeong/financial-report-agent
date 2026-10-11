@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from src.configs import settings
+from src.core import artifact_io
 from src.core.app_version import get_app_version
 
 
@@ -50,13 +50,7 @@ class ReproductionManifestError(ValueError):
 
 def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
     try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
+        return artifact_io.canonical_json_bytes(value)
     except (TypeError, ValueError) as exc:
         raise ReproductionManifestError(
             "reproduction manifest contains unsupported values"
