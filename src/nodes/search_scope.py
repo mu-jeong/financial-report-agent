@@ -52,10 +52,12 @@ TEMPORAL_REPORT_SET_KEYWORDS = (
     "추이",
     "변화",
 )
-LONG_PERIOD_SUMMARY_KEYWORDS = ("정리", "요약")
+LONG_PERIOD_SUMMARY_KEYWORDS = ("정리", "요약", "취합", "종합")
 LONG_PERIOD_MIN_DAYS = 60
 LATEST_REPORT_KEYWORDS = ("가장 최근", "최신", "최근", "마지막", "latest")
 REPORT_REFERENCE_KEYWORDS = ("리포트", "보고서", "문서", "자료", "report")
+REPORT_SYNTHESIS_KEYWORDS = ("정리", "취합", "종합")
+REPORT_METADATA_KEYWORDS = ("목록", "발간일", "개수", "제목")
 LATEST_REPORT_CHUNKS_PER_TARGET = 4
 
 
@@ -84,6 +86,24 @@ def _is_latest_report_request(text: str) -> bool:
         _normalize_text(keyword) in normalized
         for keyword in REPORT_REFERENCE_KEYWORDS
     )
+
+
+def _is_report_synthesis_request(text: str) -> bool:
+    """Detect requests that synthesize report bodies rather than list metadata."""
+    normalized = _normalize_text(text)
+    references_report = any(
+        _normalize_text(keyword) in normalized
+        for keyword in REPORT_REFERENCE_KEYWORDS
+    )
+    requests_synthesis = any(
+        _normalize_text(keyword) in normalized
+        for keyword in REPORT_SYNTHESIS_KEYWORDS
+    )
+    requests_metadata_only = any(
+        _normalize_text(keyword) in normalized
+        for keyword in REPORT_METADATA_KEYWORDS
+    )
+    return references_report and requests_synthesis and not requests_metadata_only
 
 
 def _has_valid_date_range(filters: dict | None) -> bool:
@@ -382,12 +402,13 @@ def search_scope_node(state: State) -> dict:
     """
     query = state.get("rewritten_query", state["question"])
     combined_intent_text = f"{state['question']} {query}"
-    has_vector_intent = any(
+    explicit_vector_intent = any(
         keyword in combined_intent_text
         for keyword in (*VECTORDB_INTENT_KEYWORDS, *VECTORDB_CONTENT_INSPECTION_KEYWORDS)
     )
     full_period_request = _is_full_period_request(combined_intent_text)
     current_question_filters = _drop_incompatible_target_filter(infer_search_filters(state["question"]))
+    has_vector_intent = explicit_vector_intent or _is_report_synthesis_request(combined_intent_text)
     current_temporal_context = None if full_period_request else resolve_temporal_context(state["question"])
     if _date_range_is_inverted(current_temporal_context):
         current_temporal_context = None
@@ -464,7 +485,7 @@ def search_scope_node(state: State) -> dict:
             scope_source = "prior_search_scope"
 
             prior_route = _valid_route(prior_search_scope.get("route"))
-            if full_period_request or (current_temporal_context and not has_vector_intent):
+            if (full_period_request or current_temporal_context) and not has_vector_intent:
                 route_hint = prior_route or "rdb"
             if (
                 {"report_type", "report_types"} & current_non_temporal_filters.keys()

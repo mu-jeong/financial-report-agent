@@ -406,7 +406,7 @@ def ensure_document_coverage(
     max_passages: int = SEARCH_TOP_K,
     required_file_names: list[str] | tuple[str, ...] | str | None = None,
 ) -> list[dict]:
-    """필터링된 문서마다 최소 1개 passage를 유지합니다."""
+    """예산 안에서 서로 다른 필터링된 문서의 근거를 유지합니다."""
     if not selected_passages or max_passages <= 0:
         return selected_passages
 
@@ -432,7 +432,16 @@ def ensure_document_coverage(
         required_files = list(best_by_file)
 
     if len(required_files) > max_passages:
-        return selected_passages[:max_passages]
+        if required_file_names:
+            return selected_passages[:max_passages]
+        representatives: dict[str, dict] = {}
+        for passage in [*selected_passages, *all_passages]:
+            file_name = _file_name_for_passage(passage)
+            if file_name:
+                representatives.setdefault(file_name, passage)
+            if len(representatives) == max_passages:
+                break
+        return list(representatives.values())
 
     covered = {
         file_name
@@ -650,6 +659,12 @@ def should_apply_document_coverage(
     if _normalized_contains(query, MULTI_DOCUMENT_COVERAGE_KEYWORDS):
         return True, "multi_document_intent"
 
+    if (
+        _normalized_contains(query, ("리포트", "보고서", "문서", "자료", "report"))
+        and _normalized_contains(query, ("정리", "요약", "취합", "종합", "summary", "summarize"))
+    ):
+        return True, "report_summary_intent"
+
     if filters.get("target_name") and _normalized_contains(query, SINGLE_TARGET_DEEP_DIVE_KEYWORDS):
         return False, "single_target_deep_dive"
 
@@ -666,6 +681,7 @@ def select_top_passages(
     search_filters: dict | None = None,
     required_file_names: list[str] | tuple[str, ...] | str | None = None,
     scope_decision: dict | None = None,
+    intent_query: str | None = None,
 ) -> tuple[list[dict], dict]:
     """최종 context passage를 선택합니다."""
     passages = _build_passages(docs_with_scores)
@@ -684,7 +700,7 @@ def select_top_passages(
         ranked = passages[:candidate_count]
     ranked = apply_recency_weight(ranked, RECENCY_WEIGHT)[:SEARCH_TOP_K]
     apply_coverage, coverage_reason = should_apply_document_coverage(
-        query,
+        intent_query if intent_query is not None else query,
         search_filters,
         required_file_names,
         scope_decision,
@@ -949,6 +965,7 @@ def vectordb_node(state: State) -> dict:
         search_filters=search_filters,
         required_file_names=required_file_names,
         scope_decision=scope_decision,
+        intent_query=f"{state['question']} {query}",
     )
     retrieval_metrics.update(coverage_metrics)
     retrieval_metrics["selected_source_count"] = len(top_passages)
@@ -998,7 +1015,7 @@ def vectordb_node(state: State) -> dict:
         source_info = (
             f"[{document_rank}] {source.get('target_name', '알수없음')} "
             f"({source.get('report_date', '날짜없음')}) - "
-            f"{source.get('title', '제목없음')}"
+            f"{source.get('title', '제목없음')} | 증권사: {source.get('broker', '알수없음')}"
         )
         context_parts.append(
             f"\n--- 문서 {document_rank} ---\n"

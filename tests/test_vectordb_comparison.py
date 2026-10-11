@@ -293,7 +293,12 @@ def test_compiled_send_matches_sequential_reference(monkeypatch):
     calls = _install_fakes(monkeypatch)
     sequential = comparison.run_sequential_reference(_state())
     sent = comparison.build_company_comparison_subgraph().invoke(_state())
-    for key in ("generation", "rerank_info", "no_vector_results"):
+    for key in (
+        "generation",
+        "rerank_info",
+        "citation_contract",
+        "no_vector_results",
+    ):
         assert sent[key] == sequential[key]
     assert [item["target_name"] for item in sent["rerank_info"]] == ["A", "B", "A", "B", "A", "B"]
     assert [item["rank"] for item in sent["rerank_info"]] == list(range(1, 7))
@@ -338,6 +343,177 @@ def test_final_budget_is_honored_after_global_rerank(monkeypatch):
     assert len(result["rerank_info"]) == 3
     assert [item["rank"] for item in result["rerank_info"]] == [1, 2, 3]
     assert [item["target_name"] for item in result["rerank_info"]] == ["A", "B", "A"]
+
+
+def test_report_summary_branch_preserves_distinct_reports_before_budget_cutoff(
+    monkeypatch,
+):
+    def retrieve(_query, filters):
+        target = filters["target_name"]
+        return [
+            (
+                Document(
+                    page_content=f"{target} primary first",
+                    metadata={
+                        "target_name": target,
+                        "broker": "X",
+                        "parent_uid": f"{target}-primary-1",
+                        "file_name": f"{target}-primary.pdf",
+                    },
+                ),
+                0.1,
+            ),
+            (
+                Document(
+                    page_content=f"{target} primary second",
+                    metadata={
+                        "target_name": target,
+                        "broker": "X",
+                        "parent_uid": f"{target}-primary-2",
+                        "file_name": f"{target}-primary.pdf",
+                    },
+                ),
+                0.2,
+            ),
+            (
+                Document(
+                    page_content=f"{target} secondary",
+                    metadata={
+                        "target_name": target,
+                        "broker": "X",
+                        "parent_uid": f"{target}-secondary-1",
+                        "file_name": f"{target}-secondary.pdf",
+                    },
+                ),
+                0.3,
+            ),
+        ], {"snapshot_id": "s", "publication_generation": 2}
+
+    monkeypatch.setattr(comparison.vectordb, "_retrieve_docs_with_scores", retrieve)
+    summary_state = _state(
+        question="A와 B 리포트 정리해줘",
+        rewritten_query="A와 B 리포트 정리해줘",
+    )
+    summary_state["retrieval_plan"]["candidate_budget_per_target"] = 2
+    summary_plan = comparison.build_comparison_plan(summary_state)
+    summary_result = next(
+        iter(
+            comparison.retrieve_company(
+                comparison._branch_inputs(summary_plan)[0]
+            )["branch_results"].values()
+        )
+    )
+
+    assert [
+        candidate["meta"]["file_name"]
+        for candidate in summary_result["candidates"]
+    ] == ["A-primary.pdf", "A-secondary.pdf"]
+
+    comparison_state = _state()
+    comparison_state["retrieval_plan"]["candidate_budget_per_target"] = 2
+    comparison_plan = comparison.build_comparison_plan(comparison_state)
+    comparison_result = next(
+        iter(
+            comparison.retrieve_company(
+                comparison._branch_inputs(comparison_plan)[0]
+            )["branch_results"].values()
+        )
+    )
+    assert [
+        candidate["meta"]["file_name"]
+        for candidate in comparison_result["candidates"]
+    ] == ["A-primary.pdf", "A-primary.pdf"]
+
+
+def test_report_summary_final_selection_restores_per_company_report_coverage(
+    monkeypatch,
+):
+    def retrieve(_query, filters):
+        target = filters["target_name"]
+        return [
+            (
+                Document(
+                    page_content=f"{target} primary first",
+                    metadata={
+                        "target_name": target,
+                        "broker": "X",
+                        "parent_uid": f"{target}-primary-1",
+                        "file_name": f"{target}-primary.pdf",
+                    },
+                ),
+                0.1,
+            ),
+            (
+                Document(
+                    page_content=f"{target} primary second",
+                    metadata={
+                        "target_name": target,
+                        "broker": "X",
+                        "parent_uid": f"{target}-primary-2",
+                        "file_name": f"{target}-primary.pdf",
+                    },
+                ),
+                0.2,
+            ),
+            (
+                Document(
+                    page_content=f"{target} secondary",
+                    metadata={
+                        "target_name": target,
+                        "broker": "X",
+                        "parent_uid": f"{target}-secondary-1",
+                        "file_name": f"{target}-secondary.pdf",
+                    },
+                ),
+                0.3,
+            ),
+        ], {"snapshot_id": "s", "publication_generation": 2}
+
+    class PrimaryFirstRanker:
+        def rerank(self, _query, passages, _top_n):
+            return sorted(
+                passages,
+                key=lambda passage: (
+                    not str(passage["meta"].get("file_name", "")).endswith(
+                        "-primary.pdf"
+                    ),
+                    passage["id"],
+                ),
+            )
+
+    monkeypatch.setattr(comparison.vectordb, "_retrieve_docs_with_scores", retrieve)
+    monkeypatch.setattr(comparison, "USE_RERANKER", True)
+    monkeypatch.setattr(comparison, "get_ranker", lambda: PrimaryFirstRanker())
+    monkeypatch.setattr(
+        comparison,
+        "_synthesize_answer",
+        lambda *_args: ("answer", [AIMessage(content="answer")]),
+    )
+    state = _state(
+        question="A와 B 리포트 정리해줘",
+        rewritten_query="A와 B 리포트 정리해줘",
+    )
+    state["retrieval_plan"].update(
+        {
+            "candidate_budget_per_target": 3,
+            "final_budget": 4,
+        }
+    )
+
+    result = comparison.run_sequential_reference(state)
+
+    files_by_target = {
+        target: {
+            item["file_name"]
+            for item in result["rerank_info"]
+            if item["target_name"] == target
+        }
+        for target in ("A", "B")
+    }
+    assert files_by_target == {
+        "A": {"A-primary.pdf", "A-secondary.pdf"},
+        "B": {"B-primary.pdf", "B-secondary.pdf"},
+    }
 
 
 def test_process_wide_retrieval_limiter_caps_active_branches(monkeypatch):

@@ -634,9 +634,9 @@ def test_company_followup_preserves_period_unless_date_is_explicit(monkeypatch, 
     for result in (prepared["scope_prepare"]["base_filters"], resolved["search_filters"]):
         assert result == {**expected_dates, "report_type": "company", "target_names": targets}
     assert resolved["scope_source"] == "prior_search_scope"
-    # This fix only changes temporal interpretation, not content routing.
-    assert resolved["routing_context"]["has_vector_intent"] is False
-    assert resolved["routing_context"]["route_hint"] == "rdb"
+    # Preserve the requested period while synthesizing the companies' report bodies.
+    assert resolved["routing_context"]["has_vector_intent"] is True
+    assert resolved["routing_context"]["route_hint"] is None
     assert prior_filters["report_date_start"] == "2026-09-14"
 
 

@@ -70,6 +70,7 @@ class ComparisonPlan(TypedDict):
     final_budget: int
     execution_mode: Literal["send", "sequential_reference"]
     selection_mode: Literal["semantic", "latest_per_target"]
+    report_summary_coverage: bool
     selected_reports_by_target: dict[str, dict[str, object]]
     retrieval_concurrency_limit: int
     process_retrieval_concurrency_limit: int
@@ -86,6 +87,7 @@ class CompanyBranchInput(TypedDict):
     branch_query_sha256: str
     filters: dict[str, object]
     candidate_budget: int
+    report_summary_coverage: bool
     selected_report: dict[str, object] | None
     retrieval_concurrency_limit: int
 
@@ -122,6 +124,7 @@ class ComparisonOutput(TypedDict, total=False):
     generation: str | None
     messages: list[BaseMessage]
     rerank_info: list[dict[str, object]]
+    citation_contract: dict[str, object]
     no_vector_results: bool
     monitoring_metrics: dict[str, object]
     search_filters: dict[str, object]
@@ -171,6 +174,20 @@ def _ordered_targets(state: dict) -> list[str]:
     if isinstance(raw, str):
         raw = [raw]
     return list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
+
+
+def _is_report_summary_request(*values: object) -> bool:
+    """Return whether the user asks to synthesize report bodies."""
+    normalized = "".join(
+        "".join(str(value or "").casefold().split()) for value in values
+    )
+    return any(
+        keyword in normalized
+        for keyword in ("리포트", "보고서", "문서", "자료", "report")
+    ) and any(
+        keyword in normalized
+        for keyword in ("정리", "요약", "취합", "종합", "summary", "summarize")
+    )
 
 
 def build_comparison_plan(
@@ -254,6 +271,13 @@ def build_comparison_plan(
         ),
         "execution_mode": resolved_mode,
         "selection_mode": selection_mode,
+        "report_summary_coverage": (
+            selection_mode == "semantic"
+            and _is_report_summary_request(
+                state.get("question"),
+                state.get("rewritten_query"),
+            )
+        ),
         "selected_reports_by_target": selected_reports_by_target,
         "retrieval_concurrency_limit": effective_concurrency,
         "process_retrieval_concurrency_limit": _retrieval_concurrency_limit,
@@ -379,6 +403,7 @@ def _branch_inputs(plan: ComparisonPlan) -> list[CompanyBranchInput]:
                 "branch_query_sha256": branch_query_sha256,
                 "filters": filters,
                 "candidate_budget": plan["candidate_budget_per_target"],
+                "report_summary_coverage": plan["report_summary_coverage"],
                 "selected_report": selected_report,
                 "retrieval_concurrency_limit": plan["retrieval_concurrency_limit"],
             }
@@ -428,6 +453,47 @@ def _dedupe_identity(doc: object) -> str:
         str(getattr(doc, "page_content", "") or "").encode("utf-8")
     ).hexdigest()
     return f"text:{text_hash}"
+
+
+def _report_identity(meta: dict[str, object]) -> str | None:
+    for key in ("report_uid", "file_name"):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            return f"{key}:{value}"
+    return None
+
+
+def _prioritize_distinct_report_docs(
+    docs_with_scores: list[tuple[object, object]],
+) -> list[tuple[object, object]]:
+    representatives: list[tuple[object, object]] = []
+    remaining: list[tuple[object, object]] = []
+    seen_reports: set[str] = set()
+    for item in docs_with_scores:
+        meta = dict(getattr(item[0], "metadata", {}) or {})
+        identity = _report_identity(meta)
+        if identity is not None and identity not in seen_reports:
+            seen_reports.add(identity)
+            representatives.append(item)
+        else:
+            remaining.append(item)
+    return [*representatives, *remaining]
+
+
+def _prioritize_distinct_report_candidates(
+    candidates: list[Candidate],
+) -> list[Candidate]:
+    representatives: list[Candidate] = []
+    remaining: list[Candidate] = []
+    seen_reports: set[str] = set()
+    for candidate in candidates:
+        identity = _report_identity(dict(candidate.get("meta") or {}))
+        if identity is not None and identity not in seen_reports:
+            seen_reports.add(identity)
+            representatives.append(candidate)
+        else:
+            remaining.append(candidate)
+    return [*representatives, *remaining]
 
 
 _META_KEYS = (
@@ -525,6 +591,8 @@ def retrieve_company(branch: CompanyBranchInput | dict) -> dict[str, BranchResul
                     continue
                 seen_candidates.add(identity)
                 deduped_docs.append(item)
+            if branch.get("report_summary_coverage"):
+                deduped_docs = _prioritize_distinct_report_docs(deduped_docs)
             base["candidates"] = [
                 _candidate(doc, score, index, key[2])
                 for index, (doc, score) in enumerate(deduped_docs[:budget])
@@ -729,6 +797,22 @@ def _balanced_final(
     return selected
 
 
+def _balanced_final_with_report_coverage(
+    candidates: list[Candidate], targets: list[str], final_budget: int
+) -> list[Candidate]:
+    prioritized: list[Candidate] = []
+    for target in targets:
+        target_candidates = [
+            candidate
+            for candidate in candidates
+            if str(candidate["target_name"]) == target
+        ]
+        prioritized.extend(
+            _prioritize_distinct_report_candidates(target_candidates)
+        )
+    return _balanced_final(prioritized, targets, final_budget)
+
+
 def _synthesize_answer(
     question: str,
     query: str,
@@ -756,7 +840,7 @@ def _synthesize_answer(
         content=(
             "당신은 증권사 리포트 분석 AI입니다.\n"
             "아래 리포트 문맥만으로 충분하면 바로 답변하세요.\n"
-            "섹션의 발간일은 반드시 출처 헤더의 `발간일`을 그대로 사용하세요. "
+            "리포트의 발간일을 표시할 때는 반드시 출처 헤더의 `발간일`을 그대로 사용하세요. "
             "본문의 투자의견·목표주가 제시일자를 발간일로 해석하지 마세요.\n"
             "최신 주가가 꼭 필요할 때만 `get_stock_price` 도구를 호출하세요.\n\n"
             f"사용자 원질문: {question}\n"
@@ -946,7 +1030,14 @@ def comparison_fan_in(state: ComparisonState) -> dict:
     if rerank_error:
         metrics["comparison"]["rerank_degraded"] = True
         metrics["comparison"]["rerank_error"] = rerank_error
-    selected = _balanced_final(ranked, plan["targets"], plan["final_budget"])
+    if plan["report_summary_coverage"]:
+        selected = _balanced_final_with_report_coverage(
+            ranked,
+            plan["targets"],
+            plan["final_budget"],
+        )
+    else:
+        selected = _balanced_final(ranked, plan["targets"], plan["final_budget"])
     metrics["comparison"]["latest_selection"] = _latest_selection_metrics(
         plan,
         selected,
