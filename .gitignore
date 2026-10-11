@@ -55,6 +55,7 @@ Thumbs.db
 /.v2p/
 
 # Local document rendering and editor scratch files
+/DESIGN.md
 /docs/temp/
 /docs/design/
 /.tmp_*/

@@ -53,4 +53,3 @@
 ## 루트 문서
 
 - [README.md](../README.md) — 프로젝트 소개와 Quick Start
-- [DESIGN.md](../DESIGN.md) — 디자인 시스템(영문)
