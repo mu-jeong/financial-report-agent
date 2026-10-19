@@ -101,6 +101,17 @@ def _catalog(*, data_root=None, catalog_path=None):
         connection.close()
 
 
+def list_active_source_paths(*, data_root=None, catalog_path=None) -> frozenset[str]:
+    """Read registered source paths, including currently published delta reports."""
+
+    with _catalog(data_root=data_root, catalog_path=catalog_path) as (connection, _, state):
+        return frozenset(
+            row[0] for row in connection.execute(
+                "SELECT canonical_relative_path FROM active_reports"
+            )
+        ) if state else frozenset()
+
+
 def list_companies(*, data_root=None, catalog_path=None, pdf_dir=None) -> list[str]:
     with _catalog(data_root=data_root, catalog_path=catalog_path) as (connection, root, state):
         rows = connection.execute(

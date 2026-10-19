@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from src.core import report_crawler
+from src.core.report_metadata import parse_filename
 
 from src.core.report_crawler import (
     _crawl_start_date,
@@ -74,13 +75,13 @@ def _valid_pdf_bytes():
         document.close()
 
 
-def _run_mocked_company_download(tmp_path, monkeypatch, pdf_response, calls):
+def _run_mocked_company_download(tmp_path, monkeypatch, pdf_response, calls, *, item=None):
     list_url = f"{API_BASE}/company"
 
     def fake_get(url, **kwargs):
         calls.append((url, kwargs))
         if url == list_url:
-            return _list_response()
+            return _list_response([item] if item is not None else None)
         if url == f"{list_url}/1":
             return _FakeResponse(payload={"attachUrl": "https://example.test/report.pdf"})
         return pdf_response
@@ -243,17 +244,25 @@ def test_download_holds_cutover_fence_for_guard_and_source_writes(
         events.append("guarded")
 
     def download(*_args, **_kwargs):
-        assert events == ["locked", "guarded"]
+        assert events == ["locked", "guarded", "catalog"]
+        assert _kwargs["registered_paths"] == frozenset({"downloaded/existing.pdf"})
         events.append("downloaded")
         return 3
+
+    def registered_paths(*, data_root):
+        assert str(data_root) == str(tmp_path / "data")
+        assert events == ["locked", "guarded"]
+        events.append("catalog")
+        return frozenset({"downloaded/existing.pdf"})
 
     monkeypatch.setattr("src.configs.config.DATA_ROOT", str(data_root))
     monkeypatch.setattr(report_crawler, "RetrievalUpdateLock", FakeUpdateLock)
     monkeypatch.setattr(report_crawler, "guard_before_report_download", guarded)
     monkeypatch.setattr(report_crawler, "_download_naver_reports_locked", download)
+    monkeypatch.setattr("src.core.report_corpus.list_active_source_paths", registered_paths)
 
     assert report_crawler.download_naver_reports("2026-07-18") == 3
-    assert events == ["locked", "guarded", "downloaded", "unlocked"]
+    assert events == ["locked", "guarded", "catalog", "downloaded", "unlocked"]
 
 
 def test_normalize_report_categories_defaults_to_company():
@@ -535,6 +544,201 @@ def test_corrupt_existing_pdf_is_replaced_with_valid_download(tmp_path, monkeypa
     assert expected_path.read_bytes() == valid_pdf
 
 
+def test_new_download_preserves_title_longer_than_legacy_limit(tmp_path, monkeypatch):
+    title = "A complete semiconductor outlook " + "with detail " * 5
+    calls = []
+
+    assert _run_mocked_company_download(
+        tmp_path,
+        monkeypatch,
+        _FakeResponse(content=_valid_pdf_bytes()),
+        calls,
+        item=_report_item(title=title),
+    ) == 1
+
+    saved_path = next(tmp_path.glob("*.pdf"))
+    assert title.strip() in saved_path.name
+    assert len(title) > 50
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "한글보고서제목" * 200,
+        "ascii-report-title-" * 500,
+        "📈🚀" * 1000,
+    ],
+)
+def test_extreme_titles_fit_platform_filename_and_path_limits(tmp_path, title):
+    prefix = "company_2026-07-18_테스트기업_테스트증권_"
+    report_path = report_crawler._report_file_path(tmp_path, prefix, title)
+
+    assert report_crawler._filename_fits(tmp_path, Path(report_path).name)
+    assert Path(report_path).name.startswith(prefix)
+    assert Path(report_path).name.endswith(".pdf")
+    assert "~" in Path(report_path).stem
+    metadata = parse_filename(Path(report_path).name)
+    assert metadata is not None
+    assert metadata["title"] == Path(report_path).stem.split("_", 4)[4]
+
+
+def test_windows_filename_limit_counts_utf16_code_units(monkeypatch):
+    monkeypatch.setattr(report_crawler, "_IS_WINDOWS", True)
+    monkeypatch.setattr(report_crawler, "_path_length_limits", lambda _directory: (255, 10_000))
+
+    assert report_crawler._filename_fits("C:\\reports", "😀" * 127 + "a")
+    assert not report_crawler._filename_fits("C:\\reports", "😀" * 127 + "ab")
+
+
+def test_windows_normal_path_limit_is_259_utf16_units(monkeypatch):
+    monkeypatch.setattr(report_crawler, "_IS_WINDOWS", True)
+    monkeypatch.setattr(report_crawler, "_path_length_limits", lambda _directory: (255, 259))
+    monkeypatch.setattr(report_crawler.os.path, "abspath", lambda _path: "x" * 259)
+
+    assert report_crawler._filename_fits("C:\\reports", "report.pdf")
+    monkeypatch.setattr(report_crawler.os.path, "abspath", lambda _path: "x" * 260)
+    assert not report_crawler._filename_fits("C:\\reports", "report.pdf")
+
+
+def test_posix_limits_use_filesystem_bytes_and_exclude_path_nul(monkeypatch):
+    monkeypatch.setattr(report_crawler, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        report_crawler.os,
+        "pathconf",
+        lambda _directory, name: 255 if name == "PC_NAME_MAX" else 4096,
+        raising=False,
+    )
+    monkeypatch.setattr(report_crawler.os, "fsencode", lambda value: value.encode("utf-8"))
+
+    assert report_crawler._path_length_limits("/reports") == (255, 4095)
+    monkeypatch.setattr(report_crawler, "_path_length_limits", lambda _directory: (255, 10_000))
+    assert report_crawler._filename_fits("/reports", "가" * 85)
+    assert not report_crawler._filename_fits("/reports", "가" * 85 + "a")
+
+
+def test_truncated_titles_with_same_prefix_have_distinct_stable_names(tmp_path):
+    prefix = "company_2026-07-18_테스트기업_테스트증권_"
+    shared = "동일한 매우 긴 제목" * 200
+
+    first = report_crawler._report_file_path(tmp_path, prefix, shared + "첫번째")
+    second = report_crawler._report_file_path(tmp_path, prefix, shared + "두번째")
+
+    assert first != second
+    assert first == report_crawler._report_file_path(tmp_path, prefix, shared + "첫번째")
+
+
+def test_long_directory_reduces_title_without_exceeding_path_limit(tmp_path):
+    report_dir = tmp_path / ("long-directory-" * 5)
+    report_dir.mkdir()
+    prefix = "company_2026-07-18_target_broker_"
+    title = "detailed-title-" * 100
+
+    report_path = report_crawler._report_file_path(report_dir, prefix, title)
+
+    assert report_crawler._filename_fits(report_dir, Path(report_path).name)
+    assert len(Path(report_path).name) > len(prefix) + len(".pdf")
+
+
+def test_existing_long_title_legacy_file_is_reused_without_redownload(tmp_path, monkeypatch):
+    title = "기존에 색인된 장문 보고서 제목" * 5
+    prefix = "company_2026-07-18_테스트기업_테스트증권_"
+    legacy_path = tmp_path / f"{prefix}{title[:50]}....pdf"
+    legacy_path.write_bytes(_valid_pdf_bytes())
+    calls = []
+
+    assert _run_mocked_company_download(
+        tmp_path,
+        monkeypatch,
+        _FakeResponse(content=b"must not be requested"),
+        calls,
+        item=_report_item(title=title),
+    ) == 1
+    assert len(calls) == 1
+    assert legacy_path.exists()
+    assert len(list(tmp_path.glob("*.pdf"))) == 1
+
+
+def test_corrupt_long_title_legacy_file_is_repaired_in_place(tmp_path, monkeypatch):
+    title = "기존에 색인된 장문 보고서 제목" * 5
+    prefix = "company_2026-07-18_테스트기업_테스트증권_"
+    legacy_path = tmp_path / f"{prefix}{title[:50]}....pdf"
+    legacy_path.write_bytes(b"corrupt")
+    valid_pdf = _valid_pdf_bytes()
+    calls = []
+
+    assert _run_mocked_company_download(
+        tmp_path,
+        monkeypatch,
+        _FakeResponse(content=valid_pdf),
+        calls,
+        item=_report_item(title=title),
+    ) == 1
+    assert len(calls) == 3
+    assert legacy_path.read_bytes() == valid_pdf
+    assert len(list(tmp_path.glob("*.pdf"))) == 1
+
+
+def test_missing_registered_legacy_filename_is_preserved(tmp_path):
+    from src.retrieval.identity import normalize_relative_path
+
+    prefix = "company_2026-07-18_target_broker_"
+    title = "compatibility-\uf967-" * 5
+    legacy_name = f"{prefix}{title[:50]}....pdf"
+    registered_paths = frozenset({normalize_relative_path(f"downloaded/{legacy_name}")})
+
+    chosen = report_crawler._report_file_path(
+        tmp_path, prefix, title, registered_paths=registered_paths,
+    )
+
+    assert chosen == str(tmp_path / legacy_name)
+    assert not Path(chosen).exists()
+
+
+@pytest.mark.parametrize("title", ["long-title-" * 7, "long-title-" * 100])
+def test_registered_new_filename_takes_priority_over_unindexed_legacy_file(tmp_path, title):
+    from src.retrieval.identity import normalize_relative_path
+
+    prefix = "company_2026-07-18_target_broker_"
+    new_path = report_crawler._report_file_path(tmp_path, prefix, title)
+    registered_paths = frozenset({normalize_relative_path(f"downloaded/{Path(new_path).name}")})
+    legacy_path = tmp_path / f"{prefix}{title[:50]}....pdf"
+    legacy_path.write_bytes(_valid_pdf_bytes())
+
+    assert report_crawler._report_file_path(
+        tmp_path, prefix, title, registered_paths=registered_paths,
+    ) == new_path
+
+
+def test_atomic_save_supports_maximized_long_final_filename(tmp_path):
+    prefix = "company_2026-07-18_target_broker_"
+    destination = report_crawler._report_file_path(tmp_path, prefix, "long-title-" * 100)
+
+    report_crawler._save_pdf_atomically(destination, _valid_pdf_bytes())
+
+    assert report_crawler._is_valid_pdf_file(destination)
+    assert not list(tmp_path.glob(".report-*.tmp"))
+
+
+def test_metadata_prefix_that_cannot_fit_is_counted_as_failed_report(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    calls = []
+    monkeypatch.setattr(report_crawler, "_path_length_limits", lambda _directory: (20, 40))
+
+    with _expect_partial_download(capsys):
+        assert _run_mocked_company_download(
+            tmp_path,
+            monkeypatch,
+            _FakeResponse(content=b"must not be requested"),
+            calls,
+        ) == 0
+
+    assert len(calls) == 1
+    assert not list(tmp_path.iterdir())
+
+
 def test_failed_repair_preserves_corrupt_existing_file(tmp_path, monkeypatch, capsys):
     expected_path = tmp_path / "company_2026-07-18_테스트기업_테스트증권_테스트제목.pdf"
     original_content = b"<html>old failed download</html>"
@@ -581,6 +785,30 @@ def test_download_guard_blocks_before_crawler_dependencies_or_source_writes(
         download_naver_reports("2026-07-16")
 
     assert events == ["guard"]
+
+
+def test_unreadable_source_catalog_blocks_before_network_or_downloads(tmp_path, monkeypatch):
+    from src.core.report_corpus import ReportCorpusError
+
+    data_root = tmp_path / "data"
+    catalog = data_root / "retrieval/v2/catalog.sqlite3"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_bytes(b"unreadable catalog")
+    save_dir = tmp_path / "must-not-be-created"
+    monkeypatch.setattr("src.configs.config.DATA_ROOT", str(data_root))
+    monkeypatch.setattr("src.configs.config.SAVE_DIR", str(save_dir))
+    monkeypatch.setattr(report_crawler, "guard_before_report_download", lambda: None)
+
+    def unexpected_request(*_args, **_kwargs):
+        pytest.fail("catalog errors must stop downloads before network access")
+
+    monkeypatch.setattr(requests, "get", unexpected_request)
+
+    with pytest.raises(ReportCorpusError):
+        download_naver_reports("2026-07-18")
+
+    assert not save_dir.exists()
+    assert catalog.read_bytes() == b"unreadable catalog"
 
 
 def test_direct_crawler_command_fails_before_source_mutation_when_degraded(tmp_path):

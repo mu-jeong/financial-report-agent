@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import tempfile
@@ -10,6 +11,7 @@ from urllib.parse import urlparse
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.retrieval.update_lock import RetrievalUpdateLock
+from src.retrieval.identity import normalize_relative_path
 
 REPORT_CATEGORY_URLS = {
     "company": "/api/stockSecurity/researches/v2/company",
@@ -19,6 +21,106 @@ REPORT_CATEGORY_URLS = {
 
 NAVER_REQUEST_TIMEOUT_SECONDS = 30
 NAVER_RESEARCH_PAGE_SIZE = 50
+_WINDOWS_FILENAME_LIMIT = 255
+_WINDOWS_NORMAL_PATH_LIMIT = 259
+_POSIX_FILENAME_LIMIT_FALLBACK = 255
+_POSIX_PATH_LIMIT_FALLBACK = 4095
+_TRUNCATED_TITLE_HASH_LENGTH = 12
+_IS_WINDOWS = os.name == "nt"
+
+
+def _path_length_limits(directory: str | os.PathLike[str]) -> tuple[int, int]:
+    """Return conservative filename-component and full-path limits."""
+
+    if _IS_WINDOWS:
+        return _WINDOWS_FILENAME_LIMIT, _WINDOWS_NORMAL_PATH_LIMIT
+
+    def read_limit(name: str, fallback: int, *, includes_nul: bool = False) -> int:
+        try:
+            value = os.pathconf(directory, name)
+        except (AttributeError, OSError, ValueError):
+            return fallback
+        if not isinstance(value, int) or value <= 0:
+            return fallback
+        return value - 1 if includes_nul else value
+
+    return (
+        read_limit("PC_NAME_MAX", _POSIX_FILENAME_LIMIT_FALLBACK),
+        read_limit("PC_PATH_MAX", _POSIX_PATH_LIMIT_FALLBACK, includes_nul=True),
+    )
+
+
+def _filename_fits(
+    directory: str | os.PathLike[str],
+    file_name: str,
+) -> bool:
+    component_limit, path_limit = _path_length_limits(directory)
+    full_path = os.path.abspath(os.path.join(directory, file_name))
+    if _IS_WINDOWS:
+        component_length = len(file_name.encode("utf-16-le")) // 2
+        path_length = len(full_path.encode("utf-16-le")) // 2
+    else:
+        component_length = len(os.fsencode(file_name))
+        path_length = len(os.fsencode(full_path))
+    return component_length <= component_limit and path_length <= path_limit
+
+
+def _report_file_path(
+    directory: str | os.PathLike[str],
+    prefix: str,
+    title: str,
+    *,
+    registered_paths: frozenset[str] = frozenset(),
+) -> str:
+    """Preserve registered paths even when their PDF needs to be downloaded again."""
+
+    legacy_title = title[:50] + ("..." if len(title) > 50 else "")
+    legacy_name = f"{prefix}{legacy_title}.pdf"
+    legacy_path = os.path.join(directory, legacy_name)
+    # SAVE_DIR can be overridden; retrieval still uses the logical 'downloaded'
+    # prefix. Compare canonical identities without changing physical spelling.
+    if normalize_relative_path(f"downloaded/{legacy_name}") in registered_paths:
+        return legacy_path
+
+    new_path = _new_report_file_path(directory, prefix, title)
+    if normalize_relative_path(f"downloaded/{Path(new_path).name}") in registered_paths:
+        return new_path
+    if os.path.exists(legacy_path):
+        return legacy_path
+    return new_path
+
+
+def _new_report_file_path(
+    directory: str | os.PathLike[str],
+    prefix: str,
+    title: str,
+) -> str:
+    """Fit new titles to filesystem limits with a stable hash when truncated."""
+
+    full_name = f"{prefix}{title}.pdf"
+    if _filename_fits(directory, full_name):
+        return os.path.join(directory, full_name)
+
+    digest = hashlib.sha256(title.encode("utf-8", errors="surrogatepass")).hexdigest()
+    suffix = f"~{digest[:_TRUNCATED_TITLE_HASH_LENGTH]}"
+    minimal_name = f"{prefix}{suffix}.pdf"
+    if not _filename_fits(directory, minimal_name):
+        raise ValueError(
+            "Report filename metadata does not fit the filesystem path limit: "
+            f"{os.path.abspath(directory)}"
+        )
+
+    low = 0
+    high = len(title)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        candidate = f"{prefix}{title[:midpoint]}{suffix}.pdf"
+        if _filename_fits(directory, candidate):
+            low = midpoint
+        else:
+            high = midpoint - 1
+
+    return os.path.join(directory, f"{prefix}{title[:low]}{suffix}.pdf")
 
 
 def _is_valid_pdf_file(path: str | os.PathLike[str]) -> bool:
@@ -48,7 +150,7 @@ def _save_pdf_atomically(
         with tempfile.NamedTemporaryFile(
             mode="wb",
             dir=destination_path.parent,
-            prefix=f".{destination_path.stem}.",
+            prefix=".report-",
             suffix=".tmp",
             delete=False,
         ) as temp_file:
@@ -164,12 +266,16 @@ def download_naver_reports(
 
     with RetrievalUpdateLock(Path(DATA_ROOT)):
         guard_before_report_download()
+        from src.core.report_corpus import list_active_source_paths
+
+        registered_paths = list_active_source_paths(data_root=DATA_ROOT)
         return _download_naver_reports_locked(
             target_date_str,
             target_count=target_count,
             lookback_days=lookback_days,
             max_lookback_days=max_lookback_days,
             categories=categories,
+            registered_paths=registered_paths,
         )
 
 
@@ -179,6 +285,8 @@ def _download_naver_reports_locked(
     lookback_days: int = 0,
     max_lookback_days: int = 30,
     categories: str | list[str] | tuple[str, ...] | None = None,
+    *,
+    registered_paths: frozenset[str] = frozenset(),
 ):
     import requests
 
@@ -351,13 +459,19 @@ def _download_naver_reports_locked(
                 s_broker = sanitize(broker).replace('_', '-')
                 s_title = sanitize(title_text).replace('_', '-')
                 
-                # 제목이 너무 길면 자름 (OS 제약)
-                max_title_len = 50
-                if len(s_title) > max_title_len:
-                    s_title = s_title[:max_title_len] + "..."
-                    
-                file_name = f"{s_type}_{report_date}_{s_target}_{s_broker}_{s_title}.pdf"
-                file_path = os.path.join(save_dir, file_name)
+                # 기존 파일명은 유지하고, 새 파일은 OS 경로 한도까지 제목을 보존
+                file_prefix = f"{s_type}_{report_date}_{s_target}_{s_broker}_"
+                try:
+                    file_path = _report_file_path(
+                        save_dir, file_prefix, s_title, registered_paths=registered_paths,
+                    )
+                except ValueError as exc:
+                    failed_download_count += 1
+                    if first_download_error is None:
+                        first_download_error = f"{file_prefix}: {exc}"
+                    print(f"  Report filename failed: {exc}")
+                    continue
+                file_name = os.path.basename(file_path)
 
                 # 유효한 기존 파일만 중복 다운로드 대상으로 인정
                 if not _is_valid_pdf_file(file_path):
