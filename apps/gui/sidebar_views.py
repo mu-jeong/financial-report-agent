@@ -301,6 +301,7 @@ def render_sidebar_status() -> dict:
         db_status = status["db"]
         data_views.render_report_calendar(db_status)
         data_views.render_data_update_controls(db_status)
+        data_views.render_data_recovery_controls(status)
         st.divider()
         st.subheader("데이터 상태")
         col1, col2 = st.columns(2)

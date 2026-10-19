@@ -159,6 +159,7 @@ EXPLICIT_WIDGET_KEYS = {
     "'sidebar_data_status_bottom'",
     "'unembedded_report_display_limit'",
     "'start_unembedded_embedding_job'",
+    "'retry_unprepared_reports_sidebar'",
     "'monitoring_area_group'",
     "'monitoring_operations_area'",
     "'monitoring_experiments_area'",

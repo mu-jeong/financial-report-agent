@@ -6,6 +6,7 @@ from html import escape
 import streamlit as st
 
 from src.configs import config as config_module
+from src.core import collection_check_store
 from src.core import data_update_jobs
 from src.core import status as status_module
 
@@ -296,6 +297,9 @@ def render_update_progress() -> None:
     if not status:
         return
 
+    if history_warning := status.get("collection_check_warning"):
+        st.warning(history_warning)
+
     state = status.get("state")
     message = status.get("message", "데이터 업데이트 상태를 확인 중입니다.")
     if state == "running":
@@ -340,19 +344,78 @@ def _update_min_date(db_status: dict) -> date:
     return min(db_start, fallback_start)
 
 
+def _format_check_time(value: str | None) -> str:
+    if not value:
+        return "시각 정보 없음"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _render_matching_collection_check_content(
+    selected_dates: list[str],
+    selected_categories: list[str],
+) -> None:
+    try:
+        check = collection_check_store.latest_matching_check(
+            selected_dates=selected_dates,
+            categories=selected_categories,
+        )
+    except collection_check_store.CollectionCheckStoreError:
+        st.caption("수집 확인 이력을 읽지 못했습니다. 기존 문서는 계속 사용할 수 있습니다.")
+        return
+    if check is None:
+        st.caption(
+            "이 날짜·카테고리는 아직 수집 확인 기록이 없습니다. "
+            "저장된 문서가 있어도 추가 발행분 확인이 끝났다는 뜻은 아닙니다."
+        )
+        return
+
+    state = check.get("state")
+    if state == "running":
+        job_status = data_update_jobs.read_status()
+        same_job = (
+            job_status is not None
+            and job_status.get("job_id") == check.get("check_id")
+        )
+        if same_job and job_status.get("collection_check_warning"):
+            state = "unrecorded"
+        elif not same_job or not data_update_jobs.is_update_job_active(job_status):
+            state = "interrupted"
+    state_label = {
+        "running": "확인 중",
+        "interrupted": "확인 중단됨",
+        "unrecorded": "이력 저장 실패 · 작업 상태 확인 필요",
+        "completed": "확인 완료",
+        "empty": "확인 완료 · 조회된 자료 없음",
+        "partial": "일부 자료 확인 실패",
+        "failed": "목록 확인 실패",
+    }.get(state, "상태 확인 필요")
+    time_label = _format_check_time(check.get("completed_at") or check.get("attempted_at"))
+    details = []
+    if state in {"completed", "partial"}:
+        details.append(f"확인된 기존/신규 자료 {int(check.get('processed_count') or 0)}건")
+    if int(check.get("failed_count") or 0):
+        details.append(f"다운로드 실패 {int(check.get('failed_count') or 0)}건")
+    detail_text = f" · {' · '.join(details)}" if details else ""
+    st.caption(f"마지막 수집 확인: {time_label} · {state_label}{detail_text}")
+
+
+@st.fragment(run_every=2.0)
+def _render_matching_collection_check(
+    selected_dates: list[str],
+    selected_categories: list[str],
+) -> None:
+    _render_matching_collection_check_content(selected_dates, selected_categories)
+
+
 def render_data_update_controls(db_status: dict) -> None:
     status = data_update_jobs.read_status()
     job_active = data_update_jobs.is_update_job_active(status)
     today = date.today()
     latest_range = data_update_jobs.build_update_range(last_date=db_status.get("max_report_date"), today=today)
-    date_type_counts = {
-        str(day).strip()[:10]: {
-            str(report_type): int(count)
-            for report_type, count in (counts or {}).items()
-        }
-        for day, counts in (db_status.get("report_date_type_counts") or {}).items()
-    }
-
     st.subheader("데이터 업데이트")
     if st.session_state.pop("show_data_update_hint", False):
         st.info("아래에서 기간과 카테고리를 선택한 뒤 데이터 업데이트를 실행하세요.")
@@ -372,7 +435,7 @@ def render_data_update_controls(db_status: dict) -> None:
             "economy": "경제(economy)",
         }.get(value, value),
         key="update_categories",
-        help="선택한 카테고리 중 하나라도 비어 있는 날짜를 업데이트 대상으로 포함합니다.",
+        help="선택한 카테고리를 외부 자료 목록에서 다시 확인합니다.",
     )
     default_start, default_end = _default_update_range(db_status)
     min_update_date = _update_min_date(db_status)
@@ -382,7 +445,7 @@ def render_data_update_controls(db_status: dict) -> None:
         min_value=min_update_date,
         max_value=today,
         key="update_date_range",
-        help="선택 기간 중 선택 카테고리가 모두 임베딩 완료된 평일은 다운로드부터 제외됩니다.",
+        help="기존 문서가 있는 날짜도 다시 확인해 이후 추가된 자료를 찾습니다.",
     )
 
     if isinstance(selected_range, tuple) and len(selected_range) == 2:
@@ -391,24 +454,23 @@ def render_data_update_controls(db_status: dict) -> None:
             target_dates = []
             st.caption("업데이트할 카테고리를 하나 이상 선택해 주세요.")
         else:
-            target_dates = data_update_jobs.missing_update_dates_by_category(
-                range_start,
-                range_end,
-                date_type_counts,
-                selected_categories,
-                today=today,
-            )
-            skipped_count = len(
-                data_update_jobs.iter_weekdays(range_start, min(range_end, today))
-            ) - len(target_dates)
+            target_dates = [
+                day.isoformat()
+                for day in data_update_jobs.iter_weekdays(
+                    range_start,
+                    min(range_end, today),
+                    today=today,
+                )
+            ]
             category_label = ", ".join(selected_categories)
             st.caption(
-                f"작업 대상: {category_label} 미완료 평일 {len(target_dates)}일"
-                + (f" · 선택 카테고리 임베딩 완료 {skipped_count}일 제외" if skipped_count > 0 else "")
+                f"수집 재확인 대상: {category_label} · 평일 {len(target_dates)}일 · "
+                "기존 자료가 있는 날짜 포함"
             )
+            _render_matching_collection_check(target_dates, selected_categories)
         if selected_categories and target_dates:
             if st.button(
-                "선택 기간 업데이트",
+                "선택 기간 다시 확인",
                 key="update_selected_range",
                 disabled=job_active,
                 width="stretch",
@@ -417,14 +479,14 @@ def render_data_update_controls(db_status: dict) -> None:
                     data_update_jobs.start_update_job(
                         selected_dates=target_dates,
                         categories=selected_categories,
-                        label=f"선택 기간 {len(target_dates)}일 ({', '.join(selected_categories)})",
+                        label=f"선택 기간 재확인 {len(target_dates)}일 ({', '.join(selected_categories)})",
                     )
                 except data_update_jobs.DataUpdateJobAlreadyRunning:
                     st.warning("다른 데이터 업데이트 작업이 이미 실행 중입니다.")
                 else:
                     st.rerun()
         elif selected_categories:
-            st.caption("선택 기간 내 업데이트할 임베딩 미완료 평일이 없습니다.")
+            st.caption("선택 기간에 확인할 평일이 없습니다.")
     else:
         st.caption("업데이트할 시작일과 종료일을 선택해 주세요.")
 
@@ -433,6 +495,75 @@ def render_data_update_controls(db_status: dict) -> None:
         st.caption(f"최신 누락 범위\n\n`{start_date}` ~ `{end_date}`")
 
     render_update_progress()
+
+
+def _native_retry_ready(status: dict) -> bool:
+    retrieval_status = status.get("retrieval") or {}
+    return (
+        retrieval_status.get("mode") == "native"
+        and int(retrieval_status.get("write_epoch") or 0) > 0
+        and bool(retrieval_status.get("active_snapshot_id"))
+        and (
+            bool(retrieval_status.get("write_enabled"))
+            or bool(retrieval_status.get("degraded"))
+        )
+    )
+
+
+def render_data_recovery_controls(status: dict) -> None:
+    """Expose compact failed/unprepared document recovery to ordinary users."""
+    db_status = status.get("db") or {}
+    pending_count = int(db_status.get("pending_reports") or 0)
+    data_root = (status.get("paths") or {}).get("data_root")
+    reports: list[dict] = []
+    list_failed = False
+    if pending_count and data_root:
+        try:
+            reports = status_module.list_unembedded_reports(data_root, limit=5)
+        except (OSError, sqlite3.Error, ValueError):
+            list_failed = True
+
+    with st.expander(f"검색에 반영되지 않은 자료 · {pending_count}건"):
+        if pending_count == 0:
+            st.caption("현재 다시 처리할 자료가 없습니다.")
+            return
+
+        st.caption(
+            "다운로드됐지만 본문 준비에 실패했거나 검색에 아직 반영되지 않은 자료입니다. "
+            "전체 재처리는 정상 자료를 유지한 채 이 자료들을 다시 확인합니다."
+        )
+        for report in reports:
+            title = str(report.get("title") or report.get("file_name") or "제목 없음")
+            report_date = str(report.get("report_date") or "날짜 미상")
+            broker = str(report.get("broker") or "발행처 미상")
+            st.caption(f"• {report_date} · {broker} · {title}")
+        if pending_count > len(reports) and reports:
+            st.caption(f"외 {pending_count - len(reports)}건")
+        if list_failed:
+            st.caption("자료 목록을 읽지 못했지만 전체 재처리는 시도할 수 있습니다.")
+
+        current_status = data_update_jobs.read_status()
+        job_active = data_update_jobs.is_update_job_active(current_status)
+        retry_ready = _native_retry_ready(status)
+        if job_active:
+            st.caption("다른 데이터 작업이 진행 중입니다.")
+        elif not retry_ready:
+            st.caption("현재 데이터 저장소를 복구한 뒤 다시 처리할 수 있습니다.")
+        if st.button(
+            "반영되지 않은 자료 전체 다시 처리",
+            key="retry_unprepared_reports_sidebar",
+            disabled=job_active or not retry_ready,
+            width="stretch",
+        ):
+            try:
+                data_update_jobs.start_embedding_job(
+                    label="반영되지 않은 자료 다시 처리",
+                    retry_extraction_failures=True,
+                )
+            except data_update_jobs.DataUpdateJobAlreadyRunning:
+                st.warning("다른 데이터 작업이 이미 실행 중입니다.")
+            else:
+                st.rerun(scope="app")
 
 
 def render_unembedded_reports(status: dict) -> None:
@@ -473,16 +604,7 @@ def render_unembedded_reports(status: dict) -> None:
         reports = []
         list_error = f"{type(exc).__name__}: {exc}"
     rows = status_module.build_unembedded_report_rows(reports)
-    retrieval_status = status.get("retrieval") or {}
-    native_retry_ready = (
-        retrieval_status.get("mode") == "native"
-        and int(retrieval_status.get("write_epoch") or 0) > 0
-        and bool(retrieval_status.get("active_snapshot_id"))
-        and (
-            bool(retrieval_status.get("write_enabled"))
-            or bool(retrieval_status.get("degraded"))
-        )
-    )
+    native_retry_ready = _native_retry_ready(status)
     if rows:
         st.dataframe(rows, width="stretch", hide_index=True)
     elif list_error:

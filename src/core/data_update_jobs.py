@@ -22,6 +22,7 @@ from typing import Any, Callable
 from src.configs import config
 from src.configs.settings import BASE_DIR
 from src.core.artifact_io import atomic_write_json
+from src.core import collection_check_store
 from src.retrieval.update_lock import RetrievalUpdateLock, RetrievalUpdateLockError
 
 JOB_DIR = BASE_DIR / "logs" / "data_update_jobs"
@@ -750,6 +751,18 @@ def crawler_download_summary(output: str) -> tuple[int, int]:
     return int(processed), int(failed)
 
 
+def _required_crawler_download_summary(output: str) -> tuple[int, int]:
+    """Return crawler totals only when its stable completion marker is present."""
+
+    if not re.search(
+        r"^Naver research download complete: processed=\d+ failed=\d+\s*$",
+        output,
+        flags=re.MULTILINE,
+    ):
+        raise RuntimeError("crawler completion summary missing")
+    return crawler_download_summary(output)
+
+
 def run_update_job(
     *,
     start_date: str | None,
@@ -761,10 +774,48 @@ def run_update_job(
     job_id: str | None = None,
 ) -> int:
     """Run crawler then embedding pipeline, updating status as each phase completes."""
-    write_status = lambda status: _write_job_status(status, job_id=job_id)
     download_processed_count = 0
     download_failure_count = 0
     extraction_failure_count = 0
+    completed_range_count = 0
+    collection_check_id: str | None = None
+    collection_check_warning: str | None = None
+
+    def write_status(status: dict[str, Any]) -> bool:
+        if collection_check_warning:
+            status = {**status, "collection_check_warning": collection_check_warning}
+        return _write_job_status(status, job_id=job_id)
+
+    def warn_collection_check(exc: Exception) -> None:
+        nonlocal collection_check_warning
+        collection_check_warning = (
+            "수집 확인 이력을 저장하지 못했습니다. "
+            "자료 수집·검색 반영 결과는 작업 상태에서 확인해 주세요."
+        )
+        print(f"Collection check history unavailable: {type(exc).__name__}: {exc}")
+
+    def finish_collection_check(state: str, *, error: str | None = None) -> None:
+        nonlocal collection_check_id
+        if collection_check_id is None:
+            return
+        try:
+            record = collection_check_store.finish_check(
+                collection_check_id,
+                state=state,
+                completed_range_count=completed_range_count,
+                processed_count=download_processed_count,
+                failed_count=download_failure_count,
+                error=error,
+            )
+            if record is None:
+                raise collection_check_store.CollectionCheckStoreError("collection check record is missing")
+        except (OSError, collection_check_store.CollectionCheckStoreError) as exc:
+            warn_collection_check(exc)
+        finally:
+            # Collection is finished even if its history could not be recorded.
+            # A later embedding error must not rewrite it as a collection failure.
+            collection_check_id = None
+
     try:
         guard_before_retrieval_write(
             config.DATA_ROOT,
@@ -785,6 +836,25 @@ def run_update_job(
 
         if not date_ranges:
             raise ValueError("No update date range was provided")
+
+        check_id = job_id or uuid.uuid4().hex
+        collection_check_dates = normalized_dates or [
+            day.isoformat()
+            for range_start, range_end in date_ranges
+            for day in iter_weekdays(range_start, range_end)
+        ]
+        try:
+            collection_check_store.start_check(
+                check_id=check_id,
+                selected_dates=collection_check_dates,
+                date_ranges=date_ranges,
+                categories=selected_categories,
+                label=label,
+            )
+        except (OSError, collection_check_store.CollectionCheckStoreError) as exc:
+            warn_collection_check(exc)
+        else:
+            collection_check_id = check_id
 
         for index, (range_start, range_end) in enumerate(date_ranges, start=1):
             percent = 10 + int(((index - 1) / max(len(date_ranges), 1)) * 50)
@@ -812,11 +882,19 @@ def run_update_job(
                 env=crawler_env,
                 parent_pid=parent_pid,
             )
-            range_processed, range_failed = crawler_download_summary(output)
-            download_processed_count += range_processed
-            download_failure_count += range_failed
             if code != 0:
                 raise RuntimeError(f"crawler failed with exit code {code}")
+            range_processed, range_failed = _required_crawler_download_summary(output)
+            download_processed_count += range_processed
+            download_failure_count += range_failed
+            completed_range_count += 1
+
+        collection_state = (
+            "partial"
+            if download_failure_count
+            else ("completed" if download_processed_count else "empty")
+        )
+        finish_collection_check(collection_state)
 
         write_status(
             {
@@ -916,6 +994,7 @@ def run_update_job(
         )
         return 0
     except Exception as exc:
+        finish_collection_check("failed", error=type(exc).__name__)
         write_status(
             {
                 "state": "failed",

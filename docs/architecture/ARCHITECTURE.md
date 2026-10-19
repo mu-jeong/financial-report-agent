@@ -31,7 +31,9 @@ report_crawler → data/downloaded/*.pdf → embed_pipeline
   → native catalog + immutable composite reader → answer + references
 ```
 
-Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 별도 Python 프로세스로 실행합니다. 이미 완료된 날짜/카테고리 조합을 제외한 날짜 범위만 crawler에 전달합니다. 임베딩 파이프라인은 전체 source inventory를 한 번 스캔한 뒤 신규·변경 PDF만 파싱·임베딩합니다. 성공한 문서는 batch commit 직후 검색 가능하고, 마지막 compaction은 base와 batch vector를 재임베딩하지 않고 재배치합니다. 진행 상태는 `logs/data_update_jobs/status.json`에 기록되며 GUI는 fragment로 이 파일을 주기적으로 읽습니다. 저장 구조와 장애 복구 계약은 [`CONTINUOUS_UPDATES.md`](../operations/CONTINUOUS_UPDATES.md)에 정리합니다.
+Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 별도 Python 프로세스로 실행합니다. 사용자가 선택한 평일과 카테고리를 기존 문서 보유 여부와 무관하게 crawler에 전달해 추가 발간분을 다시 확인합니다. 수집 확인 이력은 `DATA_ROOT/data_update/collection_checks.json`에 최근 200개 선택 범위 단위로 보존하며, 검색 가능 문서 수와 별도로 정상 조회·빈 조회·부분 실패·확인 실패를 기록합니다. 임베딩 파이프라인은 전체 source inventory를 한 번 스캔한 뒤 신규·변경 PDF만 파싱·임베딩합니다. 성공한 문서는 batch commit 직후 검색 가능하고, 마지막 compaction은 base와 batch vector를 재임베딩하지 않고 재배치합니다. 진행 상태는 `logs/data_update_jobs/status.json`에 기록되며 GUI는 fragment로 이 파일을 주기적으로 읽습니다. 저장 구조와 장애 복구 계약은 [`CONTINUOUS_UPDATES.md`](../operations/CONTINUOUS_UPDATES.md)에 정리합니다.
+
+수집 이력 저장소는 업데이트의 성공 조건과 분리합니다. 이력 읽기·쓰기 오류나 완료 기록 누락은 `collection_check_warning`으로 작업 상태에 남기고 수집·임베딩을 계속합니다. 손상 파일은 덮어쓰지 않으며, GUI는 이력 경고와 실제 작업 결과를 함께 표시합니다. 수집이 끝난 뒤 이력 저장에 실패하더라도 이후 임베딩 실패를 수집 실패로 다시 기록하지 않습니다.
 
 ## 3. 수집 계층
 

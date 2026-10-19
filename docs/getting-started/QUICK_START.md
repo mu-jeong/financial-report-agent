@@ -21,6 +21,8 @@
 
 앱 실행 후 사이드바의 데이터 업데이트 영역에서는 업데이트할 카테고리(`company`, `industry`, `economy`)를 선택할 수 있습니다. 이미 `company` 데이터가 있는 날짜라도 `industry`를 선택하면 해당 날짜의 산업 리포트를 추가로 확인하고 임베딩할 수 있습니다. Native V2 업데이트 중에도 기존 검색은 계속 사용할 수 있고, 처리가 끝난 문서는 전체 작업 종료 전부터 순차적으로 검색에 반영됩니다.
 
+같은 날짜의 추가 발간분을 찾으려면 기간과 카테고리를 선택하고 `선택 기간 다시 확인`을 누릅니다. 기존 자료가 있는 날짜도 포함하며, 정상 파일과 변경 없는 검색 자료는 재사용합니다. 선택 범위의 마지막 확인 시각과 결과가 표시됩니다. `조회된 자료 없음`은 해당 확인에서 빈 목록을 받은 경우이고, `일부 자료 확인 실패`나 `목록 확인 실패`는 재확인이 필요한 상태입니다. 수집 확인과 검색 반영은 별개이므로, 본문 준비 실패 자료는 아래 `검색에 반영되지 않은 자료`에서 `반영되지 않은 자료 전체 다시 처리`를 누릅니다.
+
 ### 기업 리포트 종합 사용하기
 
 1. 사이드바의 `리서치 화면`에서 `기업 리포트 종합`을 선택합니다.
@@ -91,7 +93,7 @@ CRAWLER_MAX_LOOKBACK_DAYS=7
 
 처음 실행할 때는 패키지 설치, PDF 다운로드, 텍스트 추출, 임베딩 생성이 함께 진행됩니다.
 배포 템플릿은 일반 문서와 미임베딩 문서를 먼저 `pymupdf`로 추출하고 `PDF_EXTRACTION_FALLBACK_ENGINE=opendataloader`를 명시합니다. fallback을 사용하려면 Java 11+와 `java` 명령의 `PATH` 등록이 필요합니다. 새 키가 없는 기존 `.env`와 빈 값은 fallback을 비활성화합니다. Native V2에서는 active profile과 다른 fallback 설정을 incremental update에 섞지 않으며, 정책을 바꾸려면 full-corpus successor가 필요합니다.
-일부 PDF에서 primary와 fallback 파싱이 모두 실패해도 Quick Start는 실패 파일을 기록하고 다음 단계로 진행합니다. OpenDataLoader fallback이 한 PDF에서 5분 안에 반환하지 않는 경우도 같은 추출 실패로 처리합니다. 실패 PDF는 active build manifest에 `source-extraction-failed` 제외 상태로 남기고, 성공한 나머지 문서로 검증된 successor를 게시합니다. 같은 실패 파일은 일반 업데이트에서 반복 파싱하지 않으며 Monitoring Mode의 `운영 상태 → 임베딩 누락 문서`에서 `파싱 실패 문서 재시도`를 눌렀을 때만 다시 처리합니다.
+일부 PDF에서 primary와 fallback 파싱이 모두 실패해도 Quick Start는 실패 파일을 기록하고 다음 단계로 진행합니다. OpenDataLoader fallback이 한 PDF에서 5분 안에 반환하지 않는 경우도 같은 추출 실패로 처리합니다. 실패 PDF는 active build manifest에 `source-extraction-failed` 제외 상태로 남기고, 성공한 나머지 문서로 검증된 successor를 게시합니다. 같은 실패 파일은 일반 업데이트에서 반복 파싱하지 않으며, 사이드바의 `검색에 반영되지 않은 자료 → 반영되지 않은 자료 전체 다시 처리` 또는 Monitoring Mode의 `운영 상태 → 임베딩 누락 문서 → 파싱 실패 문서 재시도`로 다시 처리할 수 있습니다.
 `RUN_QUICKSTART.bat`을 다시 실행하면 이미 설치된 항목과 이미 임베딩된 리포트를 재사용하므로 처음보다는 빠르지만, 실행일 기준 데이터 수집과 임베딩 확인 단계를 다시 거칩니다. 단순히 앱만 열려면 `RUN_APP.bat`을 사용하세요.
 
 ## 7. 활성 V2 전체 재구축

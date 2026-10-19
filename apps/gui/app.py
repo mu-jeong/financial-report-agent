@@ -87,6 +87,7 @@ def _reload_loaded_application_modules() -> None:
     """
     for module_name in (
         "src.core.chat_ui_helpers",
+        "src.core.collection_check_store",
         "src.core.data_update_jobs",
         "src.core.conversation_store",
         "src.core.issue_report_store",

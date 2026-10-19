@@ -1,11 +1,13 @@
 from datetime import date
+import json
 import os
+from pathlib import Path
 import threading
 from types import SimpleNamespace
 
 import pytest
 
-from src.core import data_update_jobs, embed_pipeline
+from src.core import collection_check_store, data_update_jobs, embed_pipeline
 from src.core.data_update_jobs import (
     build_crawler_env,
     build_embedding_command,
@@ -16,6 +18,11 @@ from src.core.data_update_jobs import (
     normalize_date_list,
     process_is_alive,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_collection_check_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
 
 
 def test_build_update_range_starts_day_after_latest_date():
@@ -299,7 +306,10 @@ def test_run_update_job_native_runtime_embeds_and_compacts_with_no_new_downloads
     monkeypatch.setattr(
         data_update_jobs,
         "_run_subprocess",
-        lambda command, **_kwargs: (subprocess_commands.append(command) or 0, ""),
+        lambda command, **_kwargs: (
+            subprocess_commands.append(command) or 0,
+            "Naver research download complete: processed=0 failed=0\n",
+        ),
     )
 
     def fake_run_subprocess_stream(command, *, on_line=None, **_kwargs):
@@ -405,6 +415,297 @@ def test_run_update_job_accumulates_partial_downloads_across_ranges(monkeypatch)
     assert statuses[-1]["download_failure_count"] == 3
     embed_status = next(status for status in statuses if status.get("phase") == "embed")
     assert embed_status["download_failure_count"] == 3
+
+
+def test_selected_existing_date_recheck_records_checked_empty_scope(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: (
+            0,
+            "Naver research download complete: processed=0 failed=0\n",
+        ),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (
+            0,
+            "Native V2 update complete: deltas=0 compactions=0 failed=0\n",
+        ),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date=None,
+        end_date=None,
+        selected_dates=["2026-10-19"],
+        categories=["company", "industry"],
+        label="기존 날짜 재확인",
+    ) == 0
+
+    checks = collection_check_store.list_checks(limit=5)
+    assert len(checks) == 1
+    assert checks[0]["state"] == "empty"
+    assert checks[0]["selected_dates"] == ["2026-10-19"]
+    assert checks[0]["categories"] == ["company", "industry"]
+    assert checks[0]["processed_count"] == 0
+    assert checks[0]["failed_count"] == 0
+
+
+def test_collection_check_records_partial_download_without_false_success(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: (
+            0,
+            "Naver research download complete: processed=2 failed=1\n",
+        ),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (0, ""),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-10-19",
+        end_date="2026-10-19",
+        categories=["economy"],
+        label="일부 실패",
+    ) == 0
+
+    check = collection_check_store.list_checks(limit=1)[0]
+    assert check["state"] == "partial"
+    assert check["categories"] == ["economy"]
+    assert check["processed_count"] == 2
+    assert check["failed_count"] == 1
+
+
+def test_collection_check_records_list_failure_and_missing_summary(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: (0, "crawler stopped without completion marker\n"),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        lambda *_args, **_kwargs: pytest.fail("embedding must not run"),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-10-19",
+        end_date="2026-10-19",
+        categories=["company"],
+        label="목록 실패",
+    ) == 1
+
+    check = collection_check_store.list_checks(limit=1)[0]
+    assert check["state"] == "failed"
+    assert check["completed_range_count"] == 0
+    assert check["processed_count"] == 0
+    assert check["error"] == "RuntimeError"
+    assert "completion summary missing" in str(statuses[-1]["message"])
+
+
+@pytest.mark.parametrize("failure", [OSError("store unavailable"),
+                                     collection_check_store.CollectionCheckStoreError("unreadable")])
+def test_collection_check_start_failure_does_not_block_update(monkeypatch, failure):
+    statuses: list[dict[str, object]] = []
+    stages = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        collection_check_store,
+        "start_check",
+        lambda **_kwargs: (_ for _ in ()).throw(failure),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: (
+            stages.append("crawl") or 0, "Naver research download complete: processed=2 failed=0\n",
+        ),
+    )
+    monkeypatch.setattr(
+        data_update_jobs, "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (stages.append("embed") or 0, ""),
+    )
+    monkeypatch.setattr(
+        collection_check_store, "finish_check",
+        lambda *_args, **_kwargs: pytest.fail("no history was started"),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-10-19",
+        end_date="2026-10-19",
+        categories=["company"],
+        label="이력 저장 실패",
+    ) == 0
+
+    assert stages == ["crawl", "embed"]
+    assert statuses[-1]["state"] == "succeeded"
+    assert statuses[-1]["phase"] == "done"
+    assert statuses[-1]["partial_failure"] is False
+    assert all("이력" in status["collection_check_warning"] for status in statuses)
+
+
+@pytest.mark.parametrize("embedding_code", [0, 1])
+@pytest.mark.parametrize("missing_record", [False, True])
+def test_collection_check_finish_failure_preserves_embedding_result(
+    monkeypatch, embedding_code, missing_record,
+):
+    statuses: list[dict[str, object]] = []
+    embedded = []
+    finish_calls = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs, "_run_subprocess",
+        lambda *_args, **_kwargs: (0, "Naver research download complete: processed=2 failed=0\n"),
+    )
+
+    def finish_check(*_args, **kwargs):
+        finish_calls.append(kwargs["state"])
+        if not missing_record:
+            raise PermissionError("history is read-only")
+        return None
+
+    monkeypatch.setattr(collection_check_store, "finish_check", finish_check)
+    monkeypatch.setattr(
+        data_update_jobs, "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (embedded.append(True) or embedding_code, "provider unavailable"),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-10-19", end_date="2026-10-19", label="완료 이력 저장 실패",
+    ) == embedding_code
+
+    assert embedded == [True]
+    assert finish_calls == ["completed"]
+    assert statuses[-1]["state"] == ("succeeded" if embedding_code == 0 else "failed")
+    assert statuses[-1]["download_processed_count"] == 2
+    assert "이력" in statuses[-1]["collection_check_warning"]
+    if embedding_code:
+        assert "provider" in statuses[-1]["error"]
+        assert "history" not in statuses[-1]["error"]
+
+
+def test_collection_check_failure_does_not_hide_crawler_failure(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(data_update_jobs, "_run_subprocess", lambda *_args, **_kwargs: (1, "fatal"))
+    monkeypatch.setattr(
+        collection_check_store, "finish_check",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("history unavailable")),
+    )
+    monkeypatch.setattr(
+        data_update_jobs, "_run_subprocess_stream",
+        lambda *_args, **_kwargs: pytest.fail("crawler failure must still stop embedding"),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-10-19", end_date="2026-10-19", label="목록 실패",
+    ) == 1
+
+    assert statuses[-1]["state"] == "failed"
+    assert statuses[-1]["error"] == "crawler failed with exit code 1"
+    assert "이력" in statuses[-1]["collection_check_warning"]
+
+
+def test_corrupt_collection_check_history_is_not_overwritten(tmp_path):
+    path = collection_check_store.store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    original = b'{"schema_version": 1, "checks": ['
+    path.write_bytes(original)
+
+    with pytest.raises(collection_check_store.CollectionCheckStoreError, match="valid JSON"):
+        collection_check_store.start_check(
+            check_id="check-1",
+            selected_dates=["2026-10-19"],
+            date_ranges=[("2026-10-19", "2026-10-19")],
+            categories=["company"],
+            label="손상 이력 보호",
+            data_root=tmp_path,
+        )
+
+    assert path.read_bytes() == original
+
+
+def test_corrupt_collection_history_is_preserved_while_update_continues(monkeypatch, tmp_path):
+    statuses: list[dict[str, object]] = []
+    stages = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    path = collection_check_store.store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    original = b"not-json"
+    path.write_bytes(original)
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: (
+            stages.append("crawl") or 0, "Naver research download complete: processed=0 failed=0\n",
+        ),
+    )
+    monkeypatch.setattr(
+        data_update_jobs, "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (stages.append("embed") or 0, ""),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-10-19",
+        end_date="2026-10-19",
+        categories=["company"],
+        label="손상 이력 작업",
+    ) == 0
+
+    assert stages == ["crawl", "embed"]
+    assert statuses[-1]["state"] == "succeeded"
+    assert "이력" in statuses[-1]["collection_check_warning"]
+    assert path.read_bytes() == original
+
+
+def test_unsupported_collection_check_schema_is_not_overwritten(tmp_path):
+    path = collection_check_store.store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    original = json.dumps({"schema_version": 999, "checks": []}).encode("utf-8")
+    path.write_bytes(original)
+
+    with pytest.raises(collection_check_store.CollectionCheckStoreError, match="unsupported"):
+        collection_check_store.start_check(
+            check_id="check-1",
+            selected_dates=["2026-10-19"],
+            date_ranges=[("2026-10-19", "2026-10-19")],
+            categories=["company"],
+            label="미지원 이력 보호",
+            data_root=tmp_path,
+        )
+
+    assert path.read_bytes() == original
+
+
+def test_collection_check_read_error_is_typed_and_preserves_file(tmp_path, monkeypatch):
+    path = collection_check_store.store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    original = json.dumps({"schema_version": 1, "checks": []}).encode("utf-8")
+    path.write_bytes(original)
+    real_read_text = Path.read_text
+
+    def denied_read_text(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("access denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied_read_text)
+
+    with pytest.raises(collection_check_store.CollectionCheckStoreError, match="could not be read"):
+        collection_check_store.list_checks(tmp_path)
+
+    assert path.read_bytes() == original
 
 
 def test_run_update_job_stops_on_fatal_crawler_failure(monkeypatch):
