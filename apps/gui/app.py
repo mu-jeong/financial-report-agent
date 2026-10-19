@@ -96,6 +96,7 @@ def _reload_loaded_application_modules() -> None:
         "src.core.metadata_filters",
         "src.core.status",
         "src.utils.citations",
+        "src.core.report_export",
     ):
         if module := sys.modules.get(module_name):
             importlib.reload(module)
@@ -107,6 +108,7 @@ _reload_loaded_application_modules()
 search_engine = importlib.import_module("apps.gui.search_engine")
 data_views = _import_or_reload("apps.gui.data_views")
 chat_jobs = _import_or_reload("apps.gui.chat_jobs")
+export_views = _import_or_reload("apps.gui.export_views")
 chat_views = _import_or_reload("apps.gui.chat_views")
 sidebar_views = _import_or_reload("apps.gui.sidebar_views")
 # Background synthesis state is process-persistent and must survive reruns.

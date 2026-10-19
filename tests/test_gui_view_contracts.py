@@ -135,6 +135,7 @@ EXPECTED_VIEW_OWNERS = {
 }
 
 EXPLICIT_WIDGET_KEYS = {
+    "f'markdown_export_{download_key}'",
     'f"synthesis_history_{job[\'id\']}"',
     'f"delete_synthesis_{job[\'id\']}"',
     "'_user_page_selection'",

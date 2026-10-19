@@ -13,10 +13,10 @@ from typing import Any, Mapping
 
 import streamlit as st
 
-from apps.gui import chat_views, synthesis_jobs
+from apps.gui import chat_views, export_views, synthesis_jobs
 from src.core.chat_ui_helpers import display_report_content, escape_numeric_tildes_for_markdown
 from src.configs import config as config_module
-from src.core import conversation_store, report_corpus, report_synthesis
+from src.core import conversation_store, report_corpus, report_export, report_synthesis
 from src.utils import citations
 
 
@@ -387,7 +387,7 @@ def _render_document_list(result: Mapping[str, Any], *, source_changed: bool) ->
                 status_label = status_labels.get(status, status)
                 if raw_body and document.get("synthesis_status") == "uncited":
                     status_label = "최종 분석 미반영"
-                title = str(document.get("title") or _document_file_name(document))
+                title = str(document.get("title") or "").strip() or "제목 없음"
                 rank = rank_by_uid.get(_document_uid(document))
                 if rank is not None:
                     st.markdown(
@@ -396,10 +396,11 @@ def _render_document_list(result: Mapping[str, Any], *, source_changed: bool) ->
                     )
                 label = (
                     (f"[{rank}] " if rank is not None else "") +
-                    f"{document.get('report_date') or '-'} · {document.get('broker') or '-'} · "
-                    f"{title} · {status_label}"
+                    f"{document.get('report_date') or '-'} · "
+                    f"{document.get('broker') or '-'} · {title}"
                 )
                 with st.expander(label):
+                    st.caption(status_label)
                     reason = document.get("reason") or document.get("error")
                     if reason:
                         st.caption(f"사유: {reason}")
@@ -481,7 +482,12 @@ def _current_fingerprint(result: Mapping[str, Any]) -> str | None:
     return str(current.get("fingerprint") or "")
 
 
-def _render_result(result: Mapping[str, Any], *, current_corpus: Mapping[str, Any] | None = None) -> None:
+def _render_result(
+    result: Mapping[str, Any],
+    *,
+    current_corpus: Mapping[str, Any] | None = None,
+    recorded_at: str | None = None,
+) -> None:
     st.divider()
     st.subheader("기간 내 기업 흐름 리포트")
     st.caption(escape_numeric_tildes_for_markdown(
@@ -553,6 +559,26 @@ def _render_result(result: Mapping[str, Any], *, current_corpus: Mapping[str, An
         st.warning("현재 자료 구성을 확인할 수 없어 원문 열기와 후속 질문을 제한했습니다. 데이터 상태를 확인한 뒤 새 결과를 생성해 주세요.")
     elif source_changed:
         st.warning("종합 생성 후 대상 자료가 변경되었습니다. 정확한 원문과 후속 질문 범위를 보장하려면 새 결과를 생성해 주세요.")
+
+    if result_status in {"completed", "partial"}:
+        export_markdown = report_export.build_synthesis_markdown(
+            result,
+            body=_display_report_content(result),
+            recorded_at=recorded_at,
+            source_changed=source_changed,
+            source_unverified=source_unverified,
+        )
+        company_stem = report_export.safe_export_stem(result.get("company"), "company")
+        export_views.render_markdown_export(
+            st,
+            export_markdown,
+            file_name=(
+                f"{company_stem}-{result.get('start_date') or 'start'}-"
+                f"{result.get('end_date') or 'end'}-report.md"
+            ),
+            download_key=f"synthesis_download_{original_fingerprint or company_stem}",
+            label="리포트 복사·저장",
+        )
 
     if source_rows or result.get("documents"):
         source_label = "인용한 문서" if raw_body else "분석한 문서"
@@ -685,7 +711,10 @@ def _render_job(owner_id: str, *, current_corpus: Mapping[str, Any] | None = Non
             st.info("이 범위에는 분석 가능한 리포트가 없습니다. 준비 제외 자료가 있다면 자료 확인 요약에서 사유를 확인해 주세요.")
             result = job.get("result")
             if isinstance(result, Mapping):
-                _render_result(result, current_corpus=current_corpus)
+                kwargs = {"current_corpus": current_corpus}
+                if job.get("updated_at"):
+                    kwargs["recorded_at"] = str(job["updated_at"])
+                _render_result(result, **kwargs)
             return
         if status == "failed":
             result = job.get("result")
@@ -696,7 +725,10 @@ def _render_job(owner_id: str, *, current_corpus: Mapping[str, Any] | None = Non
             return
         result = job.get("result")
         if isinstance(result, Mapping):
-            _render_result(result, current_corpus=current_corpus)
+            kwargs = {"current_corpus": current_corpus}
+            if job.get("updated_at"):
+                kwargs["recorded_at"] = str(job["updated_at"])
+            _render_result(result, **kwargs)
         if status == "partial":
             _render_manual_retry(job, owner_id, partial=True)
 

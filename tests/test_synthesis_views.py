@@ -45,6 +45,8 @@ class _FakeStreamlit:
         self.markdown_calls = []
         self.buttons = []
         self.downloads = []
+        self.markdown_downloads = []
+        self.code_blocks = []
         self.metrics = []
         self.reruns = []
         self.forms = []
@@ -81,8 +83,15 @@ class _FakeStreamlit:
         return self.button(label, **kwargs)
 
     def download_button(self, label, **kwargs):
-        self.downloads.append((label, kwargs))
+        target = self.markdown_downloads if label == "Markdown 저장" else self.downloads
+        target.append((label, kwargs))
         return False
+
+    def code(self, body, **kwargs):
+        self.code_blocks.append((str(body), kwargs))
+
+    def html(self, _body, **_kwargs):
+        pass
 
     def expander(self, label, **kwargs):
         self.expanders.append((label, kwargs))
@@ -824,7 +833,7 @@ def test_raw_body_result_shows_preparation_and_only_result_level_evidence(monkey
 
     assert ("본문 준비", "1건") in fake_st.metrics
     assert ("근거 부록 · 인용한 문서 (1개)", {"expanded": False}) in fake_st.expanders
-    assert any("본문 준비 완료" in label for label, _ in fake_st.expanders)
+    assert any("본문 준비 완료" in message for _, message in fake_st.messages)
     assert any("본문 4,567자 · 3개 구간 준비" in message for _, message in fake_st.messages)
     assert any("리포트에 사용한 원문 근거" in message for _, message in fake_st.messages)
     rendered = "\n".join(fake_st.markdowns)
@@ -855,7 +864,9 @@ def test_appendix_shows_each_cited_document_once_with_anchor_and_pdf(monkeypatch
     views._render_result(result)
     title = result["documents"][0]["title"]
     labels = [label for label, _ in fake_st.expanders if title in label]
-    assert len(labels) == 1 and labels[0].startswith("[1] ")
+    document = result["documents"][0]
+    assert labels == [f"[1] {document['report_date']} · {document['broker']} · {title}"]
+    assert ("caption", "본문 준비 완료") in fake_st.messages
     assert not any(title in message for kind, message in fake_st.messages if kind == "write")
     anchor = views.citations.source_anchor_id(views._ANCHOR_PREFIX, 1)
     assert sum(f"id='{anchor}'" in markup for markup in fake_st.markdowns) == 1
@@ -912,8 +923,8 @@ def test_appendix_orders_citations_before_separate_other_documents(monkeypatch, 
     ]
     assert fake_st.expanders[10] == ("기타 대상 문서 (2개)", {"expanded": False})
     assert len(labels) == 13
-    assert any("6월 29일 미인용 문서" in label and "최종 분석 미반영" in label
-               for label in labels[11:])
+    assert any("6월 29일 미인용 문서" in label for label in labels[11:])
+    assert any("최종 분석 미반영" in message for _, message in fake_st.messages)
     assert any("본문 준비 실패 문서" in label for label in labels[11:])
     assert ("caption", "사유: 본문 읽기 실패") in fake_st.messages
     assert sum("<div id=" in markup for markup in fake_st.markdowns) == 10
@@ -961,7 +972,7 @@ def test_uncited_partial_documents_are_visible_and_excluded_from_followup(monkey
     result["selected_sources"] = [result["selected_sources"][0]]
     result["coverage"] = {"prepared": 2, "cited": 1, "uncited": 1}
     views._render_result(result)
-    assert any("최종 분석 미반영" in label for label, _ in fake_st.expanders)
+    assert any("최종 분석 미반영" in message for _, message in fake_st.messages)
     assert any("대상 리포트 중 1건은 최종 분석에 반영되지 않았습니다." in message
                for kind, message in fake_st.messages if kind == "caption")
     assert not any("근거 부록 · 전체 대상 리포트" in message for _, message in fake_st.messages)

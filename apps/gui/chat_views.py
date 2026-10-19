@@ -8,10 +8,10 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
-from apps.gui import chat_jobs
+from apps.gui import chat_jobs, export_views
 from apps.gui import search_engine
 from src.configs import config as config_module
-from src.core import conversation_store
+from src.core import conversation_store, report_export
 from src.core import issue_report_outbox
 from src.core import issue_report_store
 from src.core.chat_ui_helpers import (
@@ -438,10 +438,10 @@ def _render_sources(
             display_rank = source_group["display_rank"]
             rank_label = f"[{display_rank}]"
             file_name = info.get("file_name", "-")
-            title = info.get("title") or "-"
+            title = str(info.get("title") or "").strip() or "제목 없음"
             display_text = (
-                f"{rank_label} {info.get('target_name', '-')} ({info.get('report_date', '-')}) "
-                f"- {info.get('broker', '-')} - {title} - {file_name}"
+                f"{rank_label} {info.get('report_date') or '-'} · "
+                f"{info.get('broker') or '-'} · {title}"
             )
             st.markdown(
                 (
@@ -567,6 +567,14 @@ def _render_message(message: dict, *, index: int) -> None:
                 citation_contract=citation_contract,
                 used_ranks=source_filter_ranks,
                 expanded=False,
+            )
+            export_markdown = report_export.build_chat_markdown(message)
+            export_id = report_export.safe_export_stem(message.get("id"), f"message-{index + 1}")
+            export_views.render_markdown_export(
+                st,
+                export_markdown,
+                file_name=f"chat-answer-{export_id}.md",
+                download_key=f"message_{index}_download_markdown",
             )
             _render_no_result_actions(message, index=index)
         else:
