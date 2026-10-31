@@ -239,13 +239,6 @@ def _step_icon(
         "failed": set(),
     }
     if state == "succeeded":
-        if partial_failure:
-            if step == "done":
-                return "⚠️"
-            if step == "download" and download_failure_count:
-                return "⚠️"
-            if step == "embed" and embedding_failure_count:
-                return "⚠️"
         if status_phase == "no_data":
             return "✅" if step == "download" else "⏭️"
         return "✅"
@@ -291,6 +284,14 @@ def _render_update_steps(status: dict) -> None:
     )
 
 
+def _successful_update_message(status: dict) -> str:
+    """Return a success message for current and legacy completed job statuses."""
+    if not status.get("partial_failure"):
+        return status.get("message", "데이터 업데이트가 완료되었습니다.")
+    label = str(status.get("label") or "데이터 업데이트")
+    return f"{label}: 데이터 업데이트가 완료되었습니다."
+
+
 @st.fragment(run_every=2.0)
 def render_update_progress() -> None:
     status = data_update_jobs.read_status()
@@ -317,10 +318,7 @@ def render_update_progress() -> None:
             )
         _render_update_steps(status)
     elif state == "succeeded":
-        if status.get("partial_failure"):
-            st.warning(message)
-        else:
-            st.success(message)
+        st.success(_successful_update_message(status))
         _render_update_steps(status)
     elif state == "failed":
         st.error(message)
@@ -390,7 +388,7 @@ def _render_matching_collection_check_content(
         "unrecorded": "이력 저장 실패 · 작업 상태 확인 필요",
         "completed": "확인 완료",
         "empty": "확인 완료 · 조회된 자료 없음",
-        "partial": "일부 자료 확인 실패",
+        "partial": "확인 완료 · 일부 자료 제외",
         "failed": "목록 확인 실패",
     }.get(state, "상태 확인 필요")
     time_label = _format_check_time(check.get("completed_at") or check.get("attempted_at"))
@@ -398,7 +396,7 @@ def _render_matching_collection_check_content(
     if state in {"completed", "partial"}:
         details.append(f"확인된 기존/신규 자료 {int(check.get('processed_count') or 0)}건")
     if int(check.get("failed_count") or 0):
-        details.append(f"다운로드 실패 {int(check.get('failed_count') or 0)}건")
+        details.append(f"다운로드 제외 {int(check.get('failed_count') or 0)}건")
     detail_text = f" · {' · '.join(details)}" if details else ""
     st.caption(f"마지막 수집 확인: {time_label} · {state_label}{detail_text}")
 

@@ -330,7 +330,7 @@ def test_data_view_pure_helpers_preserve_current_outputs():
         "succeeded",
         partial_failure=True,
         download_failure_count=2,
-    ) == "⚠️"
+    ) == "✅"
     assert step_icon(
         "done",
         "embed",
@@ -344,7 +344,7 @@ def test_data_view_pure_helpers_preserve_current_outputs():
         "succeeded",
         partial_failure=True,
         download_failure_count=2,
-    ) == "⚠️"
+    ) == "✅"
 
 
 def test_monitoring_view_pure_helpers_preserve_current_outputs():

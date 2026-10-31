@@ -637,12 +637,7 @@ def run_embedding_job(
         if code != 0:
             raise RuntimeError(embedding_failure_message(code, output))
         extraction_failure_count = embedding_extraction_failure_count(output)
-        completion_message = (
-            f"{label}: 처리는 완료했지만 파싱 실패 문서 "
-            f"{extraction_failure_count}건이 관리 목록에 남았습니다."
-            if extraction_failure_count
-            else f"{label}: 임베딩 작업이 완료되었습니다."
-        )
+        completion_message = f"{label}: 임베딩 작업이 완료되었습니다."
 
         write_status(
             {
@@ -652,7 +647,7 @@ def run_embedding_job(
                 "message": completion_message,
                 "label": label,
                 "embedding_failure_count": extraction_failure_count,
-                "partial_failure": bool(extraction_failure_count),
+                "partial_failure": False,
                 "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
@@ -957,20 +952,8 @@ def run_update_job(
         extraction_failure_count = embedding_extraction_failure_count(output)
         if code != 0:
             raise RuntimeError(embedding_failure_message(code, output))
-        partial_failure = bool(download_failure_count or extraction_failure_count)
-        if partial_failure:
-            failure_parts = []
-            if download_failure_count:
-                failure_parts.append(f"리포트 다운로드 {download_failure_count}건")
-            if extraction_failure_count:
-                failure_parts.append(f"문서 처리 {extraction_failure_count}건")
-            completion_message = (
-                f"{label}: 업데이트가 부분 완료되었습니다. "
-                f"{' 및 '.join(failure_parts)}이 실패했으며, "
-                "정상 처리 가능한 문서는 검색에 반영했습니다. 자세한 내용은 로그를 확인하세요."
-            )
-        else:
-            completion_message = f"{label}: 데이터 업데이트가 완료되었습니다."
+        # Item-level exclusions are expected; only a failed pipeline is a job failure.
+        completion_message = f"{label}: 데이터 업데이트가 완료되었습니다."
 
         write_status(
             {
@@ -986,7 +969,7 @@ def run_update_job(
                 "download_processed_count": download_processed_count,
                 "download_failure_count": download_failure_count,
                 "embedding_failure_count": extraction_failure_count,
-                "partial_failure": partial_failure,
+                "partial_failure": False,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,

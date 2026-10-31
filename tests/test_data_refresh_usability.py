@@ -190,6 +190,63 @@ with patch.object(data_views.data_update_jobs, "read_status", return_value={stat
     assert [item.value for item in result_elements[state]] == ["자료 처리 상태"]
 
 
+def test_legacy_partial_job_is_shown_as_successful_update(tmp_path):
+    status = {
+        "state": "succeeded",
+        "phase": "done",
+        "message": (
+            "선택 기간 재확인 10일 (company, industry): 업데이트가 부분 완료되었습니다. "
+            "리포트 다운로드 28건 및 문서 처리 90건이 실패했습니다."
+        ),
+        "label": "선택 기간 재확인 10일 (company, industry)",
+        "partial_failure": True,
+        "download_failure_count": 28,
+        "embedding_failure_count": 90,
+    }
+    harness = tmp_path / "legacy_partial_update_harness.py"
+    harness.write_text(
+        f"""
+from unittest.mock import patch
+from apps.gui import data_views
+
+with patch.object(data_views.data_update_jobs, "read_status", return_value={status!r}):
+    data_views.render_update_progress()
+""",
+        encoding="utf-8",
+    )
+
+    app = AppTest.from_file(str(harness)).run(timeout=30)
+
+    assert not app.exception
+    assert not app.warning
+    assert [item.value for item in app.success] == [
+        "선택 기간 재확인 10일 (company, industry): 데이터 업데이트가 완료되었습니다."
+    ]
+    assert all("⚠️" not in item.value for item in app.markdown)
+
+
+def test_partial_collection_check_uses_neutral_exclusion_language(monkeypatch):
+    captions: list[str] = []
+    monkeypatch.setattr(
+        data_views.collection_check_store,
+        "latest_matching_check",
+        lambda **_kwargs: {
+            "state": "partial",
+            "completed_at": "2026-10-19T01:00:00+00:00",
+            "processed_count": 12,
+            "failed_count": 3,
+        },
+    )
+    monkeypatch.setattr(data_views.st, "caption", captions.append)
+
+    data_views._render_matching_collection_check_content(["2026-10-19"], ["company"])
+
+    assert len(captions) == 1
+    assert "확인 완료 · 일부 자료 제외" in captions[0]
+    assert "다운로드 제외 3건" in captions[0]
+    assert "실패" not in captions[0]
+
+
 def test_unrecorded_collection_result_is_not_shown_as_still_running(monkeypatch):
     captions = []
     monkeypatch.setattr(

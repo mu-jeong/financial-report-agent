@@ -216,7 +216,7 @@ def test_crawler_download_summary_reads_machine_readable_completion():
     assert data_update_jobs.crawler_download_summary("legacy output") == (0, 0)
 
 
-def test_embedding_job_surfaces_partial_extraction_completion(monkeypatch):
+def test_embedding_job_treats_excluded_documents_as_normal_completion(monkeypatch):
     statuses: list[dict[str, object]] = []
     monkeypatch.setattr(
         data_update_jobs,
@@ -240,8 +240,8 @@ def test_embedding_job_surfaces_partial_extraction_completion(monkeypatch):
     assert data_update_jobs.run_embedding_job(label="재처리") == 0
     assert statuses[-1]["state"] == "succeeded"
     assert statuses[-1]["embedding_failure_count"] == 2
-    assert statuses[-1]["partial_failure"] is True
-    assert "관리 목록에 남았습니다" in str(statuses[-1]["message"])
+    assert statuses[-1]["partial_failure"] is False
+    assert statuses[-1]["message"] == "재처리: 임베딩 작업이 완료되었습니다."
 
 
 def test_build_embedding_command_uses_native_full_inventory_cli():
@@ -378,11 +378,40 @@ def test_run_update_job_continues_embedding_when_all_item_downloads_fail(monkeyp
     ) == 0
     assert embedded == [True]
     assert statuses[-1]["state"] == "succeeded"
-    assert statuses[-1]["partial_failure"] is True
+    assert statuses[-1]["partial_failure"] is False
     assert statuses[-1]["download_processed_count"] == 0
     assert statuses[-1]["download_failure_count"] == 3
-    assert "리포트 다운로드 3건" in str(statuses[-1]["message"])
-    assert "다운로드 성공" not in str(statuses[-1]["message"])
+    assert statuses[-1]["message"] == "부분 업데이트: 데이터 업데이트가 완료되었습니다."
+
+
+@pytest.mark.parametrize("download_failures,extraction_failures", [(28, 90), (0, 90), (28, 0), (0, 0)])
+def test_update_item_exceptions_preserve_counts_without_failure_notice(
+    monkeypatch, download_failures, extraction_failures,
+):
+    statuses: list[dict[str, object]] = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs, "_run_subprocess",
+        lambda *_args, **_kwargs: (
+            0, f"Naver research download complete: processed=12 failed={download_failures}\n",
+        ),
+    )
+    monkeypatch.setattr(
+        data_update_jobs, "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (
+            0, f"Native V2 update complete: deltas=1 compactions=1 failed={extraction_failures}\n",
+        ),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-10-19", end_date="2026-10-19", label="선택 기간 재확인",
+    ) == 0
+    status = statuses[-1]
+    assert status["state"] == "succeeded"
+    assert status["partial_failure"] is False
+    assert status["download_failure_count"] == download_failures
+    assert status["embedding_failure_count"] == extraction_failures
+    assert status["message"] == "선택 기간 재확인: 데이터 업데이트가 완료되었습니다."
 
 
 def test_run_update_job_accumulates_partial_downloads_across_ranges(monkeypatch):
